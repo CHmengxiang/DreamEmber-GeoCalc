@@ -11,6 +11,9 @@
     // 用户真机为 default 形态（Ability 设备信息日志佐证），不可动
     "deviceTypes": [
       "default",
+      // 四十二包：追加 tablet——华为平板（MatePad 等）直装直跑；宽窄布局
+      // 随窗口宽度断点自适应（与 2in1 同一断点机制），无需额外代码
+      "tablet",
       "2in1"
     ],
     "deliveryWithInstall": true,
