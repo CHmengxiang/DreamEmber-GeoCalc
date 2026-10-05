@@ -89,6 +89,33 @@ export struct CanvasStage {
     return [vpX * this.uiScale, vpY * this.uiScale];
   }
 
+  // 四十包：位图 px ↔ vp 比例的会聚重解（KaihongOS(x86) 真机「鼠标和画布
+  // 映射有较大偏差」根因）。uiScale 原来只在 onReady 配对计算一次：窗口
+  // 尺寸变化时位图重建、onReady 重触发，但此刻 vpW 还是旧值（onAreaChange
+  // 尚未到达；首次就绪时甚至 vpW=0 走 1.0 兜底）——比例冻结在错误配对上，
+  // 触摸/鼠标 vp 坐标按错误比例换算进内核，偏差随窗口放大倍数增长。拖动
+  // 缩放是连续小步、残留误差≈末步步进比≈1（体感「拉一下就好」）；最大化
+  // 是一步大跳、偏差=放大倍数（「最大化不能解决」）。修法：onReady（位
+  // 图就绪）与 onAreaChange（vp 就绪）双侧都重解、按值去重上报——无论两
+  // 事件谁先到，后到者必然拿到新位图×新 vp 的正确配对，与平台事件顺序无
+  // 关。位图未重建（纯 vp 变化）时 uiScale=旧位图/新 vp，内核像素系与拉
+  // 伸后的位图 1:1 对应，命中映射仍自洽
+  private syncCanvasMetrics(): void {
+    const w = this.ctx.width;
+    const h = this.ctx.height;
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    const s = this.vpW > 0 ? w / this.vpW : this.uiScale;
+    if (w === this.canvasW && h === this.canvasH && s === this.uiScale) {
+      return;   // 同帧双事件去重：配对无变化不重复上报/重绘
+    }
+    this.canvasW = w;
+    this.canvasH = h;
+    this.uiScale = s;
+    this.onCanvasReady(w, h, s);
+  }
+
   // ---- PC 缩放：滚轮 + 右下角按钮 ----
 
   // 第二十二包⑤：左上 ☰↶↷ 按压回弹（与缩放钮 zoomAtCenter 同款 120ms）
@@ -387,14 +414,13 @@ export struct CanvasStage {
         .onAreaChange((_o: Area, n: Area) => {
           this.vpW = n.width as number;
           this.vpH = n.height as number;
+          // 四十包：vp 尺寸变化即重解（onReady 可能先于本事件带着旧 vp 到达）
+          this.syncCanvasMetrics();
         })
         .onReady(() => {
-          // ctx.width/height 是位图像素；vp 尺寸此时已就绪。
-          // 宿主持有同名尺寸字段（kernelRender 入参），在此上报
-          this.canvasW = this.ctx.width;
-          this.canvasH = this.ctx.height;
-          this.uiScale = this.vpW > 0 ? this.canvasW / this.vpW : 1.0;
-          this.onCanvasReady(this.canvasW, this.canvasH, this.uiScale);
+          // ctx.width/height 是位图像素；宿主持有同名尺寸字段（kernelRender
+          // 入参），随 syncCanvasMetrics 上报
+          this.syncCanvasMetrics();
         })
         .onTouch((ev: TouchEvent) => this.handleTouch(ev))
         .onAxisEvent((ev: AxisEvent) => this.onCanvasAxis(ev))
