@@ -1026,6 +1026,7 @@ export struct MathField {
       }
       .scrollable(ScrollDirection.Horizontal)
       .scrollBar(BarState.Off)
+      .edgeEffect(EdgeEffect.Spring)
       .width('100%')
       .height('100%')
       .align(Alignment.Start)

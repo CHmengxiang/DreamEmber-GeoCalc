@@ -201,6 +201,7 @@ export struct StyleBar {
           }
           .scrollable(ScrollDirection.Horizontal)
           .scrollBar(BarState.Off)
+          .edgeEffect(EdgeEffect.Spring)
           .layoutWeight(1)
           .height('100%')
         }

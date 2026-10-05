@@ -452,6 +452,7 @@ export struct TablePanel {
         .width('100%')
       }
       .scrollBar(BarState.Auto)
+      .edgeEffect(EdgeEffect.Spring)
       .layoutWeight(1)
       .align(Alignment.Top)
       .margin({ top: 4 })

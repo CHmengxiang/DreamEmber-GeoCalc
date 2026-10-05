@@ -547,6 +547,7 @@ export struct DataAnalysisPanel {
           .width('100%')
         }
         .scrollBar(BarState.Auto)
+        .edgeEffect(EdgeEffect.Spring)
         .width('100%')
         .layoutWeight(1)
         .align(Alignment.Top)

@@ -157,6 +157,7 @@ struct About {
       .layoutWeight(1)
       .align(Alignment.Top)
       .scrollBar(BarState.Off)
+      .edgeEffect(EdgeEffect.Spring)
     }
     .width('100%')
     .height('100%')

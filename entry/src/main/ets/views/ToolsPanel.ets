@@ -687,6 +687,11 @@ export struct ToolsPanel {
         .padding({ left: 8, right: 8, bottom: 8 })
       }
       .scrollBar(BarState.Off)
+      // 四十一包：AGC 上架自检（云测试 UX）指出可滑动控件滑到边界缺回弹
+      // 动效——Scroll 组件默认 EdgeEffect.None；全应用 7 处 Scroll 统一补
+      // Spring（List 默认已是 Spring，不动）。内容不满一屏时默认不生效，
+      // 与华为「边界反馈」标准一致，不引入 alwaysEnabled 的过度弹性
+      .edgeEffect(EdgeEffect.Spring)
       .layoutWeight(1)
 
       // 底部一行：当前工具的用法提示（与画布左上反馈条同源文案）
