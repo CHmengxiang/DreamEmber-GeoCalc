@@ -1083,14 +1083,15 @@ export struct CanvasView {
       }
       this.grabAskSystemKb();
     } else if (this.sysKbH > 0) {
-      // IME 正在弹：先落 IME（清焦），落定后再动画挂行——等待期键盘行
-      // 保持卸载，杜绝「行渲染在屏幕中间」的中间态
+      // IME 正在弹：先落 IME（清焦），落定（kbH 归零+页高回弹双闸）后再
+      // 动画挂行——等待期键盘行保持卸载，杜绝「行渲染在屏幕中间」的中间
+      // 态；700ms 兜底强制防个别 ROM 事件缺失卡死
       this.askKbSwitching = true;
       try {
         this.getUIContext().getFocusController().clearFocus();
       } catch (_e) {
       }
-      this.askKbSwitchTimer = setTimeout(() => this.completeAskKbSwitch(), 450);
+      this.askKbSwitchTimer = setTimeout(() => this.completeAskKbSwitch(), 700);
     }
     // sysKbH<=0：系统键盘本未弹，原地翻转即挂行，无过渡问题
   }
@@ -1116,8 +1117,8 @@ export struct CanvasView {
     }, 350);
   }
 
-  // IME 落定（kbH 归零事件或 450ms 兜底）：动画挂行——行在最终位置展开，
-  // 与反向桥收合（watchKbHeight 200ms EaseOut）对称，单段过渡
+  // IME 落定（kbH 归零 + 页高回弹双条件，或 700ms 兜底强制）：动画挂行——
+  // 行在最终位置展开，与反向桥收合（watchKbHeight 200ms EaseOut）对称
   private completeAskKbSwitch(): void {
     if (this.askKbSwitchTimer >= 0) {
       clearTimeout(this.askKbSwitchTimer);
@@ -1138,6 +1139,22 @@ export struct CanvasView {
     });
   }
 
+  // 挂行时机双闸：kbH 归零只证 IME 实高归零——部分 ROM 在隐藏动画**开始**
+  // 即报 0（四十三包首版真机复现残余的根因：页未回弹就挂行，行渲染在系统
+  // 键盘原位=屏幕中间、随页回弹再跳下）。RESIZE 就绪设备须页高也回到弹窗
+  // 打开基准（askOpenPageH=打开以来最大页高，键盘只缩不涨）才挂行；旧 ROM
+  //（OFFSET 世界页高不缩）只看 kbH
+  private tryCompleteAskKbSwitch(): void {
+    if (!this.askKbSwitching || this.sysKbH > 0) {
+      return;
+    }
+    if (this.askResizeOk && this.askOpenPageH > 0
+      && this.pageH + 8 < this.askOpenPageH) {
+      return;
+    }
+    this.completeAskKbSwitch();
+  }
+
   private cancelAskKbSwitch(): void {
     if (this.askKbSwitchTimer >= 0) {
       clearTimeout(this.askKbSwitchTimer);
@@ -1146,11 +1163,15 @@ export struct CanvasView {
     this.askKbSwitching = false;
   }
 
-  // 'ui.kbH' 归零事件：切回自带的等待期 = IME 落定，即刻挂行（先于兜底）
+  // 'ui.kbH' 归零事件：切回自带的等待期 = IME 实高落定，尝试挂行（先于
+  // 兜底；页高未回弹则等 onAskPageRecovered）
   private onAskSysKb(): void {
-    if (this.askKbSwitching && this.sysKbH <= 0) {
-      this.completeAskKbSwitch();
-    }
+    this.tryCompleteAskKbSwitch();
+  }
+
+  // 页高回弹事件（根 onAreaChange）：挂行第二条件到达
+  private onAskPageRecovered(): void {
+    this.tryCompleteAskKbSwitch();
   }
 
   // ---- 自带键盘插入协议（表格范围字段同款简化版，单字段）----
@@ -1640,8 +1661,10 @@ export struct CanvasView {
   // null=无会话）。滑动条/代数输入行逻辑在宿主，分发时直连不经此处
   private sheetKbHooks: MathKbHooks | null = null;
   private tableKbHooks: MathKbHooks | null = null;
-  // 页面总高（vp，根 onAreaChange 维护）：键盘避让实测基准
-  @State private pageH: number = 0;
+  // 页面总高（vp，根 onAreaChange 维护）：键盘避让实测基准。四十三包：
+  // @Watch 兼作 ⌨ 切回自带的第二挂行条件——kbH 归零可能是 IME 隐藏动画
+  // 开始即报 0（页未回弹），页高回到打开基准才算落定
+  @State @Watch('onAskPageRecovered') private pageH: number = 0;
   // 根在窗口坐标系的 y（原值，root onAreaChange 维护）——输入行
   // globalPosition 与它做差归一成「距页面顶」，消掉状态栏等页面外偏移
   private rootY: number = 0;
@@ -1690,8 +1713,8 @@ export struct CanvasView {
   // 四十三包：⌨ 切回自带的等待态——系统→自带与反向不同，行不能先挂
   //（旧序先挂行再清焦，行挂在仍缩着的页底=系统键盘上沿=屏幕中间，IME 落
   // 下页高回弹整卡再跳下来，真机割裂，旋转/定长线段弹窗同报）。改先清焦
-  // 落 IME，kbH 归零（450ms 兜底防个别 ROM 不报 0）再动画挂行——行在最终
-  // 位置展开，与反向桥对称的单段过渡
+  // 落 IME，kbH 归零+页高回弹双闸（700ms 兜底防个别 ROM 事件缺失）再动
+  // 画挂行——行在最终位置展开，与反向桥对称的单段过渡
   @State private askKbSwitching: boolean = false;
   private askKbSwitchTimer: number = -1;
   private syncKbSpacer(): void {
