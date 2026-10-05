@@ -1,0 +1,16 @@
+* text=auto
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.zip binary
+*.exe binary
+*.hap binary
+*.app binary
+*.p12 binary
+*.p7b binary
+*.cer binary

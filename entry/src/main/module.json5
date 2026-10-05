@@ -1,0 +1,58 @@
+{
+  "module": {
+    "name": "dreamEmberGeoCalc",
+    "type": "entry",
+    "description": "$string:module_desc",
+    "mainElement": "EntryAbility",
+    // 第二十包③：追加 2in1——PC/2in1（DevEco 鸿蒙PC虚拟机、KaihongOS x86）
+    // 上未声明 2in1 的应用进手机兼容容器，窗口恒手机比例、最大化只顶满高
+    // 度（十七包观察）；声明后跑原生桌面自由窗口，可任意缩放，≥640vp 自动
+    // 切宽屏布局（CanvasView/Index 双断点，十七包①机制）。保留 default：
+    // 用户真机为 default 形态（Ability 设备信息日志佐证），不可动
+    "deviceTypes": [
+      "default",
+      "2in1"
+    ],
+    "deliveryWithInstall": true,
+    "installationFree": false,
+    // 上架准备：应用全离线（ets 层无任何网络调用、无 Web 组件），摘除
+    // 声明而未使用的 ohos.permission.INTERNET（2026-10-05 上架轮）
+    "pages": "$profile:main_pages",
+    "abilities": [
+      {
+        "name": "EntryAbility",
+        "srcEntry": "./ets/entryability/EntryAbility.ets",
+        "description": "$string:EntryAbility_desc",
+        "icon": "$media:app_icon",
+        "label": "$string:EntryAbility_label",
+        "startWindowIcon": "$media:startIcon",
+        "startWindowBackground": "$color:start_window_background",
+        "exported": true,
+        "skills": [
+          {
+            "entities": [
+              "entity.system.home"
+            ],
+            "actions": [
+              "ohos.want.action.home"
+            ]
+          }
+        ]
+      }
+    ],
+    "extensionAbilities": [
+      {
+        "name": "EntryBackupAbility",
+        "srcEntry": "./ets/entrybackupability/EntryBackupAbility.ets",
+        "type": "backup",
+        "exported": false,
+        "metadata": [
+          {
+            "name": "ohos.extension.backup",
+            "resource": "$profile:backup_config"
+          }
+        ]
+      }
+    ]
+  }
+}

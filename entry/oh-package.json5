@@ -1,0 +1,12 @@
+{
+  "name": "dream-ember-geocalc",
+  "version": "1.0.0",
+  "description": "梦烬几何 - 原生几何与代数图形计算器（OpenHarmony）",
+  "main": "",
+  "author": "CH梦想（CH_mengxiang）",
+  "license": "GPL-3.0-or-later",
+  "dependencies": {
+    "libdreamember.so": "file:./src/main/cpp/types/dreamember"
+  }
+}
+

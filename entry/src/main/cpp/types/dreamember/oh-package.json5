@@ -1,0 +1,6 @@
+{
+  "name": "libdreamember.so",
+  "types": "./Index.d.ts",
+  "version": "0.1.0",
+  "description": "梦烬几何原生层：CAS 与数学引擎"
+}

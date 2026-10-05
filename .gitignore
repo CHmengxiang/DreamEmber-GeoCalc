@@ -1,0 +1,43 @@
+# ===== 私密/本机文件（永不入库）=====
+signing/
+上架资料/
+历史版本/
+upstream-ref/
+tmp/
+.codex/
+.appanalyzer/
+.zcodeignore
+.clangd
+local.properties
+HANDOFF.md
+MIGRATION_PLAN.md
+新建 文本文档.txt
+日志.txt
+
+# ===== 构建产物 =====
+**/build/
+**/.cxx/
+**/.preview/
+**/.hvigor/
+**/.idea/
+**/oh_modules/
+**/node_modules/
+build_host/
+build_arm64/
+build_x64/
+build_win/
+
+# ===== 根目录调试产物（2026-10 会话遗留的 dump/stream/截图）=====
+/*.json
+/*.txt
+/*.jpeg
+/*.png
+
+# ===== 二进制/打包产物 =====
+*.exe
+*.hap
+*.app
+*.har
+
+# ===== 模块内调试 dump（uitest dumpLayout 误存 src/main，三十九包清理）=====
+entry/src/main/d*.json
