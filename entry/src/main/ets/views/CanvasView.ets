@@ -288,7 +288,8 @@ export struct CanvasView {
   // 页上移一个键盘高（页高不变），垫+移=真机多出一整个键盘高（二十八包④
   // 两轮未解的根因）；二十九包起弹窗期间切 RESIZE（页高确定性收缩）→ 收缩
   // 落地后本闸门置垫高为 0，收缩到达前的过渡态才短暂垫底
-  @StorageProp('ui.kbH') private sysKbH: number = 0;
+  // 四十三包：@Watch 兼作 ⌨ 切回自带的挂行时机——kbH 归零事件=IME 落定
+  @StorageProp('ui.kbH') @Watch('onAskSysKb') private sysKbH: number = 0;
   private askOpenPageH: number = 0;              // 弹窗打开以来最大页高（键盘只缩不涨）
   @State private selectedLabel: string = '';     // 画布/代数区联动的选中对象
   @State private styleTick: number = 0;          // 轮 C：样式条属性重取节拍（每次代数区同步 +1）
@@ -710,6 +711,7 @@ export struct CanvasView {
       this.askResizeOk = false;
     }
     this.askBridgeKb = false;
+    this.cancelAskKbSwitch();   // 四十三包：防御性复位（弹窗全新开启）
     this.toolAskHint = hint;
     this.toolAskKind = this.tool;
     this.toolAskErr = '';
@@ -777,6 +779,10 @@ export struct CanvasView {
     this.toolAskKind = '';
     this.toolAskErr = '';
     this.askBridgeKb = false;   // 三十三包①：过渡桥随弹窗收摊
+    // 四十三包：切回自带的等待期关弹窗（确定/取消/scrim 外无入口）→ 撤
+    // 等待定时器；键盘形态保持 system（useSysKeyboard/opt 同对未动），
+    // IME 已随 clearFocus 落下，与弹窗关闭一致
+    this.cancelAskKbSwitch();
     // 二十九包①：恢复默认 OFFSET 避让（弹窗外其余输入位——代数区/表格/
     // 数据区系统键盘——依赖它，真机行为本就正常，勿动）
     try {
@@ -1055,36 +1061,95 @@ export struct CanvasView {
   // 自带键盘内联在卡片里（askCard），切回即随状态出现；切系统键盘需抢焦
   // + showTextInput（IME 不随 customKeyboard 解绑自动弹出）；切回时清焦
   // 让已弹的系统 IME 落下。三十三包①：切系统先保挂自带键盘行作过渡桥
-  //（卡片原位不动），IME 实高事件到达再动画收合——单段过渡
+  //（卡片原位不动），IME 实高事件到达再动画收合——单段过渡。四十三包：
+  // 切回自带补齐对称的另一半——旧序先翻转挂行再清焦，行挂在仍缩着的页
+  // 底（系统键盘上沿），IME 落下页高回弹整卡再跳下来；改先清焦落 IME，
+  // kbH 归零（450ms 兜底）再动画挂行（completeAskKbSwitch）
   private toggleToolAskKeyboard(): void {
+    if (this.askKbSwitching) {
+      // 等待挂行期间再按 ⌨ = 反悔回系统键盘：此刻键盘行未挂载、无行可桥，
+      // 撤等待后直接抢焦重弹 IME，不设过渡桥
+      this.cancelAskKbSwitch();
+      this.useSysKeyboard = true;
+      AppStorage.setOrCreate('opt.inputMethod', 0);
+      this.grabAskSystemKb();
+      return;
+    }
     this.useSysKeyboard = !this.useSysKeyboard;
     AppStorage.setOrCreate('opt.inputMethod', this.useSysKeyboard ? 0 : 1);
     if (this.useSysKeyboard) {
       if (this.askResizeOk) {
         this.askBridgeKb = true;
       }
-      const grab = (): void => {
-        try {
-          this.getUIContext().getFocusController().requestFocus('toolAskEditor');
-        } catch (_e) {
-          // 卡片重排中抢焦失败：showTextInput 前还有一跳
-        }
-      };
-      setTimeout(grab, 60);
-      setTimeout(() => {
-        try {
-          inputMethod.getController().showTextInput().catch(() => {
-            // 未聚焦等输入法异常：用户点一下输入框唤起
-          });
-        } catch (_e) {
-        }
-      }, 350);
-    } else {
-      this.askBridgeKb = false;   // 三十三包①：切回自带，内联行常驻无需桥
+      this.grabAskSystemKb();
+    } else if (this.sysKbH > 0) {
+      // IME 正在弹：先落 IME（清焦），落定后再动画挂行——等待期键盘行
+      // 保持卸载，杜绝「行渲染在屏幕中间」的中间态
+      this.askKbSwitching = true;
       try {
         this.getUIContext().getFocusController().clearFocus();
       } catch (_e) {
       }
+      this.askKbSwitchTimer = setTimeout(() => this.completeAskKbSwitch(), 450);
+    }
+    // sysKbH<=0：系统键盘本未弹，原地翻转即挂行，无过渡问题
+  }
+
+  // 抢焦 + showTextInput（切系统分支/反悔路径共用；openToolAsk 首开另有
+  // 30/150ms 双抓序列，不动）
+  private grabAskSystemKb(): void {
+    const grab = (): void => {
+      try {
+        this.getUIContext().getFocusController().requestFocus('toolAskEditor');
+      } catch (_e) {
+        // 卡片重排中抢焦失败：showTextInput 前还有一跳
+      }
+    };
+    setTimeout(grab, 60);
+    setTimeout(() => {
+      try {
+        inputMethod.getController().showTextInput().catch(() => {
+          // 未聚焦等输入法异常：用户点一下输入框唤起
+        });
+      } catch (_e) {
+      }
+    }, 350);
+  }
+
+  // IME 落定（kbH 归零事件或 450ms 兜底）：动画挂行——行在最终位置展开，
+  // 与反向桥收合（watchKbHeight 200ms EaseOut）对称，单段过渡
+  private completeAskKbSwitch(): void {
+    if (this.askKbSwitchTimer >= 0) {
+      clearTimeout(this.askKbSwitchTimer);
+      this.askKbSwitchTimer = -1;
+    }
+    if (!this.askKbSwitching) {
+      return;
+    }
+    this.askKbSwitching = false;
+    this.getUIContext().animateTo({
+      duration: 200,
+      curve: Curve.EaseOut
+    }, () => {
+      this.useSysKeyboard = false;
+      // opt 回写同步触发 onInputMethodOpt 置同值，同一动画闭包内捕获，
+      // 不产生第二段跳变
+      AppStorage.setOrCreate('opt.inputMethod', 1);
+    });
+  }
+
+  private cancelAskKbSwitch(): void {
+    if (this.askKbSwitchTimer >= 0) {
+      clearTimeout(this.askKbSwitchTimer);
+      this.askKbSwitchTimer = -1;
+    }
+    this.askKbSwitching = false;
+  }
+
+  // 'ui.kbH' 归零事件：切回自带的等待期 = IME 落定，即刻挂行（先于兜底）
+  private onAskSysKb(): void {
+    if (this.askKbSwitching && this.sysKbH <= 0) {
+      this.completeAskKbSwitch();
     }
   }
 
@@ -1622,6 +1687,13 @@ export struct CanvasView {
   // 三十三包①：⌨ 切系统键的过渡桥——自带键盘行保挂到 IME 实高事件到达
   //（页缩随动）再动画收合，卡片单段过渡，不再「掉下去再弹上来」
   @State private askBridgeKb: boolean = false;
+  // 四十三包：⌨ 切回自带的等待态——系统→自带与反向不同，行不能先挂
+  //（旧序先挂行再清焦，行挂在仍缩着的页底=系统键盘上沿=屏幕中间，IME 落
+  // 下页高回弹整卡再跳下来，真机割裂，旋转/定长线段弹窗同报）。改先清焦
+  // 落 IME，kbH 归零（450ms 兜底防个别 ROM 不报 0）再动画挂行——行在最终
+  // 位置展开，与反向桥对称的单段过渡
+  @State private askKbSwitching: boolean = false;
+  private askKbSwitchTimer: number = -1;
   private syncKbSpacer(): void {
     // 二十九包②：滑动条行内编辑字段聚焦（自带键盘浮层）→ 按键盘实高整垫。
     // 钉底输入行的实测反解不适用——目标字段在列表顶部，抽屉整体随垫高上移
