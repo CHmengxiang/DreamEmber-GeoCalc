@@ -100,6 +100,7 @@ export interface MathAtom {
   end: number;
   caretIn?: boolean;   // 光标画进占位框内（第十一包③）
   kids?: MathAtom[];   // 根号组内容子原子（第十一包⑥一体渲染）
+  idx?: MathAtom[];    // 根次子原子（四十七包④ NthRoot：下标小字置于钩形缺口）
 }
 
 const DIGITS: string = '0123456789';
@@ -131,6 +132,12 @@ function isGreekCh(c: string): boolean {
   }
   const u = c.charCodeAt(0);
   return u >= 0x0370 && u <= 0x03FF;
+}
+
+// ^/_ 脚本内容的可续写字符（四十七包③：字母数字 + 希腊——π/α 等键入后
+// 必须并进脚本 run 渲染成角标，旧版只认 ASCII 致 e^π 渲染成 e□π）
+function isScriptCh(c: string): boolean {
+  return isAlnumCh(c) || isGreekCh(c);
 }
 
 // 括号匹配：open 为 '(' 的下标，返回配对 ')' 下标；无配对返回 -1
@@ -196,7 +203,7 @@ export function parseMathAtoms(raw: string): MathAtom[] {
         }
       }
       let j = i + 1;
-      while (j < raw.length && isAlnumCh(raw.charAt(j))) {
+      while (j < raw.length && isScriptCh(raw.charAt(j))) {
         j++;
       }
       if (j > i + 1) {
@@ -241,7 +248,7 @@ export function parseMathAtoms(raw: string): MathAtom[] {
         }
       }
       let j = i + 1;
-      while (j < raw.length && isAlnumCh(raw.charAt(j))) {
+      while (j < raw.length && isScriptCh(raw.charAt(j))) {
         j++;
       }
       if (j > i + 1) {
@@ -294,6 +301,53 @@ export function parseMathAtoms(raw: string): MathAtom[] {
       }
     }
 
+    // ---------- NthRoot( → 带根次根号（四十七包④） ----------
+    // NthRoot(根次, 被开方数)：根次作下标小字渲染进钩形缺口（idx 子原子
+    // 组），被开方数同 sqrt 作 kids；函数名/左括号吞进根次首原子，右括号
+    // 由根号原子吞（区间 [i, m+1)）。无顶层逗号（单参数 NthRoot(x)）不视
+    // 为模板、走普通字符解析——键盘 ⁿ√□ 键插 NthRoot(,) 保证双参形态
+    if (raw.startsWith('NthRoot(', i)
+      && (i === 0 || !isAlnumCh(raw.charAt(i - 1)))) {
+      const m = matchParen(raw, i + 7);
+      if (m > 0) {
+        let comma = -1;
+        let depth = 0;
+        for (let q = i + 8; q < m; q++) {
+          const cq = raw.charAt(q);
+          if (cq === '(') {
+            depth++;
+          } else if (cq === ')') {
+            depth--;
+          } else if (cq === ',' && depth === 0) {
+            comma = q;
+            break;
+          }
+        }
+        if (comma > 0) {
+          const idxAtoms: MathAtom[] = [];
+          if (comma === i + 8) {
+            const ix: MathAtom = { ch: '□', sup: false, sub: true, over: false, dim: true, caret: false, start: i, end: comma };
+            idxAtoms.push(ix);
+          } else {
+            pushRun(idxAtoms, raw, i + 8, comma, false, true, false, false, i, comma);
+          }
+          const kids: MathAtom[] = [];
+          if (m === comma + 1) {
+            const k0: MathAtom = { ch: '□', sup: false, sub: false, over: false, dim: true, caret: false, start: comma + 1, end: m + 1 };
+            kids.push(k0);
+          } else {
+            pushRun(kids, raw, comma + 1, m, false, false, false, false, comma + 1, m);
+          }
+          const kc: MathAtom = { ch: '', sup: false, sub: false, over: false, dim: false, caret: false, start: m, end: m };
+          kids.push(kc);
+          const rad: MathAtom = { ch: '√', sup: false, sub: false, over: false, dim: false, caret: false, start: i, end: m + 1, kids: kids, idx: idxAtoms };
+          atoms.push(rad);
+          i = m + 1;
+          continue;
+        }
+      }
+    }
+
     // ---------- abs( → |·| ----------
     if (raw.startsWith('abs(', i)) {
       const m = matchParen(raw, i + 3);
@@ -312,6 +366,55 @@ export function parseMathAtoms(raw: string): MathAtom[] {
         continue;
       }
     }
+
+  // ---------- log( → 底数形式（四十七包⑤） ----------
+  // log(底数, 参数)：渲染 "log" 字样 + 下标小字底数 + 参数（非空参数带
+  // 括号——左括号为零宽区间装饰原子、右括号吞实字符；空参数渲染单个占位
+  // 框吞 "(" ")"）。逗号作零宽隐字符原子（ch='' 不渲染，仅保区间连续）。
+  // 单参数 log(x) 无顶层逗号 → 不视为底数形式、走普通字符解析（键盘
+  // log□ 键插 log(,) 即底数形态）
+  if (raw.startsWith('log(', i)
+    && (i === 0 || !isAlphaCh(raw.charAt(i - 1)))) {
+    const m = matchParen(raw, i + 3);
+    if (m > 0) {
+      let comma = -1;
+      let depth = 0;
+      for (let q = i + 4; q < m; q++) {
+        const cq = raw.charAt(q);
+        if (cq === '(') {
+          depth++;
+        } else if (cq === ')') {
+          depth--;
+        } else if (cq === ',' && depth === 0) {
+          comma = q;
+          break;
+        }
+      }
+      if (comma > 0) {
+        pushRun(atoms, raw, i, i + 3, false, false, false, false, i, i + 3);
+        if (comma === i + 4) {
+          const lb: MathAtom = { ch: '□', sup: false, sub: true, over: false, dim: true, caret: false, start: i + 3, end: comma };
+          atoms.push(lb);
+        } else {
+          pushRun(atoms, raw, i + 4, comma, false, true, false, false, i + 3, comma);
+        }
+        const lc: MathAtom = { ch: '', sup: false, sub: false, over: false, dim: false, caret: false, start: comma, end: comma + 1 };
+        atoms.push(lc);
+        if (m === comma + 1) {
+          const la: MathAtom = { ch: '□', sup: false, sub: false, over: false, dim: true, caret: false, start: comma + 1, end: m + 1 };
+          atoms.push(la);
+        } else {
+          const lp: MathAtom = { ch: '(', sup: false, sub: false, over: false, dim: false, caret: false, start: comma + 1, end: comma + 1 };
+          atoms.push(lp);
+          pushRun(atoms, raw, comma + 1, m, false, false, false, false, comma + 1, m);
+          const lq: MathAtom = { ch: ')', sup: false, sub: false, over: false, dim: false, caret: false, start: m, end: m + 1 };
+          atoms.push(lq);
+        }
+        i = m + 1;
+        continue;
+      }
+    }
+  }
 
     // ---------- 空参数 () → 灰色占位框 ----------
     if (c === '(' && i + 1 < raw.length && raw.charAt(i + 1) === ')') {
@@ -433,20 +536,46 @@ export function buildDisplayAtoms(raw: string, caret: number,
   }
   if (host !== undefined) {
     if (host.kids !== undefined && host.kids.length > 0 && cp > host.start) {
-      // 根号组内：光标落到内容子原子中（第十一包⑥）
-      let khost = -1;
-      for (let k = 0; k < host.kids.length; k++) {
-        if (host.kids[k].end > cp
-          || (host.kids[k].start === cp
-            && host.kids[k].end === host.kids[k].start)) {
-          khost = k;
-          break;
+      // 根号组内：光标先查根次组（NthRoot 根次，四十七包④），再落内容
+      // 子原子（第十一包⑥）。根次组尾=空占位框时直接 caretIn 画进框
+      let placed = false;
+      if (host.idx !== undefined && host.idx.length > 0
+        && cp <= host.idx[host.idx.length - 1].end) {
+        let ihost = -1;
+        for (let k = 0; k < host.idx.length; k++) {
+          if (host.idx[k].end > cp
+            || (host.idx[k].start === cp
+              && host.idx[k].end === host.idx[k].start)) {
+            ihost = k;
+            break;
+          }
         }
+        const lastIdx = host.idx[host.idx.length - 1];
+        if (ihost >= 0) {
+          host.idx.splice(ihost, 0, caretAtom);
+        } else if (lastIdx.dim && (lastIdx.sup || lastIdx.sub) && caretScript
+          && cp === lastIdx.end && cp > lastIdx.start) {
+          lastIdx.caretIn = true;
+        } else {
+          host.idx.push(caretAtom);
+        }
+        placed = true;
       }
-      if (khost >= 0) {
-        host.kids.splice(khost, 0, caretAtom);
-      } else {
-        host.kids.push(caretAtom);
+      if (!placed) {
+        let khost = -1;
+        for (let k = 0; k < host.kids.length; k++) {
+          if (host.kids[k].end > cp
+            || (host.kids[k].start === cp
+              && host.kids[k].end === host.kids[k].start)) {
+            khost = k;
+            break;
+          }
+        }
+        if (khost >= 0) {
+          host.kids.splice(khost, 0, caretAtom);
+        } else {
+          host.kids.push(caretAtom);
+        }
       }
     } else {
       atoms.splice(atoms.indexOf(host), 0, caretAtom);
@@ -509,7 +638,7 @@ export function scriptContentRange(raw: string, opPos: number): number[] {
     return m > 0 ? [opPos + 2, m] : [opPos + 2, opPos + 2];
   }
   let j = opPos + 1;
-  while (j < raw.length && isAlnumCh(raw.charAt(j))) {
+  while (j < raw.length && isScriptCh(raw.charAt(j))) {
     j++;
   }
   return [opPos + 1, j];
@@ -599,15 +728,35 @@ export function mathCaretStops(raw: string): MathCaretStop[] {
         }
         push(scriptStructureEnd(raw, op), false); // 框外结构尾
       } else {
-        push(a.start, true);
-        push(a.end, true);
-        push(a.end, false);
+        // 无 ^/_ op 的脚本 run（log( 模板底数组，四十七包⑤）：内容 = 首原子
+        // 吞 '(' 之后至末尾（逗号已拆为独立隐字符原子，run 末即内容尾），
+        // 逐字符脚本停靠 + run 尾框外停靠
+        const cs = a.start < raw.length && raw.charAt(a.start) === '('
+          ? a.start + 1 : a.start;
+        const ce = atoms[k].end > cs && raw.charAt(atoms[k].end - 1) === ','
+          ? atoms[k].end - 1 : atoms[k].end;
+        for (let p = cs; p <= ce; p++) {
+          push(p, true, ce === cs);
+        }
+        push(atoms[k].end, false);
       }
       j = k + 1;
       continue;
     }
     push(a.start, false);
     if (a.kids !== undefined) {
+      // NthRoot 根次组（四十七包④）：根次内容逐字符（脚本态停靠）——
+      // 根次首原子吞 "NthRoot("，内容自 op+8 起，末原子尾即逗号位
+      if (a.idx !== undefined && a.idx.length > 0) {
+        const op = a.start;
+        const comma = a.idx[a.idx.length - 1].end;
+        if (comma >= op + 8 && comma <= raw.length
+          && raw.charAt(comma) === ',') {
+          for (let p = op + 8; p <= comma; p++) {
+            push(p, true, comma === op + 8);
+          }
+        }
+      }
       for (let k2 = 0; k2 < a.kids.length; k2++) {
         push(a.kids[k2].start, false); // 根号内容逐原子（第十一包⑥）
       }
@@ -626,7 +775,7 @@ export function scriptStructureEnd(raw: string, opPos: number): number {
     return m > 0 ? m + 1 : opPos + 2;
   }
   let j = opPos + 1;
-  while (j < raw.length && isAlnumCh(raw.charAt(j))) {
+  while (j < raw.length && isScriptCh(raw.charAt(j))) {
     j++;
   }
   return j;
@@ -719,6 +868,9 @@ interface MathPiece {
   kids: MathPiece[]; // 根号内容子片
   kw: number;        // 根号内容总宽
   radH: number;      // 根号整体高
+  hw: number;        // 根号钩宽（四十七包④ NthRoot 带根次时加宽让位）
+  dy?: number;       // 垂直基线偏移（根次组片专属：非 undefined 时覆盖
+                     //  sup/sub 基线几何，mathDraw 按它定位）
   start: number;     // 覆盖原文区间 [start, end)（四十六包点触定位反查用；
   end: number;       //  首片吞进的语法字符并入 start——与 MathAtom 同规约）
 }
@@ -745,17 +897,41 @@ function mathLayout(ctx: CanvasRenderingContext2D, atoms: MathAtom[],
     if (a.caret) {
       const pc: MathPiece = { kind: 3, ch: '|', x: x, size: 0, sup: a.sup,
         sub: a.sub, over: false, caretIn: false, w: 0, kids: [], kw: 0, radH: 0,
-        start: a.start, end: a.end };
+        hw: 0, start: a.start, end: a.end };
       pieces.push(pc);
       continue;
     }
     if (a.kids !== undefined && a.kids.length > 0) {
-      const inner = mathLayout(ctx, a.kids, x + hookW + 2, baseY, charS,
+      // 根次组（四十七包④ NthRoot）：先按脚本字号排根次，钩宽让位
+      //（hookW + 根次宽 + 4），根次片右缘贴上升笔画内侧 1.5、基线取
+      // 顶 + 0.62*radH（钩形缺口中部，传统 ⁿ√ 排版位），dy 盖章后并入
+      // kids（mathDraw 递归即得垂直定位；点触反查下钻 kids 亦可见）
+      let idxPieces: MathPiece[] = [];
+      let hw = hookW;
+      if (a.idx !== undefined && a.idx.length > 0) {
+        const idxLay = mathLayout(ctx, a.idx, 0, 0, scrS, scrS, boxW,
+          Math.max(4, boxWs - 2), radH, hookW, k);
+        if (idxLay.width > 0) {
+          hw = hookW + idxLay.width + 4;
+          const top = baseY - radH + 3;
+          const tipY = top + radH - 0.5;
+          const idxBase = top + radH * 0.62;
+          const upX = hw * 0.38 + (hw - 0.5 - hw * 0.38)
+            * (tipY - idxBase) / (tipY - (top + 0.5));
+          const shift = x + upX - 1.5 - idxLay.width;
+          for (let q = 0; q < idxLay.pieces.length; q++) {
+            idxLay.pieces[q].x += shift;
+            idxLay.pieces[q].dy = idxBase - baseY;
+          }
+          idxPieces = idxLay.pieces;
+        }
+      }
+      const inner = mathLayout(ctx, a.kids, x + hw + 2, baseY, charS,
         scrS, boxW, boxWs, radH, hookW, k);
       const pr: MathPiece = { kind: 2, ch: '√', x: x, size: 0, sup: false,
-        sub: false, over: false, caretIn: false, w: hookW + 4 + inner.width,
-        kids: inner.pieces, kw: inner.width, radH: radH,
-        start: a.start, end: a.end };
+        sub: false, over: false, caretIn: false, w: hw + 4 + inner.width,
+        kids: idxPieces.concat(inner.pieces), kw: inner.width, radH: radH,
+        hw: hw, start: a.start, end: a.end };
       pieces.push(pr);
       x += pr.w;
       continue;
@@ -764,7 +940,7 @@ function mathLayout(ctx: CanvasRenderingContext2D, atoms: MathAtom[],
       const w1 = (a.sup || a.sub) ? boxWs : boxW;
       const pb: MathPiece = { kind: 1, ch: '□', x: x, size: 0, sup: a.sup,
         sub: a.sub, over: a.over, caretIn: a.caretIn === true, w: w1,
-        kids: [], kw: 0, radH: 0, start: a.start, end: a.end };
+        kids: [], kw: 0, radH: 0, hw: 0, start: a.start, end: a.end };
       pieces.push(pb);
       x += w1;
       continue;
@@ -778,7 +954,7 @@ function mathLayout(ctx: CanvasRenderingContext2D, atoms: MathAtom[],
     const w2 = ctx.measureText(a.ch).width;
     const ps: MathPiece = { kind: 0, ch: a.ch, x: x, size: size, sup: a.sup,
       sub: a.sub, over: a.over, caretIn: false, w: w2, kids: [], kw: 0, radH: 0,
-      start: a.start, end: a.end };
+      hw: 0, start: a.start, end: a.end };
     pieces.push(ps);
     x += w2;
   }
@@ -793,7 +969,8 @@ function mathDraw(ctx: CanvasRenderingContext2D, pieces: MathPiece[],
   for (let j = 0; j < pieces.length; j++) {
     const p = pieces[j];
     if (p.kind === 0) {
-      const by = baseY + (p.sup ? -3 : p.sub ? 2 : 0);
+      const by = p.dy !== undefined ? baseY + p.dy
+        : baseY + (p.sup ? -3 : p.sub ? 2 : 0);
       ctx.font = 'normal normal ' + Math.round(p.size * k).toString() + 'px sans-serif';
       ctx.fillStyle = charColor;
       ctx.textBaseline = 'alphabetic';
@@ -807,10 +984,13 @@ function mathDraw(ctx: CanvasRenderingContext2D, pieces: MathPiece[],
         ctx.stroke();
       }
     } else if (p.kind === 1) {
-      // 占位虚线框（基线相对几何与旧 Text 版一致）
+      // 占位虚线框（基线相对几何与旧 Text 版一致；dy=根次组框随其基线）
       let top = baseY - 6;
       let h = 9;
-      if (p.sup) {
+      if (p.dy !== undefined) {
+        top = baseY + p.dy - 5;
+        h = 8;
+      } else if (p.sup) {
         top = baseY - 8;
         h = 8;
       } else if (p.sub) {
@@ -849,7 +1029,8 @@ function mathDraw(ctx: CanvasRenderingContext2D, pieces: MathPiece[],
         ctx.stroke();
       }
     } else if (p.kind === 2) {
-      // 根号：钩形+顶线一条连续折线一次 stroke（第十二包①一体渲染核心）
+      // 根号：钩形+顶线一条连续折线一次 stroke（第十二包①一体渲染核心；
+      // 钩宽用片内 hw——NthRoot 带根次时已加宽让位，四十七包④）
       const top = baseY - p.radH + 3;
       ctx.strokeStyle = charColor;
       ctx.lineWidth = 1.5;
@@ -857,16 +1038,19 @@ function mathDraw(ctx: CanvasRenderingContext2D, pieces: MathPiece[],
       ctx.lineJoin = 'round';
       ctx.beginPath();
       ctx.moveTo(p.x + 0.5, top + p.radH * 0.55);
-      ctx.lineTo(p.x + hookW * 0.38, top + p.radH - 0.5);
-      ctx.lineTo(p.x + hookW - 0.5, top + 0.5);
-      ctx.lineTo(p.x + hookW + 2 + p.kw, top + 0.5);
+      ctx.lineTo(p.x + p.hw * 0.38, top + p.radH - 0.5);
+      ctx.lineTo(p.x + p.hw - 0.5, top + 0.5);
+      ctx.lineTo(p.x + p.hw + 2 + p.kw, top + 0.5);
       ctx.stroke();
       mathDraw(ctx, p.kids, baseY, charColor, dimColor, caretColor,
         showCaret, hookW, k);
     } else if (p.kind === 3 && showCaret) {
       let y0 = baseY - 11;
       let y1 = baseY + 2;
-      if (p.sup) {
+      if (p.dy !== undefined) {
+        y0 = baseY + p.dy - 6;
+        y1 = baseY + p.dy + 1;
+      } else if (p.sup) {
         y0 = baseY - 8;
         y1 = baseY - 1;
       } else if (p.sub) {
@@ -883,27 +1067,47 @@ function mathDraw(ctx: CanvasRenderingContext2D, pieces: MathPiece[],
   }
 }
 
-// ---- 四十六包：点触定位光标（排版反查）----
-// 把点按位置的视觉 x 反查成最近的 mathCaretStops 停靠点。映射规则：
-// 框内站（script=true）查 sup/sub 脚本片——pos 所属 run（start≤pos≤end）
-// 内首个 end>pos 的片左缘，run 尾则取末片右缘；框外站查基线片——首个
-// end>pos 的非脚本片左缘（被吞语法字符区间并入首片，故 op/内容起点共
-// 用同一视觉位），根号组 pos 落在其区间内时下钻 kids。两端超界自然由
-// 「最近距离」钳到首/末停靠点。
-function scriptStopX(pieces: MathPiece[], pos: number): number {
-  let lastRight = -1;
-  let found = -1;
+// ---- 四十六包：点触定位光标（排版反查）；四十七包①②修正 ----
+// 框内站（script=true）→ 脚本片的覆盖区间 [x0, x1]（四十七包①：点距改
+// 区间距——片内点按距离 0，稳压同 x 并列的框外站，不再单靠 y 仲裁）；
+// run 尾站取末片右缘（空 run 取末片整段——空框 caretIn 光标画在框心）；
+// pos 落根号组区间内时下钻 kids（NthRoot 根次片在其中，四十七包④）。
+// 框外站查首个 end>pos 的片左缘（被吞语法字符区间并入首片，故 op/内容
+// 起点共用同一视觉位）；根号内容尾/空参数框取内容区右缘 = 末个有宽子片
+// 右缘（四十七包②：旧版误用根号整体右缘 p.x+p.w，内容尾与「根号外」
+// 停靠点同 x、点按内外颠倒）。两端超界自然由「最近距离」钳到首/末停靠点
+function scriptStopSpan(pieces: MathPiece[], pos: number,
+  empty: boolean): number[] {
+  let lastL = -1;
+  let lastR = -1;
+  let s0 = -1;
+  let s1 = -1;
   for (let j = 0; j < pieces.length; j++) {
     const p = pieces[j];
+    if (p.kind === 2 && pos > p.start && pos <= p.end) {
+      const inner = scriptStopSpan(p.kids, pos, empty);
+      if (inner[0] >= 0) {
+        return inner;
+      }
+      continue;
+    }
     if (!(p.sup || p.sub) || p.start > pos || pos > p.end) {
       continue;
     }
-    lastRight = p.x + p.w;
-    if (p.end > pos && found < 0) {
-      found = p.x;
+    lastL = p.x;
+    lastR = p.x + p.w;
+    if (p.end > pos && s0 < 0) {
+      s0 = p.x;
+      s1 = p.x + p.w;
     }
   }
-  return found >= 0 ? found : lastRight;
+  if (s0 >= 0) {
+    return [s0, s1];
+  }
+  if (lastR >= 0) {
+    return empty ? [lastL, lastR] : [lastR, lastR];
+  }
+  return [-1, -1];
 }
 
 function baseStopXRec(pieces: MathPiece[], pos: number): number {
@@ -919,7 +1123,15 @@ function baseStopXRec(pieces: MathPiece[], pos: number): number {
       if (inner >= 0) {
         return inner;
       }
-      return p.x + p.w; // 内容尾（含空参数框）：内容区右缘
+      // 内容尾（含空参数框）：内容区右缘 = 末个有宽子片右缘（根次片排
+      // 在最前不会被误取），不是根号整体右缘（四十七包②）
+      let cr = -1;
+      for (let t = 0; t < p.kids.length; t++) {
+        if (p.kids[t].w > 0) {
+          cr = p.kids[t].x + p.kids[t].w;
+        }
+      }
+      return cr >= 0 ? cr : p.x + p.w;
     }
     return p.x;
   }
@@ -949,30 +1161,39 @@ export function mathPickCaretStop(ctx: CanvasRenderingContext2D, raw: string,
     return null;
   }
   const lay = mathLayout(ctx, parseMathAtoms(raw), 0, 22, 15, 11, 9, 8, 22, 9, k);
-  const xs: number[] = [];
+  const ds: number[] = [];
   for (let i = 0; i < stops.length; i++) {
-    const sx = stops[i].script
-      ? scriptStopX(lay.pieces, stops[i].pos)
-      : baseStopXRec(lay.pieces, stops[i].pos);
-    xs.push(sx >= 0 ? sx : lay.width);
+    if (stops[i].script) {
+      const sp = scriptStopSpan(lay.pieces, stops[i].pos,
+        stops[i].empty === true);
+      const x0 = sp[0] >= 0 ? sp[0] : lay.width;
+      const x1 = sp[1] >= 0 ? sp[1] : x0;
+      ds.push(layoutX < x0 ? x0 - layoutX : layoutX > x1 ? layoutX - x1 : 0);
+    } else {
+      const bx = baseStopXRec(lay.pieces, stops[i].pos);
+      const sx = bx >= 0 ? bx : lay.width;
+      ds.push(Math.abs(sx - layoutX));
+    }
   }
   let best = -1;
   for (let i = 0; i < stops.length; i++) {
-    if (best < 0 || Math.abs(xs[i] - layoutX) < Math.abs(xs[best] - layoutX)) {
+    if (best < 0 || ds[i] < ds[best]) {
       best = i;
     }
   }
   const ties: number[] = [];
   for (let i = 0; i < stops.length; i++) {
-    if (Math.abs(Math.abs(xs[i] - layoutX)
-      - Math.abs(xs[best] - layoutX)) < 0.5) {
+    if (Math.abs(ds[i] - ds[best]) < 0.5) {
       ties.push(i);
     }
   }
   let pick = best;
   if (ties.length > 1) {
-    const wantSup = layoutY < 15;
-    const wantSub = layoutY > 24;
+    // y 仲裁（四十七包①阈值校准：上标字形/框 canvas y≈[11,22]、下标
+    // ≈[16,27]——旧值 15/24 与下标框错位，点下标框被判「中区」偏爱框
+    // 外站，光标进不去下标）
+    const wantSup = layoutY < 16;
+    const wantSub = layoutY > 19;
     for (let t = 0; t < ties.length && pick === best; t++) {
       const st = stops[ties[t]];
       if (!st.script && !wantSup && !wantSub) {

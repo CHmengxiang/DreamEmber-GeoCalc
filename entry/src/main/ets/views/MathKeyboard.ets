@@ -38,7 +38,7 @@
 //
 // 插入语义（上游 同款）：函数/括号键自动带右括号、光标落在参数框内；
 // ）键在已有右括号前跳过不重复插入；模板键插入线性 token 由内核预解析
-// （√□→sqrt()、|□|→abs()、□̄→0.()、带分数→" /"、□²→^2、ⁿ√□→NthRoot()、
+// （√□→sqrt()、|□|→abs()、□̄→0.()、带分数→" /"、□²→^2、ⁿ√□→NthRoot(,)、
 // □_□→_（空下标模板，第九包①）、⌊⌋→Floor()、⌈⌉→Ceil()）。
 // onInsert(t, back, skip)：back=插入后光标从串尾回退字符数（-1=□_□ 智能
 // 落位哨兵）；skip=光标处已是该串时仅右移光标。深色配色跟随系统，按压
@@ -271,7 +271,7 @@ export struct MathKeyboard {
         this.t('∫□d□', 'integral', 'Integral()', 1), this.k('i'),
         this.sp('⌫', 'bs')],
       [this.t('e^□', 'epow', 'e^', 0, 1.7), this.t('10^□', 'pow10', '10^', 0, 1.7),
-        this.t('ⁿ√□', 'nthroot', 'NthRoot()', 1, 1.7),
+        this.t('ⁿ√□', 'nthroot', 'NthRoot(,)', 1, 1.7),
         this.gap(), this.t('□_□', 'an', '_', -1),
         this.sp('←', 'left'), this.sp('→', 'right'), this.sp('↵', 'enter')]
     ];

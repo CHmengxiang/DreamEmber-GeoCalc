@@ -2285,7 +2285,14 @@ export struct CanvasView {
       return true;
     }
     if (caret < s.length && s.charAt(caret) === ')') {
-      return true;
+      // 未闭合脚本组（^(.../_(...）内 → 框内；函数模板/普通分组的 ')'
+      // 不算（四十七包：旧版见 ')' 即框内，NthRoot 被开方数内、log 参数
+      // 内的光标被误标脚本态，紧邻根次/底数原子时缩成小号）
+      const open = matchParenBackward(s, caret);
+      if (open > 0 && (s.charAt(open - 1) === '^'
+        || s.charAt(open - 1) === '_')) {
+        return true;
+      }
     }
     const atoms = parseMathAtoms(s);
     let hostIdx = -1;
@@ -2297,6 +2304,10 @@ export struct CanvasView {
     }
     if (hostIdx >= 0) {
       const h = atoms[hostIdx];
+      if (h.idx !== undefined && h.idx.length > 0 && caret > h.start
+        && caret <= h.idx[h.idx.length - 1].end) {
+        return true; // NthRoot 根次组内（四十七包④）
+      }
       if (h.sup || h.sub) {
         let rs = h.start;
         for (let j = hostIdx - 1; j >= 0 && (atoms[j].sup || atoms[j].sub); j--) {
@@ -2405,8 +2416,9 @@ export struct CanvasView {
           return;
         }
       }
-      const force = t.length > 0 && (t.charAt(0) === '^' || t.charAt(0) === '_')
-        && effBack !== 1;
+      const force = (t.length > 0
+        && (t.charAt(0) === '^' || t.charAt(0) === '_') && effBack !== 1)
+        || t === 'log(,)'; // log□ 键光标落底数框内（脚本态，四十七包⑤）
       const caret = Math.max(a, insAt + insText.length - effBack);
       this.applyInsert(s, insAt, insAt, insText, caret, force);
       return;
