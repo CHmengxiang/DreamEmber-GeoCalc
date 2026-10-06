@@ -131,6 +131,8 @@
 import dreamemberKernel from 'libdreamember.so';
 import { inputMethod } from '@kit.IMEKit';
 import { fileIo as fs, picker } from '@kit.CoreFileKit';
+import { hilog } from '@kit.PerformanceAnalysisKit';
+import { componentUtils } from '@kit.ArkUI';
 import { AlgebraEntry, parseAlgebra } from '../model/GeoTypes';
 import { Theme } from '../model/Theme';
 import { AlgebraPanel } from './AlgebraPanel';
@@ -1064,7 +1066,7 @@ export struct CanvasView {
   //（卡片原位不动），IME 实高事件到达再动画收合——单段过渡。四十三包：
   // 切回自带补齐对称的另一半——旧序先翻转挂行再清焦，行挂在仍缩着的页
   // 底（系统键盘上沿），IME 落下页高回弹整卡再跳下来；改先清焦落 IME，
-  // kbH 归零（450ms 兜底）再动画挂行（completeAskKbSwitch）
+  // v3 轮询闸（实测页高回弹 + 350ms 兜底）再动画挂行（completeAskKbSwitch）
   private toggleToolAskKeyboard(): void {
     if (this.askKbSwitching) {
       // 等待挂行期间再按 ⌨ = 反悔回系统键盘：此刻键盘行未挂载、无行可桥，
@@ -1083,15 +1085,25 @@ export struct CanvasView {
       }
       this.grabAskSystemKb();
     } else if (this.sysKbH > 0) {
-      // IME 正在弹：先落 IME（清焦），落定（kbH 归零+页高回弹双闸）后再
-      // 动画挂行——等待期键盘行保持卸载，杜绝「行渲染在屏幕中间」的中间
-      // 态；700ms 兜底强制防个别 ROM 事件缺失卡死
+      // IME 正在弹：先落 IME（清焦），轮询等「kbH 归零 + 实测页高回弹 + 350ms
+      // 兜底」后再动画挂行——等待期键盘行保持卸载，杜绝「行渲染在屏幕中间」。
+      // 事件在本机 ROM 提前报终值不可信（v1/v2 真机两连败），33ms 轮询同步
+      // 实测为准（pollAskKbSwitch），1200/2400ms 强制窗口防卡死
       this.askKbSwitching = true;
+      this.askKbSwitchStart = Date.now();
+      this.askKbZeroAt = 0;
+      this.askKbRetried = false;
       try {
         this.getUIContext().getFocusController().clearFocus();
       } catch (_e) {
       }
-      this.askKbSwitchTimer = setTimeout(() => this.completeAskKbSwitch(), 700);
+      this.kbdbg(`switch start kbH=${Math.round(this.sysKbH)} pageH=${Math.round(this.pageH)}`
+        + ` measured=${Math.round(this.measureAskPageH())} base=${Math.round(this.askOpenPageH)}`
+        + ` resizeOk=${this.askResizeOk}`);
+      if (this.askKbPollTimer >= 0) {
+        clearInterval(this.askKbPollTimer);
+      }
+      this.askKbPollTimer = setInterval(() => this.pollAskKbSwitch(), 33);
     }
     // sysKbH<=0：系统键盘本未弹，原地翻转即挂行，无过渡问题
   }
@@ -1117,17 +1129,18 @@ export struct CanvasView {
     }, 350);
   }
 
-  // IME 落定（kbH 归零 + 页高回弹双条件，或 700ms 兜底强制）：动画挂行——
-  // 行在最终位置展开，与反向桥收合（watchKbHeight 200ms EaseOut）对称
+  // 挂行落点（轮询闸通过或强制窗口到达）：动画挂行——行在最终位置展开，
+  // 与反向桥收合（watchKbHeight 200ms EaseOut）对称
   private completeAskKbSwitch(): void {
-    if (this.askKbSwitchTimer >= 0) {
-      clearTimeout(this.askKbSwitchTimer);
-      this.askKbSwitchTimer = -1;
+    if (this.askKbPollTimer >= 0) {
+      clearInterval(this.askKbPollTimer);
+      this.askKbPollTimer = -1;
     }
     if (!this.askKbSwitching) {
       return;
     }
     this.askKbSwitching = false;
+    this.kbdbg(`mount row elapsed=${Date.now() - this.askKbSwitchStart}`);
     this.getUIContext().animateTo({
       duration: 200,
       curve: Curve.EaseOut
@@ -1139,39 +1152,93 @@ export struct CanvasView {
     });
   }
 
-  // 挂行时机双闸：kbH 归零只证 IME 实高归零——部分 ROM 在隐藏动画**开始**
-  // 即报 0（四十三包首版真机复现残余的根因：页未回弹就挂行，行渲染在系统
-  // 键盘原位=屏幕中间、随页回弹再跳下）。RESIZE 就绪设备须页高也回到弹窗
-  // 打开基准（askOpenPageH=打开以来最大页高，键盘只缩不涨）才挂行；旧 ROM
-  //（OFFSET 世界页高不缩）只看 kbH
-  private tryCompleteAskKbSwitch(): void {
-    if (!this.askKbSwitching || this.sysKbH > 0) {
+  // v3 挂行闸：33ms 轮询同步实测，不吃事件时序——本机 ROM 在隐藏动画开始
+  // 即报终值，v1 的 kbH 闸、v2 的 kbH+pageH 态双闸都被提前击穿（真机两连
+  // 败）。通过条件 = kbH 已归零 且 实测页高回到弹窗打开基准（askOpenPageH=
+  // 打开以来最大页高）且 kbH 归零后已过 350ms（时序兜底：OFFSET 世界实测
+  // 不出位移、纯时序保底）。1200ms 强制窗：IME 仍挂补一次清焦、窗口推到
+  // 2400ms，仍不动才强挂（防个别 ROM 事件/布局全缺卡死）
+  private pollAskKbSwitch(): void {
+    if (!this.askKbSwitching) {
       return;
     }
-    if (this.askResizeOk && this.askOpenPageH > 0
-      && this.pageH + 8 < this.askOpenPageH) {
+    const now = Date.now();
+    const elapsed = now - this.askKbSwitchStart;
+    if (this.sysKbH > 0) {
+      if (elapsed < 1200) {
+        return;
+      }
+      if (!this.askKbRetried) {
+        this.askKbRetried = true;
+        this.askKbSwitchStart = now - 1200;   // 强制窗口推到 2400ms
+        this.kbdbg(`force retry clearFocus elapsed=${elapsed} kbH=${Math.round(this.sysKbH)}`);
+        try {
+          this.getUIContext().getFocusController().clearFocus();
+        } catch (_e) {
+        }
+        return;
+      }
+      this.kbdbg(`force complete (ime stuck) elapsed=${elapsed} kbH=${Math.round(this.sysKbH)}`);
+      this.completeAskKbSwitch();
       return;
     }
-    this.completeAskKbSwitch();
+    if (this.askKbZeroAt === 0) {
+      this.askKbZeroAt = now;
+      this.kbdbg(`kbZero observed elapsed=${elapsed} pageH=${Math.round(this.pageH)}`
+        + ` measured=${Math.round(this.measureAskPageH())}`);
+    }
+    const kbAge = now - this.askKbZeroAt;
+    const measured = this.measureAskPageH();
+    const heightOk = this.askOpenPageH <= 0 || measured <= 0
+      || measured + 4 >= this.askOpenPageH;
+    if (heightOk && kbAge >= 350) {
+      this.kbdbg(`gate pass kbAge=${kbAge} elapsed=${elapsed} pageH=${Math.round(this.pageH)}`
+        + ` measured=${Math.round(measured)} base=${Math.round(this.askOpenPageH)}`);
+      this.completeAskKbSwitch();
+      return;
+    }
+    if (elapsed >= 2400) {
+      this.kbdbg(`force complete (never recovered) elapsed=${elapsed}`
+        + ` measured=${Math.round(measured)} base=${Math.round(this.askOpenPageH)}`);
+      this.completeAskKbSwitch();
+    }
   }
 
   private cancelAskKbSwitch(): void {
-    if (this.askKbSwitchTimer >= 0) {
-      clearTimeout(this.askKbSwitchTimer);
-      this.askKbSwitchTimer = -1;
+    if (this.askKbPollTimer >= 0) {
+      clearInterval(this.askKbPollTimer);
+      this.askKbPollTimer = -1;
+    }
+    if (this.askKbSwitching) {
+      this.kbdbg(`switch cancelled at ${Date.now() - this.askKbSwitchStart}ms`);
     }
     this.askKbSwitching = false;
   }
 
-  // 'ui.kbH' 归零事件：切回自带的等待期 = IME 实高落定，尝试挂行（先于
-  // 兜底；页高未回弹则等 onAskPageRecovered）
+  // kbH 事件（真机调试期兼 KBDBG 埋点）：挂行判定已移交 pollAskKbSwitch
   private onAskSysKb(): void {
-    this.tryCompleteAskKbSwitch();
+    this.kbdbg(`kbH event=${Math.round(this.sysKbH)}`);
   }
 
-  // 页高回弹事件（根 onAreaChange）：挂行第二条件到达
+  // 页高事件（根 onAreaChange；埋点观察本机 ROM 事件时序）
   private onAskPageRecovered(): void {
-    this.tryCompleteAskKbSwitch();
+    this.kbdbg(`pageH event=${Math.round(this.pageH)}`);
+  }
+
+  // v3 实测：geoRoot 当前页高（vp）。componentUtils 读真实布局，不受
+  // @State/onAreaChange 时序影响；失败返回 -1（调用方退时序兜底）
+  private measureAskPageH(): number {
+    try {
+      const r = componentUtils.getRectangleById('geoRoot');
+      return this.getUIContext().px2vp(r.size.height as number);
+    } catch (_e) {
+      return -1;
+    }
+  }
+
+  // KBDBG：⌨ 切键盘调试埋点（hilog tag=KBDBG，真机 hilog 过滤即得全时间线）
+  private kbdbg(msg: string): void {
+    hilog.info(0x0000, 'KBDBG', `${msg}`);
   }
 
   // ---- 自带键盘插入协议（表格范围字段同款简化版，单字段）----
@@ -1712,11 +1779,16 @@ export struct CanvasView {
   @State private askBridgeKb: boolean = false;
   // 四十三包：⌨ 切回自带的等待态——系统→自带与反向不同，行不能先挂
   //（旧序先挂行再清焦，行挂在仍缩着的页底=系统键盘上沿=屏幕中间，IME 落
-  // 下页高回弹整卡再跳下来，真机割裂，旋转/定长线段弹窗同报）。改先清焦
-  // 落 IME，kbH 归零+页高回弹双闸（700ms 兜底防个别 ROM 事件缺失）再动
-  // 画挂行——行在最终位置展开，与反向桥对称的单段过渡
+  // 下页高回弹整卡再跳下来，真机割裂，旋转/定长线段弹窗同报）。v1（kbH
+  // 闸）/v2（kbH+pageH 态双闸）真机两连败根因：本机 ROM 的相关事件在隐
+  // 藏动画**开始**即报终值，事件闸全数提前击穿。v3 改 33ms 轮询 + component
+  // Utils 同步实测 geoRoot 页高（布局真值，不吃事件时序）+ kbH 归零后
+  // 350ms 时序兜底 + 1200/2400ms 强制窗口，KBDBG 埋点全程落 hilog
   @State private askKbSwitching: boolean = false;
-  private askKbSwitchTimer: number = -1;
+  private askKbPollTimer: number = -1;      // v3 轮询（33ms）
+  private askKbSwitchStart: number = 0;     // 切换起点（ms）
+  private askKbZeroAt: number = 0;          // 轮询中首次观察到 kbH=0（ms）
+  private askKbRetried: boolean = false;    // 强制窗口补清焦标记
   private syncKbSpacer(): void {
     // 二十九包②：滑动条行内编辑字段聚焦（自带键盘浮层）→ 按键盘实高整垫。
     // 钉底输入行的实测反解不适用——目标字段在列表顶部，抽屉整体随垫高上移
