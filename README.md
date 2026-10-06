@@ -93,7 +93,3 @@ g++ -std=c++17 -D_USE_MATH_DEFINES -include cmath -include cstring -I . \
 
 - 本项目为独立开源项目，与 GeoGebra 官方（GeoGebra GmbH）无任何关联；未使用其商标、图形资源或源代码（开发过程中参考了其公开源码与交互设计）。
 - 应用全离线运行，不申请任何系统权限，不收集任何数据。
-
-## 作者
-
-**CH梦想**（CH_mengxiang） · [Gitee 主页](https://gitee.com/CH_mengxiang)
