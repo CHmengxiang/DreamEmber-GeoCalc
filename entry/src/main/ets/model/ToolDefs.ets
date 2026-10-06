@@ -22,6 +22,8 @@ export const TOOLS: ToolDef[] = [
   { id: 'angle', icon: '∡', name: '角' },
   { id: 'polygon', icon: '⬟', name: '多边形' },
   { id: 'intersect', icon: '∩', name: '交点' },
+  // 四十五包 路径依附点（附着/脱离点，上游 同名工具）
+  { id: 'attachDetach', icon: '⌒', name: '附着/脱离点' },
   { id: 'tangent', icon: '⊘', name: '切线' },
   { id: 'translate', icon: '»', name: '平移' },
   { id: 'reflect', icon: '⇋', name: '反射' },
@@ -60,7 +62,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   { name: '基础', ids: ['', 'point'] },
   { name: '线', ids: ['segment', 'line', 'ray', 'vector', 'perpLine', 'parLine', 'vecFromPoint', 'segLength'] },
   { name: '圆与多边形', ids: ['circle', 'polygon', 'circleRadius'] },
-  { name: '构造', ids: ['midpoint', 'perpBisector', 'angleBisector', 'angle', 'intersect', 'angleSize'] },
+  { name: '构造', ids: ['midpoint', 'perpBisector', 'angleBisector', 'angle', 'intersect', 'angleSize', 'attachDetach'] },
   { name: '测量', ids: ['dist', 'area', 'slope'] },
   { name: '变换', ids: ['translate', 'reflect', 'reflectPoint', 'rotate', 'dilate'] },
   { name: '特殊', ids: ['tangent', 'slider'] }
@@ -105,6 +107,9 @@ export function toolUsage(id: string): string {
   }
   if (id === 'intersect') {
     return '依次点选两个对象';
+  }
+  if (id === 'attachDetach') {
+    return '点选点再点路径即附着；依附点选中后点空白即脱离';
   }
   if (id === 'tangent') {
     return '先点选一个点，再点选圆或函数';

@@ -165,6 +165,12 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     seg(7, 25, 35, 11, 2);
     seg(14, 9, 28, 27, 2);
     dot(21, 18, 4.4);
+  } else if (id === 'attachDetach') {
+    // 四十五包 附着/脱离点：横线 + 线上落点 + 两支下指箭头（吸附到线）
+    seg(6, 25, 37, 25, 2);
+    dot(21, 25, 3.4);
+    arrow(12.5, 8.5, 16.8, 16.5);
+    arrow(29.5, 8.5, 25.2, 16.5);
   } else if (id === 'tangent') {
     // 二十八包③：重绘为「圆 + 切线」本像（原为抛物线弧+割线，不像切线）。
     // 圆下沿 y=24 与直线相切，切点圆点

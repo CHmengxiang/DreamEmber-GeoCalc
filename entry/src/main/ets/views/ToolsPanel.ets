@@ -453,6 +453,26 @@ export struct ToolsPanel {
             .borderRadius(10)
             .backgroundColor(this.tool === 'angleSize' ? Theme.keyBg(this.dark) : Color.Transparent)
             .onClick(() => this.onSetTool('angleSize'))
+            // 四十五包 附着/脱离点（上游 同名工具：自由点→路径附着，依附点→脱离）
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'attachDetach', dark: this.dark, selected: this.tool === 'attachDetach' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'attachDetach'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('附着/脱离点')
+                .fontSize(10)
+                .fontColor(this.tool === 'attachDetach' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'attachDetach' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('attachDetach'))
           }
           .width('100%')
 

@@ -74,6 +74,13 @@ public:
     bool isFree = true;
     // 依随点重算闭包（Intersect/变换像等；calc 为空时退回 Midpoint 语义）
     std::function<void(GeoPoint *)> calc;
+    // 四十五包 路径依附点（附着/脱离点工具；Point(path[, param]) 命令）。
+    // path 非空时 isFree=false、calc 由内核按路径参数化装配，位置 =
+    // PathPointAt(path, pathParam)。参数语义随路径：线段/向量 t∈[0,1]，
+    // 直线/射线=自锚点的有向距离（ℝ / [0,∞)），圆=弧度角 θ，函数=x，
+    // 多边形=边序号+t（整数部分为边序号）。path 进 inputs（级联删除/重算）。
+    GeoElement *path = nullptr;
+    double pathParam = 0;
 
     void update() override;
     std::string valueText() const override;

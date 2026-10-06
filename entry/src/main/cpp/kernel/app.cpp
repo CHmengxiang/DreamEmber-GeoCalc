@@ -172,6 +172,223 @@ bool OnObject(GeoElement *e, double x, double y)
     return true;
 }
 
+// ---- 四十五包 路径依附点：路径判定 / 参数取点 / 指针投影 ----
+
+// 可附着的路径对象：线段/向量（t∈[0,1]）、直线（ℝ）、射线（[0,∞)）、
+// 圆（θ 弧度）、函数图像（x，不等式区域不算）、多边形边（边序号+t）
+bool IsPathType(GeoElement *e)
+{
+    if (!e) return false;
+    const GeoType t = e->type();
+    if (t == GeoType::Segment || t == GeoType::Vector || t == GeoType::Line
+        || t == GeoType::Ray || t == GeoType::Circle || t == GeoType::Polygon) {
+        return true;
+    }
+    if (t == GeoType::Function) {
+        GeoFunction *f = static_cast<GeoFunction *>(e);
+        return !f->ineqOp && !f->ineqTwoVar && f->definable();
+    }
+    return false;
+}
+
+// 多边形第 i 个顶点（变换像取缓存）
+bool PolyVert(GeoPolygon *pg, size_t i, double &x, double &y)
+{
+    const size_t n = pg->image ? pg->ivx.size() : pg->verts.size();
+    if (n == 0 || i >= n) return false;
+    if (pg->image) {
+        x = pg->ivx[i];
+        y = pg->ivy[i];
+    } else {
+        x = pg->verts[i]->x;
+        y = pg->verts[i]->y;
+    }
+    return true;
+}
+
+// 路径参数 → 世界坐标。退化路径（零长线段/零半径圆/不可求值函数）返回 false
+bool PathPointAt(GeoElement *e, double param, double &x, double &y)
+{
+    if (!IsPathType(e)) return false;
+    switch (e->type()) {
+    case GeoType::Segment: {
+        GeoSegment *s = static_cast<GeoSegment *>(e);
+        double t = std::max(0.0, std::min(1.0, param));
+        x = s->ex1() + t * (s->ex2() - s->ex1());
+        y = s->ey1() + t * (s->ey2() - s->ey1());
+        return true;
+    }
+    case GeoType::Vector: {
+        GeoVector *v = static_cast<GeoVector *>(e);
+        double t = std::max(0.0, std::min(1.0, param));
+        x = v->ex1() + t * (v->ex2() - v->ex1());
+        y = v->ey1() + t * (v->ey2() - v->ey1());
+        return true;
+    }
+    case GeoType::Line: {
+        double a, b, c;
+        if (!LineCoefsOf(e, a, b, c)) return false;
+        // 单位方向 (-b,a)/|·|，锚点 = 直线上距原点最近点（参数=有向距离）
+        const double n2 = a * a + b * b;
+        x = a * c / n2 - (b / sqrt(n2)) * param;
+        y = b * c / n2 + (a / sqrt(n2)) * param;
+        return true;
+    }
+    case GeoType::Ray: {
+        GeoRay *r = static_cast<GeoRay *>(e);
+        double dx = r->p2->x - r->p1->x, dy = r->p2->y - r->p1->y;
+        double len = sqrt(dx * dx + dy * dy);
+        if (len < 1e-15) return false;
+        double t = std::max(0.0, param);
+        x = r->p1->x + (dx / len) * t;
+        y = r->p1->y + (dy / len) * t;
+        return true;
+    }
+    case GeoType::Circle: {
+        GeoCircle *c = static_cast<GeoCircle *>(e);
+        if (c->radius < 1e-15) return false;
+        x = c->ccx() + c->radius * cos(param);
+        y = c->ccy() + c->radius * sin(param);
+        return true;
+    }
+    case GeoType::Function: {
+        GeoFunction *f = static_cast<GeoFunction *>(e);
+        double yv = f->evalAt(param);
+        if (!std::isfinite(yv)) return false;
+        x = param;
+        y = yv;
+        return true;
+    }
+    case GeoType::Polygon: {
+        GeoPolygon *pg = static_cast<GeoPolygon *>(e);
+        const size_t n = pg->image ? pg->ivx.size() : pg->verts.size();
+        if (n == 0) return false;
+        long i = static_cast<long>(floor(param));
+        if (i < 0) i = 0;
+        if (i >= static_cast<long>(n)) i = static_cast<long>(n) - 1;
+        double t = param - floor(param);
+        t = std::max(0.0, std::min(1.0, t));
+        double ax, ay, bx, by;
+        if (!PolyVert(pg, static_cast<size_t>(i), ax, ay)) return false;
+        if (!PolyVert(pg, (static_cast<size_t>(i) + 1) % n, bx, by)) return false;
+        x = ax + t * (bx - ax);
+        y = ay + t * (by - ay);
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
+// 世界坐标 → 最近路径参数与落点。prev 为该点当前参数（圆 unwrap 用，
+// 传 1e18 表示无），保证拖动跨 ±π 分界时参数连续不跳变
+bool PathProject(GeoElement *e, double wx, double wy, double prev,
+                 double &param, double &x, double &y)
+{
+    if (!IsPathType(e)) return false;
+    switch (e->type()) {
+    case GeoType::Segment:
+    case GeoType::Vector: {
+        double ax, ay, bx, by;
+        if (e->type() == GeoType::Segment) {
+            GeoSegment *s = static_cast<GeoSegment *>(e);
+            ax = s->ex1(); ay = s->ey1(); bx = s->ex2(); by = s->ey2();
+        } else {
+            GeoVector *v = static_cast<GeoVector *>(e);
+            ax = v->ex1(); ay = v->ey1(); bx = v->ex2(); by = v->ey2();
+        }
+        double dx = bx - ax, dy = by - ay;
+        double len2 = dx * dx + dy * dy;
+        if (len2 < 1e-18) return false;
+        double t = ((wx - ax) * dx + (wy - ay) * dy) / len2;
+        t = std::max(0.0, std::min(1.0, t));
+        param = t;
+        x = ax + t * dx;
+        y = ay + t * dy;
+        return true;
+    }
+    case GeoType::Line: {
+        double a, b, c;
+        if (!LineCoefsOf(e, a, b, c)) return false;
+        const double n2 = a * a + b * b;
+        // 单位方向 d̂=(-b,a)/√n2，锚点（距原点最近点）A=(ac,bc)/n2；锚点在
+        // d̂ 上分量恒 0，故 param = dot(P, d̂) 即有向距离
+        param = (-b * wx + a * wy) / sqrt(n2);
+        x = a * c / n2 - (b / sqrt(n2)) * param;
+        y = b * c / n2 + (a / sqrt(n2)) * param;
+        return true;
+    }
+    case GeoType::Ray: {
+        GeoRay *r = static_cast<GeoRay *>(e);
+        double dx = r->p2->x - r->p1->x, dy = r->p2->y - r->p1->y;
+        double len2 = dx * dx + dy * dy;
+        if (len2 < 1e-18) return false;
+        double t = ((wx - r->p1->x) * dx + (wy - r->p1->y) * dy) / len2;
+        t = std::max(0.0, t);
+        param = t * sqrt(len2);   // 参数统一为有向距离
+        x = r->p1->x + t * dx;
+        y = r->p1->y + t * dy;
+        return true;
+    }
+    case GeoType::Circle: {
+        GeoCircle *c = static_cast<GeoCircle *>(e);
+        if (c->radius < 1e-15) return false;
+        double th = atan2(wy - c->ccy(), wx - c->ccx());
+        if (th < 0) th += 2.0 * M_PI;
+        if (prev < 1e17) {
+            // unwrap：取与 prev 同圈最近的等价角
+            th += 2.0 * M_PI * round((prev - th) / (2.0 * M_PI));
+        }
+        param = th;
+        x = c->ccx() + c->radius * cos(th);
+        y = c->ccy() + c->radius * sin(th);
+        return true;
+    }
+    case GeoType::Function: {
+        GeoFunction *f = static_cast<GeoFunction *>(e);
+        double yv = f->evalAt(wx);
+        if (!std::isfinite(yv)) return false;
+        param = wx;
+        x = wx;
+        y = yv;
+        return true;
+    }
+    case GeoType::Polygon: {
+        GeoPolygon *pg = static_cast<GeoPolygon *>(e);
+        const size_t n = pg->image ? pg->ivx.size() : pg->verts.size();
+        if (n == 0) return false;
+        double bestD = 1e18;
+        size_t bestI = 0;
+        double bestT = 0;
+        for (size_t i = 0; i < n; ++i) {
+            double ax, ay, bx, by;
+            if (!PolyVert(pg, i, ax, ay)) continue;
+            if (!PolyVert(pg, (i + 1) % n, bx, by)) continue;
+            double dx = bx - ax, dy = by - ay;
+            double len2 = dx * dx + dy * dy;
+            double t = len2 > 1e-18
+                ? ((wx - ax) * dx + (wy - ay) * dy) / len2 : 0.0;
+            t = std::max(0.0, std::min(1.0, t));
+            double cx = ax + t * dx, cy = ay + t * dy;
+            double d = (wx - cx) * (wx - cx) + (wy - cy) * (wy - cy);
+            if (d < bestD) {
+                bestD = d;
+                bestI = i;
+                bestT = t;
+            }
+        }
+        param = static_cast<double>(bestI) + bestT;
+        double px, py;
+        if (!PathPointAt(e, param, px, py)) return false;
+        x = px;
+        y = py;
+        return true;
+    }
+    default:
+        return false;
+    }
+}
+
 } // namespace
 
 // ---------- 输入解析 ----------
@@ -1027,6 +1244,41 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         mp->cmdArgs = { a[0], a[1] };
         mp->update();
         made = std::move(mp);
+        return true;
+    }
+    // 四十五包 Point(path[, param])：路径上取点。无参形式参数 0.5（.ggb
+    // 回放后由 element <coords> 重投影恢复原位，见 xmlApplyStyle）；param
+    // 语义随路径（线段 t / 圆 rad / 函数 x / 多边形 边+t / 线类有向距离）
+    if (cmdLower == "point" && (a.size() == 1 || a.size() == 2)) {
+        GeoElement *path = lookup(a[0]);
+        if (!IsPathType(path)) {
+            lastError = "Point 需要路径参数（线段/直线/射线/向量/圆/多边形/函数）";
+            made = nullptr;
+            return true;
+        }
+        double param = 0.5;
+        if (a.size() == 2 && !numArg(a[1], param)) {
+            lastError = "Point 第二参数须为数值";
+            made = nullptr;
+            return true;
+        }
+        auto pp = std::make_unique<GeoPoint>();
+        pp->path = path;
+        pp->pathParam = param;
+        pp->isFree = false;
+        pp->pointSize = 4;
+        pp->inputs = { path };
+        pp->calc = [](GeoPoint *q) {
+            double x = 0, y = 0;
+            if (PathPointAt(q->path, q->pathParam, x, y)) {
+                q->x = x;
+                q->y = y;
+            }
+        };
+        pp->cmdName = "Point";
+        pp->cmdArgs = { a[0] };
+        pp->update();
+        made = std::move(pp);
         return true;
     }
     if ((cmdLower == "line" || cmdLower == "segment") && a.size() == 2) {
@@ -2844,10 +3096,74 @@ GeoPoint *Kernel::pickPoint(double px, double py, double *outD)
 
 void Kernel::movePoint(GeoPoint *p, double wx, double wy)
 {
-    if (!p || !p->isFree) return;
+    if (!p) return;
+    if (p->path) {
+        // 四十五包：路径依附点拖动 = 指针位置投影落轨（出界端点钳位、
+        // 圆按角度连续 unwrap），参数变了重算依随对象
+        double param = 0, nx = 0, ny = 0;
+        if (!PathProject(p->path, wx, wy, p->pathParam, param, nx, ny)) return;
+        p->pathParam = param;
+        recomputeAll();
+        return;
+    }
+    if (!p->isFree) return;
     p->x = wx;
     p->y = wy;
     recomputeAll();
+}
+
+// ---------- 四十五包 附着/脱离点 ----------
+
+bool Kernel::attachPoint(GeoPoint *p, GeoElement *path, double wx, double wy)
+{
+    if (!p || !path || p->path == path) return false;
+    if (!IsPathType(path)) {
+        lastError = "该对象不能作为路径（可附着：线段/直线/射线/向量/圆/多边形/函数图像）";
+        return false;
+    }
+    if (!toolListed(p) || !toolListed(path)) {
+        lastError = "对象不存在";
+        return false;
+    }
+    double param = 0, nx = 0, ny = 0;
+    if (!PathProject(path, wx, wy, p->path ? p->pathParam : 1e18, param, nx, ny)) {
+        lastError = "路径退化，无法附着";
+        return false;
+    }
+    p->path = path;
+    p->pathParam = param;
+    p->x = nx;
+    p->y = ny;
+    p->isFree = false;
+    p->inputs = { path };
+    p->calc = [](GeoPoint *pp) {
+        double x = 0, y = 0;
+        if (PathPointAt(pp->path, pp->pathParam, x, y)) {
+            pp->x = x;
+            pp->y = y;
+        }
+    };
+    p->cmdName = "Point";
+    p->cmdArgs = { path->label };
+    p->cmdIndex = 0;
+    recomputeAll();
+    return true;
+}
+
+bool Kernel::detachPoint(GeoPoint *p)
+{
+    if (!p || !p->path) return false;
+    p->path = nullptr;
+    p->pathParam = 0;
+    p->calc = nullptr;
+    p->inputs.clear();
+    p->isFree = true;
+    p->cmdName.clear();
+    p->cmdArgs.clear();
+    p->cmdIndex = 0;
+    // 坐标保留当前位置（脱离不跳变）
+    recomputeAll();
+    return true;
 }
 
 // ---------- N5 构造列表扩展：多输出 / 工具 / 拾取 ----------
@@ -3536,6 +3852,10 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->isFree = s->isFree;
             d->calc = s->calc;
             d->pointSize = s->pointSize;
+            // 四十五包：路径依附状态随重定义迁移（重定义为坐标=脱离，
+            // 重定义为 Point(path)=换路径/附着）
+            d->path = s->path;
+            d->pathParam = s->pathParam;
             break;
         }
         case GeoType::Segment: {
@@ -3992,8 +4312,9 @@ std::unique_ptr<GeoElement> Kernel::makeImage(GeoElement *obj, const std::string
 // ---------- N5 点选式工具状态机 ----------
 //
 // 工具 id：point/segment/line/ray/vector/circle/midpoint/perpBisector/
-// angleBisector/angle/polygon/intersect/tangent/translate/reflect/reflectPoint/
-// perpLine/parLine/dist/area/slope/vecFromPoint（二十三包起）。
+// angleBisector/angle/polygon/intersect/tangent/attachDetach（四十五包）/
+// translate/reflect/reflectPoint/perpLine/parLine/dist/area/slope/
+// vecFromPoint（二十三包起）。
 // 上游 行为：空白处点按先建自由点；工具完成一次作图后保持激活。
 // 返回协议："done|标签,.." / "need|提示" / "err|原因"。
 // 选中特效：中间拾取的对象即时点亮（selected），done/err 统一清除，
@@ -4182,6 +4503,67 @@ std::string Kernel::toolTapImpl(double wx, double wy, double px, double py)
             labels += geos_[i]->label;
         }
         return "done|" + labels;
+    }
+
+    // 附着/脱离点（四十五包，上游 同名工具）：点 → 路径=附着（参数取
+    // 指针投影）；依附点 → 任意处=脱离（保留当前坐标）。中途点别的点=
+    // 改选该点；附着步点空白=保持等待
+    if (tool_ == "attachDetach") {
+        if (!toolObj_) {
+            if (!hit) {
+                return "need|附着/脱离：先点选一个点（自由点将附着，依附点将脱离）";
+            }
+            toolObj_ = hit;
+            hit->selected = true;
+            if (hit->path) {
+                return "need|" + hit->label + " 在 " + hit->path->label
+                    + " 上：点画布任意处脱离";
+            }
+            return "need|附着：再点选路径（线段/直线/射线/向量/圆/多边形/函数）";
+        }
+        GeoPoint *pt = static_cast<GeoPoint *>(toolObj_);
+        if (pt->path) {
+            // 脱离步：点别的点改选，其余（空白/路径）一律脱离
+            if (hit && hit != pt) {
+                pt->selected = false;
+                toolObj_ = hit;
+                hit->selected = true;
+                if (hit->path) {
+                    return "need|" + hit->label + " 在 " + hit->path->label
+                        + " 上：点画布任意处脱离";
+                }
+                return "need|附着：再点选路径（线段/直线/射线/向量/圆/多边形/函数）";
+            }
+            const std::string pre = getXml();
+            toolObj_ = nullptr;
+            if (!detachPoint(pt)) {
+                return "err|脱离失败";
+            }
+            commitUndoSnapshot(pre);
+            return "done|" + pt->label;
+        }
+        // 附着步：点别的点改选；点路径附着；点空白保持等待
+        if (hit && hit != pt) {
+            pt->selected = false;
+            toolObj_ = hit;
+            hit->selected = true;
+            if (hit->path) {
+                return "need|" + hit->label + " 在 " + hit->path->label
+                    + " 上：点画布任意处脱离";
+            }
+            return "need|附着：再点选路径（线段/直线/射线/向量/圆/多边形/函数）";
+        }
+        GeoElement *o = pickObject(px, py);
+        if (!o) {
+            return "need|附着：再点选路径（线段/直线/射线/向量/圆/多边形/函数）";
+        }
+        const std::string pre = getXml();
+        toolObj_ = nullptr;
+        if (!attachPoint(pt, o, wx, wy)) {
+            return "err|" + (lastError.empty() ? "无法附着" : lastError);
+        }
+        commitUndoSnapshot(pre);
+        return "done|" + pt->label;
     }
 
     // 平移：对象 → 向量起点 → 向量终点（辅助向量隐藏，上游 工具同构）
@@ -5850,6 +6232,23 @@ void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
             const size_t end = inner.find('>', ps);
             const std::string t = inner.substr(ps, end == std::string::npos ? end : end - ps);
             p->pointSize = (int)AttrNum(t, "val", (double)p->pointSize);
+        }
+        // 四十五包：路径依附点的 <coords> 重投影恢复路径参数（命令重放
+        // Point(g) 只建出默认参数的点，真实落位由保存的坐标恢复；自由点
+        // 不受影响——其坐标在创建分支已用）
+        if (p->path) {
+            size_t c = inner.find("<coords");
+            if (c != std::string::npos) {
+                const size_t end = inner.find('>', c);
+                const std::string t = inner.substr(c, end - c);
+                const double cx = AttrNum(t, "x", p->x);
+                const double cy = AttrNum(t, "y", p->y);
+                double param = 0, nx = 0, ny = 0;
+                if (PathProject(p->path, cx, cy, p->pathParam, param, nx, ny)) {
+                    p->pathParam = param;
+                    p->update();
+                }
+            }
         }
     }
     GeoNumeric *num = dynamic_cast<GeoNumeric *>(e);

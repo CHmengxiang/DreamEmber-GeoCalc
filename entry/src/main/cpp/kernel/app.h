@@ -98,8 +98,13 @@ public:
     // 拾取的游离状态（kernelPickPoint / kernelDragPointTo 成对使用）
     GeoPoint *pickedPoint() const { return picked_; }
     void clearPicked() { picked_ = nullptr; }
-    // 拖动点后重算依随对象
+    // 拖动点后重算依随对象（四十五包：路径依附点按投影落轨）
     void movePoint(GeoPoint *p, double wx, double wy);
+
+    // 四十五包 附着/脱离点：p 附到 path 上（参数=指针位置投影）或脱离回
+    // 自由点（保留当前坐标）。重算在内部完成，撤销快照由调用点打
+    bool attachPoint(GeoPoint *p, GeoElement *path, double wx, double wy);
+    bool detachPoint(GeoPoint *p);
 
     // N5 点选式工具（上游 工具栏模式）：工具 id 见 toolTap；"" = 选择/移动。
     // 换工具即复位待选状态并清除工具拾取的选中特效。二十六包：参数待输入
