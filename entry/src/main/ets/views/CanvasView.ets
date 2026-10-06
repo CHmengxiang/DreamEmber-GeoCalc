@@ -318,9 +318,13 @@ export struct CanvasView {
     try {
       w.on('keyboardHeightChange', (px: number) => {
         AppStorage.setOrCreate('ui.kbH', px > 0 ? px / canvasDensity() : 0);
-        // 三十三包①：⌨ 切系统键的过渡桥——IME 实高事件到达（页缩随动）
-        // 即动画收合保挂的自带键盘行，卡片单段过渡
-        if (this.askBridgeKb) {
+        // 四十四包 v5（用户真机反馈②）：过渡桥塌陷时机改 IME **收起**（px<=0）
+        // ——本机 OFFSET 避让是「刚好抬到聚焦框露出」的部分抬升且聚焦后不
+        // 重算：旧逻辑在 IME 弹起事件即塌桥，输入框随之下掉 173vp 沉入 IME
+        // 后面（⌨ 切系统键「输入框下移被盖住」根因）。改为弹起期间保持
+        // 键盘行/等高占位（输入框零位移），IME 收起才动画塌陷（随收键盘
+        // 自然滑落）；三十三包原语义（RESIZE 世界页缩随动塌桥）作废
+        if (px <= 0 && this.askBridgeKb) {
           this.getUIContext().animateTo({
             duration: 200,
             curve: Curve.EaseOut
@@ -346,13 +350,10 @@ export struct CanvasView {
     }
   }
 
-  // 弹窗系统键盘垫底——四十四包 v4 **退役恒 0**：v4 弹窗改 OFFSET 端到端
-  //（见 openToolAsk），卡片避让全靠系统页面抬升（与 IME 滑落同编排的窗口
-  // 平移动画）；RESIZE 时代它只在页缩落地前制造「掉下去再弹上来」的多余
-  // 一跳，OFFSET 世界更不能垫（二十八包④「垫+移双份避让」的教训）
-  private askSysPad(): number {
-    return 0;
-  }
+  // 弹窗系统键盘垫底——四十四包 v5 **删除**（历史：二十八包④引入、三十三
+  // 包①收缩为旧 ROM 专属、v4 退役恒 0）：本机 OFFSET 避让自己会抬聚焦框
+  //（部分抬升且聚焦后不重算），任何补垫都是二十八包④式「垫+移双份」；
+  // v5 过渡期空间改由 askCard 内等高占位承担（askBridgeKb 分支）
 
   private onInputMethodOpt(): void {
     this.useSysKeyboard = this.inputMethodOpt === 0;
@@ -700,7 +701,7 @@ export struct CanvasView {
     // 是一次瞬跳（v1-v3 三版挂行闸怎么调都有 residual）。v4 改 OFFSET 端
     // 到端：卡片下降=系统页面抬升的收回（与 IME 滑落同编排，全应用其余
     // 系统键盘位均走此通道真机无瞬移投诉），挂行仍由 v3 轮询闸兜时序；
-    // askSysPad 垫底随之退役恒 0（垫+移双份=二十八包④根因，勿复活）
+    // askSysPad 已随 v5 删除（OFFSET 避让自抬聚焦框，补垫=双份）
     this.askResizeOk = false;
     this.askBridgeKb = false;
     this.cancelAskKbSwitch();   // 四十三包：防御性复位（弹窗全新开启）
@@ -1137,6 +1138,9 @@ export struct CanvasView {
       curve: Curve.EaseOut
     }, () => {
       this.useSysKeyboard = false;
+      // 四十四包 v5：桥随翻转复位——过渡期等高占位与键盘行同高，换回时
+      // 输入框零位移（桥已无塌陷位移可言，v3 挂行闸只剩时序兜底价值）
+      this.askBridgeKb = false;
       // opt 回写同步触发 onInputMethodOpt 置同值，同一动画闭包内捕获，
       // 不产生第二段跳变
       AppStorage.setOrCreate('opt.inputMethod', 1);
@@ -1332,12 +1336,25 @@ export struct CanvasView {
         this.toolAskCaretB = e;
       })
       .onSubmit(() => this.confirmToolAsk())
+      // 四十四包 v5（用户真机反馈①）：自带键盘态挂 1px 空壳（三十六包
+      // 同款，挂载即抑制系统 IME）——点输入框只聚焦出光标，不再弹系统键
+      // 盘盖住自带键盘行；系统键盘态传 undefined 解绑（API 22+ 官方支持，
+      // AlgebraPanel 同款用法），IME 照常可弹
+      .customKeyboard(this.useSysKeyboard ? undefined : this.askEmptyKb())
+  }
+
+  // 弹窗输入框的空壳键盘（挂载即抑制系统 IME；AlgebraPanel.emptyKb 同款）
+  @Builder
+  private askEmptyKb() {
+    Row()
+      .width('100%')
+      .height(1)
+      .opacity(0)
   }
 
   // 弹窗本体：页面根 Stack 的底部模态。头部行 = 提示文案 + 右上 ⌨ 切键盘
   // （二十七包②）。scrim 挡掉弹窗外全部点击；自带键盘内联在卡片内
-  // （askCard），系统键盘按实测键盘高垫卡片底（askSysPad：resize 避让
-  // 模式不重复垫）
+  // （askCard），系统键盘避让交给窗口 OFFSET（部分抬升聚焦框）
   @Builder
   private toolAskDialog() {
     Stack({ alignContent: Alignment.Bottom }) {
@@ -1358,9 +1375,10 @@ export struct CanvasView {
   // 弹窗卡片（标题行 + 参数行 + 错误行 + 自带键盘行）。二十七包②定案：
   // 自带键盘**内联**渲染（曾用 TextInput.customKeyboard 浮层——弹出不随
   // 状态走，重挂后任何程序化抢焦都不再弹出、触摸聚焦才可以，模拟器实测
-  // 三种挂载方式均复现）；内联后可见性纯状态驱动，⌨ 切换永不失效。系统
-  // 键盘模式三十三包①起过渡桥期间仍保挂键盘行（askBridgeKb），卡片底由
-  // askSysPad 垫（RESIZE 就绪恒 0，仅旧 ROM 实测垫底）
+  // 三种挂载方式均复现）；内联后可见性纯状态驱动，⌨ 切换永不失效。四十四
+  // 包 v5：切系统键过渡期行换**等高透明占位**（askBridgeKb，输入框零位
+  // 移），IME 收起才塌；输入框挂空壳 customKeyboard 抑制自带键盘态误弹
+  // 系统 IME（askEditorField）
   @Builder
   private askCard() {
     Column({ space: 10 }) {
@@ -1407,14 +1425,22 @@ export struct CanvasView {
           .fontColor(Theme.error(this.dark))
           .width('100%')
       }
-      if (!this.useSysKeyboard || this.askBridgeKb) {
+      if (!this.useSysKeyboard) {
         this.askKbArea()
+      } else if (this.askBridgeKb) {
+        // 四十四包 v5（用户真机反馈②）：切系统键过渡期键盘行换**等高透明
+        // 占位**——输入框零位移（本机 OFFSET 避让聚焦后不重算，行塌掉=
+        // 输入框沉入 IME 被盖的根因）；占位区与升起的 IME 重叠不可见，
+        // IME 收起时塌占位（watchKbHeight px<=0 分支）输入框自然滑落
+        Column()
+          .width('100%')
+          .height(MATH_KB_HEIGHT)
       }
     }
     .width('100%')
     .padding({
       left: 14, right: 14, top: 12,
-      bottom: (this.useSysKeyboard ? this.askSysPad() : 0) + 12
+      bottom: 12
     })
     .backgroundColor(Theme.drawer(this.dark))
     .borderRadius({ topLeft: 14, topRight: 14 })
