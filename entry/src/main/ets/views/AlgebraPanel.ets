@@ -77,6 +77,10 @@ export struct AlgebraPanel {
   // 的「点空白收起」（点块内空白/按钮不关编辑区，点块外才关）
   onBlockTap: () => void = () => {};
   onFieldActivate: () => void = () => {};
+  // 四十六包：点触定位光标（MathField 点按反查停靠点 → 宿主设光标态并
+  // 同步底层 TextInput 选区）
+  onFieldTapCaret: (pos: number, script: boolean) => void =
+    (_p: number, _s: boolean) => {};
   onClose: () => void = () => {};
 
   // 三十六包：浮层空壳——customKeyboard 挂载即抑制系统 IME，1px 透明壳
@@ -247,7 +251,9 @@ export struct AlgebraPanel {
           caretScript: this.mathCaretScript,
           focused: this.fieldFocused,
           dark: this.dark,
-          onActivate: () => this.onFieldActivate()
+          onActivate: () => this.onFieldActivate(),
+          onTapCaret: (pos: number, script: boolean): void =>
+            this.onFieldTapCaret(pos, script)
         })
       }
     }

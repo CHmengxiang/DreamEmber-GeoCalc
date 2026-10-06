@@ -244,6 +244,11 @@ export struct CanvasView {
   // 光标在 ^/_ 脚本框内（小号显示、键入写脚本内容）；false=框外（基线、
   // 键入写外层/base）。渲染源 MathField.caretScript
   @State private mathCaretScript: boolean = false;
+  // 四十六包 点触定位：MathField 点按反查的停靠点（pos/script）。底层
+  // TextInput 已聚焦时直接 caretPosition；未聚焦时先记账，焦点落地
+  // （onFocusInput true）后补设——程序化设位须在焦点事务之后
+  private pendingTapCaret: number = -1;
+  private pendingTapScript: boolean = false;
   @State private inputFocused: boolean = false;
   // 二十四包②/二十五包②：数据区格内编辑（SheetPanel onEditFocus 上报）/
   // 表格范围编辑（TablePanel onEditFocus 上报）占用自带键盘——两者不同时
@@ -2596,6 +2601,23 @@ export struct CanvasView {
     this.activeCtrl().caretPosition(stop.pos);
   }
 
+  // 四十六包 点触定位光标：MathField 点按反查停靠点回写（与 caretMove 同
+  // 一套状态）。已聚焦直接设位；未聚焦（首次点输入行）先记账，焦点落地后
+  // 在 onFocusInput 里补设 caretPosition（带键盘唤起的焦点事务之后）
+  private onFieldTapCaret(pos: number, script: boolean): void {
+    this.selStart = pos;
+    this.selEnd = pos;
+    this.mathCaret = pos;
+    this.mathCaretScript = script;
+    if (this.inputFocused) {
+      this.activeCtrl().caretPosition(pos);
+      this.pendingTapCaret = -1;
+    } else {
+      this.pendingTapCaret = pos;
+      this.pendingTapScript = script;
+    }
+  }
+
   // ---- 代数区行交互（AlgebraPanel 经回调上达） ----
 
   // 行内显隐：切换显隐（隐藏对象重新显示的入口）
@@ -3009,6 +3031,20 @@ export struct CanvasView {
       onToggleKeyboard: () => this.toggleKeyboard(),
       onFocusInput: (f: boolean): void => {
         this.inputFocused = f;
+        if (f && this.pendingTapCaret >= 0) {
+          // 四十六包：点触定位时字段未聚焦——焦点刚落地，稍候一拍再补设
+          // 底层光标（焦点事务完成前 caretPosition 可能被忽略）
+          const pos = this.pendingTapCaret;
+          const script = this.pendingTapScript;
+          this.pendingTapCaret = -1;
+          setTimeout(() => {
+            this.selStart = pos;
+            this.selEnd = pos;
+            this.mathCaret = pos;
+            this.mathCaretScript = script;
+            this.activeCtrl().caretPosition(pos);
+          }, 30);
+        }
         this.syncKbSpacer();
       },
       onSelChange: (s: number, e: number): void => {
@@ -3030,6 +3066,8 @@ export struct CanvasView {
       mathCaretScript: this.mathCaretScript,
       fieldFocused: this.inputFocused,
       onFieldActivate: (): void => this.requestFocusLater(this.activeInputId()),
+      onFieldTapCaret: (pos: number, script: boolean): void =>
+        this.onFieldTapCaret(pos, script),
       onClose: () => {
         this.commitPending();
         this.closeSlideEdit();

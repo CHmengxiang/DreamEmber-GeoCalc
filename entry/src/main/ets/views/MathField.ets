@@ -719,6 +719,8 @@ interface MathPiece {
   kids: MathPiece[]; // 根号内容子片
   kw: number;        // 根号内容总宽
   radH: number;      // 根号整体高
+  start: number;     // 覆盖原文区间 [start, end)（四十六包点触定位反查用；
+  end: number;       //  首片吞进的语法字符并入 start——与 MathAtom 同规约）
 }
 
 interface MathLayoutResult {
@@ -742,7 +744,8 @@ function mathLayout(ctx: CanvasRenderingContext2D, atoms: MathAtom[],
     const a = atoms[j];
     if (a.caret) {
       const pc: MathPiece = { kind: 3, ch: '|', x: x, size: 0, sup: a.sup,
-        sub: a.sub, over: false, caretIn: false, w: 0, kids: [], kw: 0, radH: 0 };
+        sub: a.sub, over: false, caretIn: false, w: 0, kids: [], kw: 0, radH: 0,
+        start: a.start, end: a.end };
       pieces.push(pc);
       continue;
     }
@@ -751,7 +754,8 @@ function mathLayout(ctx: CanvasRenderingContext2D, atoms: MathAtom[],
         scrS, boxW, boxWs, radH, hookW, k);
       const pr: MathPiece = { kind: 2, ch: '√', x: x, size: 0, sup: false,
         sub: false, over: false, caretIn: false, w: hookW + 4 + inner.width,
-        kids: inner.pieces, kw: inner.width, radH: radH };
+        kids: inner.pieces, kw: inner.width, radH: radH,
+        start: a.start, end: a.end };
       pieces.push(pr);
       x += pr.w;
       continue;
@@ -760,7 +764,7 @@ function mathLayout(ctx: CanvasRenderingContext2D, atoms: MathAtom[],
       const w1 = (a.sup || a.sub) ? boxWs : boxW;
       const pb: MathPiece = { kind: 1, ch: '□', x: x, size: 0, sup: a.sup,
         sub: a.sub, over: a.over, caretIn: a.caretIn === true, w: w1,
-        kids: [], kw: 0, radH: 0 };
+        kids: [], kw: 0, radH: 0, start: a.start, end: a.end };
       pieces.push(pb);
       x += w1;
       continue;
@@ -773,7 +777,8 @@ function mathLayout(ctx: CanvasRenderingContext2D, atoms: MathAtom[],
     // measureText 与坐标同口径（vp）——原值直用（第十五包③终案）
     const w2 = ctx.measureText(a.ch).width;
     const ps: MathPiece = { kind: 0, ch: a.ch, x: x, size: size, sup: a.sup,
-      sub: a.sub, over: a.over, caretIn: false, w: w2, kids: [], kw: 0, radH: 0 };
+      sub: a.sub, over: a.over, caretIn: false, w: w2, kids: [], kw: 0, radH: 0,
+      start: a.start, end: a.end };
     pieces.push(ps);
     x += w2;
   }
@@ -878,6 +883,111 @@ function mathDraw(ctx: CanvasRenderingContext2D, pieces: MathPiece[],
   }
 }
 
+// ---- 四十六包：点触定位光标（排版反查）----
+// 把点按位置的视觉 x 反查成最近的 mathCaretStops 停靠点。映射规则：
+// 框内站（script=true）查 sup/sub 脚本片——pos 所属 run（start≤pos≤end）
+// 内首个 end>pos 的片左缘，run 尾则取末片右缘；框外站查基线片——首个
+// end>pos 的非脚本片左缘（被吞语法字符区间并入首片，故 op/内容起点共
+// 用同一视觉位），根号组 pos 落在其区间内时下钻 kids。两端超界自然由
+// 「最近距离」钳到首/末停靠点。
+function scriptStopX(pieces: MathPiece[], pos: number): number {
+  let lastRight = -1;
+  let found = -1;
+  for (let j = 0; j < pieces.length; j++) {
+    const p = pieces[j];
+    if (!(p.sup || p.sub) || p.start > pos || pos > p.end) {
+      continue;
+    }
+    lastRight = p.x + p.w;
+    if (p.end > pos && found < 0) {
+      found = p.x;
+    }
+  }
+  return found >= 0 ? found : lastRight;
+}
+
+function baseStopXRec(pieces: MathPiece[], pos: number): number {
+  for (let j = 0; j < pieces.length; j++) {
+    const p = pieces[j];
+    // 脚本片不跳过：sup/sub 在基线流位上排版（上标紧跟 base 左缘），
+    // base 尾停靠（op 位）恰是其 start，视觉 x 即该片左缘
+    if (p.end <= pos) {
+      continue;
+    }
+    if (p.kind === 2 && pos > p.start) {
+      const inner = baseStopXRec(p.kids, pos);
+      if (inner >= 0) {
+        return inner;
+      }
+      return p.x + p.w; // 内容尾（含空参数框）：内容区右缘
+    }
+    return p.x;
+  }
+  return -1;
+}
+
+// 脚本停靠点是上标还是下标（光标 y 偏好仲裁用）：找覆盖 pos 的脚本原子
+//（start<pos≤end，首片吞语法字符故 start 是 ^/_ 的下标）
+function stopIsSup(raw: string, pos: number): boolean {
+  const atoms = parseMathAtoms(raw);
+  for (let j = 0; j < atoms.length; j++) {
+    const a = atoms[j];
+    if ((a.sup || a.sub) && pos > a.start && pos <= a.end) {
+      return a.sup;
+    }
+  }
+  return false;
+}
+
+// 点触定位：layoutX/layoutY 为排版坐标（x 相对内容起点、y 相对 Canvas 顶，
+// 行高 30、基线 22——MathField.paint 同参排版）。返回最近停靠点；并列时
+// 按 y 仲裁：上区偏爱上标框内站、下区偏爱下标框内站、中区偏爱框外站。
+export function mathPickCaretStop(ctx: CanvasRenderingContext2D, raw: string,
+  layoutX: number, layoutY: number, k: number): MathCaretStop | null {
+  const stops = mathCaretStops(raw);
+  if (stops.length === 0) {
+    return null;
+  }
+  const lay = mathLayout(ctx, parseMathAtoms(raw), 0, 22, 15, 11, 9, 8, 22, 9, k);
+  const xs: number[] = [];
+  for (let i = 0; i < stops.length; i++) {
+    const sx = stops[i].script
+      ? scriptStopX(lay.pieces, stops[i].pos)
+      : baseStopXRec(lay.pieces, stops[i].pos);
+    xs.push(sx >= 0 ? sx : lay.width);
+  }
+  let best = -1;
+  for (let i = 0; i < stops.length; i++) {
+    if (best < 0 || Math.abs(xs[i] - layoutX) < Math.abs(xs[best] - layoutX)) {
+      best = i;
+    }
+  }
+  const ties: number[] = [];
+  for (let i = 0; i < stops.length; i++) {
+    if (Math.abs(Math.abs(xs[i] - layoutX)
+      - Math.abs(xs[best] - layoutX)) < 0.5) {
+      ties.push(i);
+    }
+  }
+  let pick = best;
+  if (ties.length > 1) {
+    const wantSup = layoutY < 15;
+    const wantSub = layoutY > 24;
+    for (let t = 0; t < ties.length && pick === best; t++) {
+      const st = stops[ties[t]];
+      if (!st.script && !wantSup && !wantSub) {
+        pick = ties[t];
+      } else if (st.script && (wantSup || wantSub)) {
+        const sup = stopIsSup(raw, st.pos);
+        if ((wantSup && sup) || (wantSub && !sup)) {
+          pick = ties[t];
+        }
+      }
+    }
+  }
+  return stops[pick];
+}
+
 // MathText — 静态公式渲染（Canvas 版，第十二包①）：与 MathField 同一
 // painter，无光标；用于代数区行内展示对象的值/定义。宽度按实测内容收缩，
 // 超宽由 constraintSize 裁剪（行内不做滚动）。
@@ -941,13 +1051,19 @@ export struct MathField {
   @Prop @Watch('onDispChange') dark: boolean = false;
   @Prop placeholder: string = '输入表达式…';
   onActivate: () => void = () => {};
+  // 四十六包：点触定位光标——点按坐标反查最近停靠点上报宿主
+  //（宿主设 caret/caretScript 并同步底层 TextInput 选区）
+  onTapCaret: (pos: number, script: boolean) => void =
+    (_p: number, _s: boolean) => {};
   @State private blink: boolean = true;
   @State private contentW: number = 320;
+  @State private fieldH: number = 32;
   private settings: RenderingContextSettings = new RenderingContextSettings(true);
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
   private ready: boolean = false;
   private blinkTimer: number = -1;
   private den: number = canvasDensity();
+  private fieldScroller: Scroller = new Scroller();
 
   aboutToAppear(): void {
     this.restartBlink();
@@ -1014,7 +1130,7 @@ export struct MathField {
           .maxLines(1)
           .margin({ left: 8 })
       }
-      Scroll() {
+      Scroll(this.fieldScroller) {
         Canvas(this.ctx)
           .width(this.contentW)
           .height(30)
@@ -1033,8 +1149,26 @@ export struct MathField {
     }
     .width('100%')
     .height('100%')
-    .onClick(() => {
+    .onAreaChange((_o: Area, n: Area) => {
+      const h = Number(n.height);
+      if (h > 0 && Math.abs(h - this.fieldH) > 0.5) {
+        this.fieldH = h;
+      }
+    })
+    .onClick((evt: ClickEvent) => {
+      // 四十六包 点触定位：点按 x + 滚动偏移 = 内容 x（再减排版左衬 8）；
+      // y 换算到 Canvas 内（Canvas 行高 30 在本组件内垂直居中），供
+      // 大小框并列停靠点的上下偏好仲裁。先保底激活（未聚焦首点=聚焦），
+      // 再上报反查结果
+      const off = this.fieldScroller.currentOffset();
+      const layoutX = evt.x + off.xOffset - 8;
+      const canvasY = evt.y - (this.fieldH - 30) / 2;
       this.onActivate();
+      const stop = mathPickCaretStop(this.ctx, this.raw, layoutX, canvasY,
+        this.den);
+      if (stop !== null) {
+        this.onTapCaret(stop.pos, stop.script);
+      }
     })
   }
 }
