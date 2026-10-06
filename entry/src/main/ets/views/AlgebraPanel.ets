@@ -2,6 +2,7 @@
 // 头部（计数/⌨/收起）+ 错误条 + 行列表 + 行内修改/新建行。
 // 四十八包②：列表按对象类型分组呈现——组头（箭头折叠/展开 + 计数 + 显隐
 // 眼批量开关组内对象）+ 成员行；分组只重排行序，行交互不变。
+// 四十九包：列表边界回弹动效（工具栏同款 EdgeEffect.Spring）。
 // 会话状态（待输入文本、编辑行、键盘开关）留在 CanvasView 统一编排，面板
 // 只呈现并转发事件；宽屏左栏（showError=true：错误条在头部之下）与窄屏
 // 抽屉（showError=false：错误条由画布下方渲染）共用本组件。
@@ -658,6 +659,9 @@ export struct AlgebraPanel {
     .layoutWeight(1)
     .padding({ left: 8, right: 8 })
     .scrollBar(BarState.Auto)
+    // 四十九包：边界回弹动效——四十一包 AGC 自检给全应用 7 处 Scroll 统一
+    // 补 EdgeEffect.Spring 时本 List 漏网（用户真机反馈补上，工具栏同款）
+    .edgeEffect(EdgeEffect.Spring)
     // 三十一包①a：列表 id——滚动对齐量按「块底 vs 列表视口底」窗口矩形
     // 实测（块在视口下方被裁剪的部分只能靠滚出来，垫高无解）
     .id('algebraList')
