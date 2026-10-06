@@ -5538,6 +5538,74 @@ void Kernel::appendTickMarks(std::vector<DrawCmd> &out) const
     }
 }
 
+// ---------- 四十八包：线裁剪（Cohen-Sutherland，像素空间） ----------
+// 线类对象（线段/直线/射线/向量）的端点先在像素域裁剪到画布矩形再下发：
+// ①端点恒落在界内，超陡/超远对象的坐标不再以 ±1e9px 量级转 float 交给画
+// 布；②整段在视口外的对象直接省略；③射线起点远离屏幕时也能延伸到视口
+//（裁剪反求交点，旧版固定延伸长度够不着）。区域码位序：左1 右2 下4 上8
+//（画布 y 向下，"上"=y 小于顶边）。
+static const int CS_LEFT = 1, CS_RIGHT = 2, CS_BOTTOM = 4, CS_TOP = 8;
+
+static int CsOutCode(double x, double y, double xmin, double ymin,
+                     double xmax, double ymax)
+{
+    int c = 0;
+    if (x < xmin) c |= CS_LEFT;
+    else if (x > xmax) c |= CS_RIGHT;
+    if (y < ymin) c |= CS_TOP;
+    else if (y > ymax) c |= CS_BOTTOM;
+    return c;
+}
+
+// 线段 [x1,y1]-[x2,y2] 就地裁剪到矩形；完全在外（或端点含非有限值，inf/
+// NaN 无法求交）返回 false。选中端点在界内时坐标原样返回（恒等裁剪）。
+static bool ClipSegRect(double &x1, double &y1, double &x2, double &y2,
+                        double xmin, double ymin, double xmax, double ymax)
+{
+    if (!std::isfinite(x1) || !std::isfinite(y1) || !std::isfinite(x2)
+        || !std::isfinite(y2))
+        return false;
+    int c1 = CsOutCode(x1, y1, xmin, ymin, xmax, ymax);
+    int c2 = CsOutCode(x2, y2, xmin, ymin, xmax, ymax);
+    for (int iter = 0; c1 | c2; ++iter) {
+        if (iter > 64) return false;   // 理论 4 轮封顶，防御性保险
+        if (c1 & c2) return false;     // 两端同侧在外：整段不可见
+        const int c = c1 ? c1 : c2;
+        double x, y;
+        if (c & CS_TOP) {
+            x = x1 + (x2 - x1) * (ymin - y1) / (y2 - y1);
+            y = ymin;
+        } else if (c & CS_BOTTOM) {
+            x = x1 + (x2 - x1) * (ymax - y1) / (y2 - y1);
+            y = ymax;
+        } else if (c & CS_RIGHT) {
+            y = y1 + (y2 - y1) * (xmax - x1) / (x2 - x1);
+            x = xmax;
+        } else {
+            y = y1 + (y2 - y1) * (xmin - x1) / (x2 - x1);
+            x = xmin;
+        }
+        if (c == c1) {
+            x1 = x; y1 = y;
+            c1 = CsOutCode(x1, y1, xmin, ymin, xmax, ymax);
+        } else {
+            x2 = x; y2 = y;
+            c2 = CsOutCode(x2, y2, xmin, ymin, xmax, ymax);
+        }
+    }
+    return true;
+}
+
+// 渲染裁剪矩形：画布外扩 5px 出锋余量（上游 CLIP_DISTANCE 同量级）
+static void ClipRectOf(const EuclidianView &v, double &xmin, double &ymin,
+                       double &xmax, double &ymax)
+{
+    xmin = -5.0;
+    ymin = -5.0;
+    xmax = v.width + 5.0;
+    ymax = v.height + 5.0;
+}
+
 void Kernel::render(std::vector<DrawCmd> &out)
 {
     out.clear();
@@ -5613,8 +5681,13 @@ void Kernel::render(std::vector<DrawCmd> &out)
             d.lineWidth = s->lineThickness / 3.0f;
             // ex/ey 访问器：像线段（Segment(P, 长度)）p1/p2 为空，裸读
             // p1->x 空指针崩溃——二十四包⑦ 真机闪退根因
-            d.pts = { (float)view.px(s->ex1()), (float)view.py(s->ey1()),
-                      (float)view.px(s->ex2()), (float)view.py(s->ey2()) };
+            double axp = view.px(s->ex1()), ayp = view.py(s->ey1());
+            double bxp = view.px(s->ex2()), byp = view.py(s->ey2());
+            // 四十八包：整段在视口外直接省略，部分在外裁到界内
+            double cxmin, cymin, cxmax, cymax;
+            ClipRectOf(view, cxmin, cymin, cxmax, cymax);
+            if (!ClipSegRect(axp, ayp, bxp, byp, cxmin, cymin, cxmax, cymax)) break;
+            d.pts = { (float)axp, (float)ayp, (float)bxp, (float)byp };
             if (s->selected) {
                 DrawCmd h = d;
                 h.color = selHalo;
@@ -5643,27 +5716,36 @@ void Kernel::render(std::vector<DrawCmd> &out)
         }
         case GeoType::Line: {
             GeoLine *l = static_cast<GeoLine *>(g.get());
-            // 裁剪到视图外扩 5px（上游 CLIP_DISTANCE）
-            const double M = 5.0;
-            double p1x, p1y, p2x, p2y;
             if (fabs(l->a) < 1e-15 && fabs(l->b) < 1e-15) break;
+            // 端点先取在视界外扩 5px 的矩形边界上，再统一 Cohen-Sutherland
+            // 裁剪（四十八包）：主轴参数化——陡线（|a|>|b|）按 y 求端点、
+            // 平线按 x 求端点；旧版一律按 x 取端点，近竖直线（|b| 极小）端
+            // 点 y 以 ±1e9px 量级转 float 交给画布，渲染退化
+            double cxmin, cymin, cxmax, cymax;
+            ClipRectOf(view, cxmin, cymin, cxmax, cymax);
+            double p1x, p1y, p2x, p2y;
             if (fabs(l->b) < 1e-15) {
                 // 竖直线 x = c/a
                 double wx = l->c / l->a;
-                p1x = view.px(wx); p1y = -M;
-                p2x = view.px(wx); p2y = view.height + M;
+                p1x = view.px(wx); p1y = cymin;
+                p2x = view.px(wx); p2y = cymax;
             } else if (fabs(l->a) < 1e-15) {
                 // 水平线 y = c/b
                 double wy = l->c / l->b;
-                p1x = -M; p1y = view.py(wy);
-                p2x = view.width + M; p2y = view.py(wy);
+                p1x = cxmin; p1y = view.py(wy);
+                p2x = cxmax; p2y = view.py(wy);
+            } else if (fabs(l->a) > fabs(l->b)) {
+                // 陡线：按 y 界求 x（x = (c - b y) / a，良态）
+                p1x = view.px((l->c - l->b * view.wy(cymin)) / l->a);
+                p1y = cymin;
+                p2x = view.px((l->c - l->b * view.wy(cymax)) / l->a);
+                p2y = cymax;
             } else {
-                // y = (c - a x) / b，取视图左右端点
-                double wxa = view.xmin() - M / view.xscale;
-                double wxb = view.xmax() + M / view.xscale;
-                p1x = view.px(wxa); p1y = view.py((l->c - l->a * wxa) / l->b);
-                p2x = view.px(wxb); p2y = view.py((l->c - l->a * wxb) / l->b);
+                // 平线：按 x 界求 y（y = (c - a x) / b，良态）
+                p1x = cxmin; p1y = view.py((l->c - l->a * view.wx(cxmin)) / l->b);
+                p2x = cxmax; p2y = view.py((l->c - l->a * view.wx(cxmax)) / l->b);
             }
+            if (!ClipSegRect(p1x, p1y, p2x, p2y, cxmin, cymin, cxmax, cymax)) break;
             DrawCmd d;
             d.op = DrawOp::Segment;
             d.color = ObjectColor(l->color, darkTheme);
@@ -5713,13 +5795,22 @@ void Kernel::render(std::vector<DrawCmd> &out)
             double dx = view.px(r->p2->x) - x1, dy = view.py(r->p2->y) - y1;
             double len = sqrt(dx * dx + dy * dy);
             if (len < 1e-9) break;
-            double L = (view.width + view.height) * 2.0;   // 延伸出画布，由画布裁剪
+            // 延伸长度覆盖「起点到画布远角」：|p1| + 2×对角线（三角不等式
+            // 保证与视口相交；旧版固定 2×(w+h)，起点远离屏幕时射线够不着
+            // 视口，画面上整条消失）。延伸后 Cohen-Sutherland 裁剪反求可见
+            // 段，端点收敛到界内（四十八包）
+            double cxmin, cymin, cxmax, cymax;
+            ClipRectOf(view, cxmin, cymin, cxmax, cymax);
+            double diag = sqrt((double)view.width * view.width
+                               + (double)view.height * view.height);
+            double L = sqrt(x1 * x1 + y1 * y1) + 2.0 * diag + 20.0;
+            double x2 = x1 + dx / len * L, y2 = y1 + dy / len * L;
+            if (!ClipSegRect(x1, y1, x2, y2, cxmin, cymin, cxmax, cymax)) break;
             DrawCmd d;
             d.op = DrawOp::Segment;
             d.color = ObjectColor(r->color, darkTheme);
             d.lineWidth = r->lineThickness / 3.0f;
-            d.pts = { (float)x1, (float)y1,
-                      (float)(x1 + dx / len * L), (float)(y1 + dy / len * L) };
+            d.pts = { (float)x1, (float)y1, (float)x2, (float)y2 };
             if (r->selected) {
                 DrawCmd h = d;
                 h.color = selHalo;
@@ -5735,11 +5826,17 @@ void Kernel::render(std::vector<DrawCmd> &out)
             double x2 = view.px(v->ex2()), y2 = view.py(v->ey2());
             double dx = x2 - x1, dy = y2 - y1;
             if (sqrt(dx * dx + dy * dy) < 1e-9) break;
+            // 轴杆裁剪（四十八包）；箭头/标签仍按原尖端与中点定位，尖端在
+            // 界外时由画布自裁
+            double cx1 = x1, cy1 = y1, cx2 = x2, cy2 = y2;
+            double cxmin, cymin, cxmax, cymax;
+            ClipRectOf(view, cxmin, cymin, cxmax, cymax);
+            if (!ClipSegRect(cx1, cy1, cx2, cy2, cxmin, cymin, cxmax, cymax)) break;
             DrawCmd d;
             d.op = DrawOp::Segment;
             d.color = ObjectColor(v->color, darkTheme);
             d.lineWidth = v->lineThickness / 3.0f;
-            d.pts = { (float)x1, (float)y1, (float)x2, (float)y2 };
+            d.pts = { (float)cx1, (float)cy1, (float)cx2, (float)cy2 };
             if (v->selected) {
                 DrawCmd h = d;
                 h.color = selHalo;

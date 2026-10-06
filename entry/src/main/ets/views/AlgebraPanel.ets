@@ -1,5 +1,7 @@
 // AlgebraPanel.ets — 代数区面板（自 CanvasView 拆出，轮 A 防乱重构）：
 // 头部（计数/⌨/收起）+ 错误条 + 行列表 + 行内修改/新建行。
+// 四十八包②：列表按对象类型分组呈现——组头（箭头折叠/展开 + 计数 + 显隐
+// 眼批量开关组内对象）+ 成员行；分组只重排行序，行交互不变。
 // 会话状态（待输入文本、编辑行、键盘开关）留在 CanvasView 统一编排，面板
 // 只呈现并转发事件；宽屏左栏（showError=true：错误条在头部之下）与窄屏
 // 抽屉（showError=false：错误条由画布下方渲染）共用本组件。
@@ -13,6 +15,41 @@ import { AlgebraEntry } from '../model/GeoTypes';
 import { Theme } from '../model/Theme';
 import { AlgebraRowView } from './AlgebraRowView';
 import { MathField } from './MathField';
+
+// 四十八包②：代数区分组——固定类型序（上游代数区按类型分组的常用次序），
+// numeric 与 slider 同属「数字」组（上游滑动条即带滑杆的数值）；未知类型
+// 归「其他」组兜底。分组只影响列表呈现（折叠/显隐头），行的交互与内核
+// 顺序无关。
+const GRP_DEFS: string[][] = [
+  ['numeric', 'slider'],   // 数字（含滑动条）
+  ['angle'],               // 角度
+  ['point'],               // 点
+  ['vector'],              // 向量
+  ['segment'],             // 线段
+  ['ray'],                 // 射线
+  ['line'],                // 直线
+  ['circle'],              // 圆
+  ['function'],            // 函数
+  ['polygon'],             // 多边形
+  ['list'],                // 列表
+  ['text']                 // 文本
+];
+const GRP_NAMES: string[] = ['数字', '角度', '点', '向量', '线段', '射线',
+  '直线', '圆', '函数', '多边形', '列表', '文本'];
+
+// 分组行模型：headType 非空 = 分组头行（entry 挂首成员仅占位，不渲染）；
+// 否则为对象行。eyeColor/chevron 在行构建时算好，@Builder 内只做呈现。
+class AlgebraGrpRow {
+  headType: string = '';
+  name: string = '';
+  count: number = 0;
+  allVis: boolean = true;
+  eyeColor: string = '';
+  chevron: string = '▾';
+  entry: AlgebraEntry = new AlgebraEntry('', 'numeric', '', '');
+  members: AlgebraEntry[] = [];
+  key: string = '';
+}
 
 @Component
 export struct AlgebraPanel {
@@ -82,6 +119,112 @@ export struct AlgebraPanel {
   onFieldTapCaret: (pos: number, script: boolean) => void =
     (_p: number, _s: boolean) => {};
   onClose: () => void = () => {};
+
+  // 四十八包②：分组折叠态（键=组标识，如 'numeric'/'other'）；空=全展开。
+  // 切换时整体重赋值（@State 数组须换引用才触发刷新）
+  @State private grpCollapsed: string[] = [];
+
+  // 组头行构建：眼睛颜色随组类型（其他组用中性色）、箭头随折叠态；
+  // 键编码折叠/显隐态，状态翻转即换键 → ForEach 重建头行刷新眼睛
+  private grpHeadRow(name: string, key: string, eyeType: string,
+    idxs: number[]): AlgebraGrpRow {
+    const r = new AlgebraGrpRow();
+    r.headType = key;
+    r.name = name;
+    r.count = idxs.length;
+    const ms: AlgebraEntry[] = [];
+    let allVis = true;
+    for (const i of idxs) {
+      ms.push(this.algebra[i]);
+      if (this.algebra[i].vis === '0') {
+        allVis = false;
+      }
+    }
+    r.members = ms;
+    if (ms.length > 0) {
+      r.entry = ms[0];
+    }
+    r.allVis = allVis;
+    r.eyeColor = eyeType.length > 0
+      ? Theme.typeColor(eyeType, this.dark) : Theme.sub(this.dark);
+    r.chevron = this.grpCollapsed.indexOf(key) >= 0 ? '▸' : '▾';
+    r.key = 'H:' + key + ':' + r.count + ':' + (allVis ? 1 : 0)
+      + (r.chevron === '▸' ? 'c' : '');
+    return r;
+  }
+
+  // 分组行序列：每组头行后跟成员行（折叠组不发成员行）；不入任何已知组
+  // 的类型归「其他」兜底组
+  private buildGrpRows(): AlgebraGrpRow[] {
+    const rows: AlgebraGrpRow[] = [];
+    const used: boolean[] = [];
+    for (let i = 0; i < this.algebra.length; i++) {
+      used.push(false);
+    }
+    for (let d = 0; d < GRP_DEFS.length; d++) {
+      const idxs: number[] = [];
+      for (let i = 0; i < this.algebra.length; i++) {
+        if (!used[i] && GRP_DEFS[d].indexOf(this.algebra[i].type) >= 0) {
+          idxs.push(i);
+          used[i] = true;
+        }
+      }
+      if (idxs.length === 0) {
+        continue;
+      }
+      rows.push(this.grpHeadRow(GRP_NAMES[d], GRP_DEFS[d][0], GRP_DEFS[d][0], idxs));
+      if (this.grpCollapsed.indexOf(GRP_DEFS[d][0]) >= 0) {
+        continue;
+      }
+      for (const i of idxs) {
+        const r = new AlgebraGrpRow();
+        r.entry = this.algebra[i];
+        r.key = r.entry.label + '#' + (this.dark ? 'D' : 'L');
+        rows.push(r);
+      }
+    }
+    const rest: number[] = [];
+    for (let i = 0; i < this.algebra.length; i++) {
+      if (!used[i]) {
+        rest.push(i);
+      }
+    }
+    if (rest.length > 0) {
+      rows.push(this.grpHeadRow('其他', 'other', '', rest));
+      if (this.grpCollapsed.indexOf('other') < 0) {
+        for (const i of rest) {
+          const r = new AlgebraGrpRow();
+          r.entry = this.algebra[i];
+          r.key = r.entry.label + '#' + (this.dark ? 'D' : 'L');
+          rows.push(r);
+        }
+      }
+    }
+    return rows;
+  }
+
+  private toggleGrpCollapse(key: string): void {
+    const had = this.grpCollapsed.indexOf(key) >= 0;
+    const next: string[] = [];
+    for (const k of this.grpCollapsed) {
+      if (k !== key) {
+        next.push(k);
+      }
+    }
+    if (!had) {
+      next.push(key);
+    }
+    this.grpCollapsed = next;
+  }
+
+  // 显隐眼：组内有隐藏 → 全显示；全显示 → 全隐藏。逐行下发宿主
+  //（onToggleVis 同单行按钮同一通道）
+  private toggleGrpVis(row: AlgebraGrpRow): void {
+    const target = !row.allVis;
+    for (const m of row.members) {
+      this.onToggleVis(m.label, target);
+    }
+  }
 
   // 三十六包：浮层空壳——customKeyboard 挂载即抑制系统 IME，1px 透明壳
   // 的弹出/收起不可见；键盘本体在宿主页面顶层（CanvasView.mathKbOverlay，
@@ -424,41 +567,92 @@ export struct AlgebraPanel {
     }
   }
 
+  // 四十八包②：分组头行——箭头（折叠/展开）+ 组名 + 计数 + 显隐眼（实心=
+  // 组内全显示，点按全隐藏；空心=有隐藏，点按全显示）。点行其余位置折叠
+  // /展开
+  @Builder
+  private groupHeadRow(row: AlgebraGrpRow) {
+    Row() {
+      Text(row.chevron)
+        .fontSize(11)
+        .fontColor(Theme.faint(this.dark))
+        .width(20)
+        .height(24)
+        .textAlign(TextAlign.Center)
+      Text(row.name)
+        .fontSize(12)
+        .fontWeight(FontWeight.Medium)
+        .fontColor(Theme.sub(this.dark))
+      Text(`${row.count}`)
+        .fontSize(11)
+        .fontColor(Theme.faint(this.dark))
+        .margin({ left: 6 })
+      Blank()
+      Text()
+        .width(16)
+        .height(16)
+        .borderRadius(8)
+        .borderWidth(2)
+        .borderColor(row.eyeColor)
+        .backgroundColor(row.allVis ? row.eyeColor : Color.Transparent)
+        .onClick(() => {
+          this.toggleGrpVis(row)
+        })
+    }
+    .width('100%')
+    .height(28)
+    .padding({ left: 6, right: 12 })
+    .margin({ top: 2 })
+    .onClick(() => {
+      this.toggleGrpCollapse(row.headType)
+    })
+  }
+
+  // 对象行（编辑行/普通行/滑动条行内编辑块，四十八包②自 listArea 拆出）
+  @Builder
+  private entryItem(e: AlgebraEntry) {
+    if (this.editingLabel === e.label) {
+      // 修改模式：整行就地替换为编辑框（与改名同款）
+      this.editRow(e)
+    } else {
+      Column() {
+        AlgebraRowView({
+          entry: e,
+          dark: this.dark,
+          onToggleVis: (l: string, s: boolean): void => this.onToggleVis(l, s),
+          onSelect: (l: string): void => this.onSelect(l),
+          onRename: (l: string, n: string): void => this.onRename(l, n),
+          onRenameRequest: (l: string): void => this.onRenameRequest(l),
+          onEdit: (l: string, d: string): void => this.onEdit(l, d),
+          onSliderEdit: (l: string): void => this.onSliderEdit(l),
+          onToggleAnim: (l: string): void => this.onToggleAnim(l),
+          onDelete: (l: string): void => this.onDelete(l),
+          onSlider: (l: string, v: number, m: number): void => this.onSlider(l, v, m),
+          onAlpha: (l: string, v: number, m: number): void => this.onAlpha(l, v, m)
+        })
+        // 二十九包②：滑动条行内编辑块——行值文本点击后在本行下方
+        // 展开（四项独立编辑 + ⌨ 切键盘），与行同一 ListItem 滚动，
+        // 打开时该行已滚到列表顶部（CanvasView.openSliderEdit）
+        if (e.type === 'slider' && this.slideEditLabel === e.label) {
+          this.slideEditFields()
+        }
+      }
+      .width('100%')
+    }
+  }
+
   @Builder
   private listArea() {
     List({ space: 2, scroller: this.scroller }) {
-      ForEach(this.algebra, (e: AlgebraEntry) => {
+      ForEach(this.buildGrpRows(), (row: AlgebraGrpRow) => {
         ListItem() {
-          if (this.editingLabel === e.label) {
-            // 修改模式：整行就地替换为编辑框（与改名同款）
-            this.editRow(e)
+          if (row.headType.length > 0) {
+            this.groupHeadRow(row)
           } else {
-            Column() {
-              AlgebraRowView({
-                entry: e,
-                dark: this.dark,
-                onToggleVis: (l: string, s: boolean): void => this.onToggleVis(l, s),
-                onSelect: (l: string): void => this.onSelect(l),
-                onRename: (l: string, n: string): void => this.onRename(l, n),
-                onRenameRequest: (l: string): void => this.onRenameRequest(l),
-                onEdit: (l: string, d: string): void => this.onEdit(l, d),
-                onSliderEdit: (l: string): void => this.onSliderEdit(l),
-                onToggleAnim: (l: string): void => this.onToggleAnim(l),
-                onDelete: (l: string): void => this.onDelete(l),
-                onSlider: (l: string, v: number, m: number): void => this.onSlider(l, v, m),
-                onAlpha: (l: string, v: number, m: number): void => this.onAlpha(l, v, m)
-              })
-              // 二十九包②：滑动条行内编辑块——行值文本点击后在本行下方
-              // 展开（四项独立编辑 + ⌨ 切键盘），与行同一 ListItem 滚动，
-              // 打开时该行已滚到列表顶部（CanvasView.openSliderEdit）
-              if (e.type === 'slider' && this.slideEditLabel === e.label) {
-                this.slideEditFields()
-              }
-            }
-            .width('100%')
+            this.entryItem(row.entry)
           }
         }
-      }, (e: AlgebraEntry) => e.label + '#' + (this.dark ? 'D' : 'L'))
+      }, (row: AlgebraGrpRow) => row.key)
     }
     .width('100%')
     .layoutWeight(1)
