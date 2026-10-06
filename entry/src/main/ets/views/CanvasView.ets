@@ -154,7 +154,11 @@ import window from '@ohos.window';
 // OFFSET（整个页面上移，页高不变）切成 RESIZE（页高确定性收缩）。真机根因：
 // 默认 OFFSET 抬升页面 ≈ 一个键盘高，我方垫底再加一个键盘高 = 避让多出
 // 一整个键盘高，且页高从不收缩、askSysPad 的「页高收缩闸门」永不触发
-//（二十八包④真机两轮未解的根因；模拟器不真弹 IME 复现不了）
+//（二十八包④真机两轮未解的根因；模拟器不真弹 IME 复现不了）。
+// 四十四包 v4 推翻：真机帧证 RESIZE 页面回弹视觉是终帧瞬移（无动画），
+// 弹窗卡片下降永远一次瞬跳——v4 起**不再切 RESIZE**，弹窗 OFFSET 端到端
+//（垫底已退役，避让全靠系统抬升），下方 closeToolAsk 的 OFFSET 恢复保留
+// 作防御性复位
 import { KeyboardAvoidMode } from '@ohos.arkui.UIContext';
 import { canvasDensity, functionOpenBefore, hasIdentBase, isTypewriterCh,
   matchParenBackward, MathCaretStop, mathCaretStops, parseMathAtoms,
@@ -342,21 +346,12 @@ export struct CanvasView {
     }
   }
 
-  // 弹窗系统键盘垫底（二十八包④重做基准；三十三包①收缩为旧 ROM 专属）：
-  // RESIZE 就绪的设备页高确定性收缩、卡片钉底天然避让，任何过渡垫底都只
-  // 制造「掉下去再弹上来」的多余一跳 → 恒 0；仅 RESIZE 不可用（旧 ROM，
-  // OFFSET 世界页高不缩）保留实测垫底 + 收缩闸门（页高已缩不垫，防垫+缩
-  // 双份）。基准取打开以来最大页高：keyboardHeightChange 与窗口收缩到达
-  // 顺序不定，触发时快照会拍到已缩页高、差值归零闸门失效
+  // 弹窗系统键盘垫底——四十四包 v4 **退役恒 0**：v4 弹窗改 OFFSET 端到端
+  //（见 openToolAsk），卡片避让全靠系统页面抬升（与 IME 滑落同编排的窗口
+  // 平移动画）；RESIZE 时代它只在页缩落地前制造「掉下去再弹上来」的多余
+  // 一跳，OFFSET 世界更不能垫（二十八包④「垫+移双份避让」的教训）
   private askSysPad(): number {
-    if (this.askResizeOk || this.sysKbH <= 0) {
-      return 0;
-    }
-    if (this.askOpenPageH > 0 && this.askOpenPageH - this.pageH > 40) {
-      return 0;
-    }
-    const navGap = AppStorage.get<number>('ui.navBottomVp') ?? 0;
-    return Math.max(0, Math.round(this.sysKbH - navGap + 4));
+    return 0;
   }
 
   private onInputMethodOpt(): void {
@@ -699,19 +694,14 @@ export struct CanvasView {
   // 弹窗开启：预填 上游 同款默认值（旋转 45°/位似 2/定角 60°/半径与定长 3），
   // 焦点抢入输入框（sheetCellEditor 同款动态插入组件显式抢焦）
   private openToolAsk(hint: string): void {
-    // 二十九包①：弹窗期间切 RESIZE 避让（页高确定性收缩），关闭时在
-    // closeToolAsk 恢复默认 OFFSET。OFFSET 页面上移不缩页高 + 我方垫底 =
-    // 真机避让多出一整个键盘高（二十八包④未解的根因）。三十三包①：RESIZE
-    // 就绪（askResizeOk）则卡片钉底随页缩天然避让、askSysPad 过渡垫底退役
-    // ——它只在页缩落地前制造「掉下去再弹上来」的多余一跳；旧 ROM 落回
-    // OFFSET + 实测垫底 + 收缩闸门
-    try {
-      this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.RESIZE);
-      this.askResizeOk = true;
-    } catch (_e) {
-      // 旧 ROM 不支持：维持 OFFSET + 垫底闸门的既有行为
-      this.askResizeOk = false;
-    }
+    // 二十九包①曾切 RESIZE（页高确定性收缩）——四十四包真机帧证推翻：本机
+    // ROM 的 RESIZE 页面回弹视觉是**终帧瞬移**（布局 26ms 内到终值、视觉
+    // 要到 IME 滑走后才一帧跳回，连拍抓不到中间帧=无动画），卡片下降永远
+    // 是一次瞬跳（v1-v3 三版挂行闸怎么调都有 residual）。v4 改 OFFSET 端
+    // 到端：卡片下降=系统页面抬升的收回（与 IME 滑落同编排，全应用其余
+    // 系统键盘位均走此通道真机无瞬移投诉），挂行仍由 v3 轮询闸兜时序；
+    // askSysPad 垫底随之退役恒 0（垫+移双份=二十八包④根因，勿复活）
+    this.askResizeOk = false;
     this.askBridgeKb = false;
     this.cancelAskKbSwitch();   // 四十三包：防御性复位（弹窗全新开启）
     this.toolAskHint = hint;
@@ -785,8 +775,9 @@ export struct CanvasView {
     // 等待定时器；键盘形态保持 system（useSysKeyboard/opt 同对未动），
     // IME 已随 clearFocus 落下，与弹窗关闭一致
     this.cancelAskKbSwitch();
-    // 二十九包①：恢复默认 OFFSET 避让（弹窗外其余输入位——代数区/表格/
-    // 数据区系统键盘——依赖它，真机行为本就正常，勿动）
+    // 二十九包①曾在此恢复 OFFSET；四十四包 v4 起弹窗全程 OFFSET（不再切
+    // RESIZE），本调用保留作防御性复位（弹窗外其余输入位——代数区/表格/
+    // 数据区系统键盘——依赖 OFFSET，勿删）
     try {
       this.getUIContext().setKeyboardAvoidMode(KeyboardAvoidMode.OFFSET);
     } catch (_e) {
@@ -1080,9 +1071,9 @@ export struct CanvasView {
     this.useSysKeyboard = !this.useSysKeyboard;
     AppStorage.setOrCreate('opt.inputMethod', this.useSysKeyboard ? 0 : 1);
     if (this.useSysKeyboard) {
-      if (this.askResizeOk) {
-        this.askBridgeKb = true;
-      }
+      // 四十四包 v4：过渡桥不再限于 RESIZE 世界——桥的时序锚=IME 实高事件
+      // （watchKbHeight 200ms 收合），与避让模式无关，OFFSET 世界同样适用
+      this.askBridgeKb = true;
       this.grabAskSystemKb();
     } else if (this.sysKbH > 0) {
       // IME 正在弹：先落 IME（清焦），轮询等「kbH 归零 + 实测页高回弹 + 350ms
@@ -1771,8 +1762,8 @@ export struct CanvasView {
   // 终值而画面在途中，此刻实测会拿到中间值把已到位的垫高改飞），落定后
   // onFinish 复查一次收敛
   private slidePadAnimating: boolean = false;
-  // 三十三包①：弹窗期 RESIZE 是否试设成功——就绪则卡片钉底随页缩天然避
-  // 让，askSysPad 过渡垫底退役；仅旧 ROM 维持 OFFSET + 实测垫底 + 收缩闸门
+  // 三十三包①曾记弹窗期 RESIZE 试设结果；四十四包 v4 起弹窗不再切
+  // RESIZE（OFFSET 端到端）故恒 false，仅留作 KBDBG 诊断字段
   private askResizeOk: boolean = false;
   // 三十三包①：⌨ 切系统键的过渡桥——自带键盘行保挂到 IME 实高事件到达
   //（页缩随动）再动画收合，卡片单段过渡，不再「掉下去再弹上来」
