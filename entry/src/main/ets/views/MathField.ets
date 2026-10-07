@@ -87,6 +87,10 @@
 // 容全遍历，根号内角标首获框内停靠），点触反查 scriptStopSpan /
 // baseStopXRec / stopIsSup 分式下钻；④MathText 静态行分式动态加高；编
 // 辑行仍 30（单层分式恰容；嵌套分式与分母降部字裁切为已知限制）。
+// 2026-10-07 第五十一包（真机反馈）：分子根号渲染错位（√(x)/2 的 x 偏左
+// 与钩形重叠）——分式分支只平移了子布局顶层片，根号 kids 是子布局绝对
+// 坐标没跟着动 → shiftPiecesX 递归平移（kind 2 kids / kind 4 子表一并，
+// 点触反查等一切读片坐标处随之一致；NthRoot 根次片同获修正）。
 import { Theme } from '../model/Theme';
 import display from '@ohos.display';
 
@@ -1136,6 +1140,27 @@ interface MathLayoutResult {
   width: number;
 }
 
+// 子片树整体水平平移（五十一包）：分式子布局在原点 0 排出后加居中偏移，
+// 而根号内容（kind 2 kids）与嵌套分式子表（kind 4）的子片同为"子布局绝
+// 对坐标"，必须一并平移——浅移只动顶层会让分子根号内容滞留原位与钩形重
+// 叠（五十包真机实证）；点触反查读片坐标处随递归全树一致
+function shiftPiecesX(pieces: MathPiece[], dx: number): void {
+  for (let q = 0; q < pieces.length; q++) {
+    const p = pieces[q];
+    p.x += dx;
+    if (p.kind === 2 && p.kids.length > 0) {
+      shiftPiecesX(p.kids, dx);
+    } else if (p.kind === 4) {
+      if (p.fracNum !== undefined) {
+        shiftPiecesX(p.fracNum, dx);
+      }
+      if (p.fracDen !== undefined) {
+        shiftPiecesX(p.fracDen, dx);
+      }
+    }
+  }
+}
+
 // 原子表 → 绘制片（含 x 定位）。坐标系 = **vp**（第十五包③终案——四轮
 // 真机证据链闭环：十二包 vp 几何+px 字号 → 几何对/字小；十三包 font×k +
 // advance/k → 字对/光标落 33% 处；十四包全部 ×k → 全部画出界不可见，反
@@ -1169,12 +1194,8 @@ function mathLayout(ctx: CanvasRenderingContext2D, atoms: MathAtom[],
       const fw = Math.max(numLay.width, denLay.width) + 2;
       const nx = x + (fw - numLay.width) / 2;
       const dx = x + (fw - denLay.width) / 2;
-      for (let q = 0; q < numLay.pieces.length; q++) {
-        numLay.pieces[q].x += nx;
-      }
-      for (let q = 0; q < denLay.pieces.length; q++) {
-        denLay.pieces[q].x += dx;
-      }
+      shiftPiecesX(numLay.pieces, nx);
+      shiftPiecesX(denLay.pieces, dx);
       const pf: MathPiece = { kind: 4, ch: '', x: x, size: charS,
         sup: false, sub: false, over: false, caretIn: false, w: fw,
         kids: [], kw: 0, radH: 0, hw: 0,
