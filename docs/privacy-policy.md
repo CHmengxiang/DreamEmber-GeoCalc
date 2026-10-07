@@ -41,7 +41,7 @@
 
 ## 八、开源信息
 
-本应用按 **GPL-3.0-or-later** 协议开源，源码地址：<https://gitee.com/CH_mengxiang/DreamEmber-GeoCalc>（应用内「关于」页亦有入口）。
+本应用按 **GPL-3.0-or-later** 协议开源，源码地址：<https://gitee.com/CH_mengxiang/DreamEmber-GeoCalc>。
 
 ## 九、联系我们
 
