@@ -6,7 +6,10 @@
 //
 // 原子化解析（parseMathAtoms）：每个原子覆盖原文的一个区间 [start,end)，
 // 被吞掉的语法字符（^ ( ) sqrt( 等）并入相邻原子的区间，保证光标索引到
-// 显示位置的映射连续。分数保持线性 "a/b"（v1），堆栈式分式后续再做。
+// 显示位置的映射连续。堆栈分式（五十包）：applyFractions 后处理把 "/"
+// 与两侧因子重组为分式原子（fracNum/fracDen 子原子组），纯显示层变换、
+// 原文串与内核解析不变；划界规则与内核 parseTerm 左结合语义一致，显示
+// 不与内核求值矛盾（详见 applyFractions 注释）。
 //
 // 2026-10-01 第九包（真机反馈）：①□_□ 改插空下标模板 '_'（不预填 a/n），
 // 无 base 时渲染 base 占位框 + 零宽下标占位框（键帽框_框）；②新增编辑
@@ -74,6 +77,16 @@
 // → csup=false → 基线大光标，恰在大小框交界处高度不变。前向条件改
 // end > cp（首个未越过的脚本原子），框内各站（首/中/尾）均按 run 样式
 // 渲染小号光标；空框 caretIn 路径不受影响。
+// 2026-10-07 第五十包（堆栈分式）：①parseMathAtoms 后新增 applyFractions
+// 显示层后处理——顶层 "/" 与两侧因子重组为分式原子（fracNum/fracDen 子
+// 原子组 + slash 分界下标），分子回溯到 +−=<>,; 空格、未堆栈 "/"、既有
+// 分式（嵌套堆栈留待行高支持）边界，分母取单个最小因子加紧随角标/后缀，
+// 任一侧为空不堆栈；②分式排版绘制（mathLayout/mathDraw kind 4，子布局
+// 根号高压缩防溢出）；③光标全链路：buildDisplayAtoms 分式下钻（cp≤slash
+// 落分子尾前、否则分母），mathCaretStops 重构为递归 walk（分式与根号内
+// 容全遍历，根号内角标首获框内停靠），点触反查 scriptStopSpan /
+// baseStopXRec / stopIsSup 分式下钻；④MathText 静态行分式动态加高；编
+// 辑行仍 30（单层分式恰容；嵌套分式与分母降部字裁切为已知限制）。
 import { Theme } from '../model/Theme';
 import display from '@ohos.display';
 
@@ -101,6 +114,9 @@ export interface MathAtom {
   caretIn?: boolean;   // 光标画进占位框内（第十一包③）
   kids?: MathAtom[];   // 根号组内容子原子（第十一包⑥一体渲染）
   idx?: MathAtom[];    // 根次子原子（四十七包④ NthRoot：下标小字置于钩形缺口）
+  fracNum?: MathAtom[]; // 堆栈分式分子子原子组（五十包；原子 ch='' 自身不渲染）
+  fracDen?: MathAtom[]; // 堆栈分式分母子原子组
+  slash?: number;      // "/" 的原文下标（分子/分母分界：cp≤slash → 分子）
 }
 
 const DIGITS: string = '0123456789';
@@ -480,6 +496,209 @@ export function parseMathAtoms(raw: string): MathAtom[] {
   return atoms;
 }
 
+// ---- 五十包：堆栈分式（纯显示层后处理，原文串与内核解析不变） ----
+// 划界与内核 expr.cpp 语义对齐，显示不与求值矛盾：
+//  · parseTerm 中 * / 与隐式乘法同优先级、严格左结合（1/2x=(1/2)·x、
+//    1/2/3=(1/2)/3）→ 分子 = "/" 之前回溯到边界的整个左结合积（乘号/
+//    并列/括号组/角标/根号/后缀 ! % ° 全归分子），分母 = 单个最小因子
+//    （与 ^ 同级的 primary）加紧随角标与 ! % ° 后缀；
+//  · ExpandMixedNumbers 先于去空白执行（"5 1/2"→"5+1/2"）→ 空格是分子
+//    边界（带分数渲染为 整数 + 堆栈分式，恰同内核值）；
+//  · 既有分式/未堆栈 "/" 作分子边界：前者 v1 不嵌套（编辑行 30 高不
+//    够双层），后者防 "1/+2/3" 误读（内核按 1/6 求）；
+//  · 任一侧为空（"1/"、"1/+2"、句首 "/"）不堆栈保持线性。
+function isLetterAtomCh(c: string): boolean {
+  return isAlphaCh(c) || isGreekCh(c);
+}
+
+function isDigitAtomCh(c: string): boolean {
+  return isDigitCh(c) || c === '.';
+}
+
+// 原子表中向后配对 ch===')' 的原子下标（组首），无配对返回 -1
+function matchParenAtomBackward(atoms: MathAtom[], close: number): number {
+  let depth = 0;
+  for (let q = close; q >= 0; q--) {
+    const c = atoms[q].ch;
+    if (c === ')') {
+      depth++;
+    } else if (c === '(') {
+      depth--;
+      if (depth === 0) {
+        return q;
+      }
+    }
+  }
+  return -1;
+}
+
+// 原子表中向前配对 ch==='(' 的原子下标（组尾），无配对返回 -1
+function matchParenAtomForward(atoms: MathAtom[], open: number): number {
+  let depth = 0;
+  for (let q = open; q < atoms.length; q++) {
+    const c = atoms[q].ch;
+    if (c === '(') {
+      depth++;
+    } else if (c === ')') {
+      depth--;
+      if (depth === 0) {
+        return q;
+      }
+    }
+  }
+  return -1;
+}
+
+// "/" 原子两侧重组为分式原子；子表（括号组内、根号内容）递归应用。
+// 幂等：已无普通 "/" 的表原样返回
+export function applyFractions(atoms: MathAtom[]): MathAtom[] {
+  const out: MathAtom[] = atoms.slice();
+  for (let j = 0; j < out.length; j++) {
+    const aj = out[j];
+    if (aj.kids !== undefined && aj.kids.length > 0) {
+      aj.kids = applyFractions(aj.kids);
+    }
+    if (aj.idx !== undefined && aj.idx.length > 0) {
+      aj.idx = applyFractions(aj.idx);
+    }
+  }
+  let i = 0;
+  while (i < out.length) {
+    const a = out[i];
+    if (a.ch !== '/' || a.sup || a.sub || a.dim
+      || (a.kids !== undefined && a.kids.length > 0)) {
+      i++;
+      continue;
+    }
+    // ---- 分子：从 i-1 回溯，ns = 分子首原子下标 ----
+    let ns = i;
+    for (let j = i - 1; j >= 0; j--) {
+      const p = out[j];
+      if (p.fracNum !== undefined || p.ch === '/' || p.ch === '(') {
+        ns = j + 1;
+        break;
+      }
+      if (p.ch === ')') {
+        const open = matchParenAtomBackward(out, j);
+        if (open < 0) {
+          ns = j + 1;
+          break;
+        }
+        ns = open;
+        j = open; // for 的 j-- 使下一轮落在组首之前（组已整段归入）
+        continue;
+      }
+      if (p.sup || p.sub || p.dim || p.ch.length === 0
+        || isLetterAtomCh(p.ch) || isDigitCh(p.ch) || p.ch === '*'
+        || p.ch === '.' || p.ch === '!' || p.ch === '%' || p.ch === '°'
+        || p.ch === '$' || p.ch === '|'
+        || (p.kids !== undefined && p.kids.length > 0)) {
+        ns = j;
+        continue;
+      }
+      ns = j + 1; // + - = < > , ; 空格 及其余符号 = 边界
+      break;
+    }
+    // ---- 分母：从 i+1 取单个最小因子，de = 分母末原子下标 ----
+    let de = -1;
+    if (i + 1 < out.length) {
+      const d0 = out[i + 1];
+      let q = i + 1;
+      let found = false;
+      if (d0.ch === '(' && !d0.sup && !d0.sub) {
+        const close = matchParenAtomForward(out, i + 1);
+        if (close > 0) {
+          q = close + 1;
+          found = true;
+        }
+      } else if (isLetterAtomCh(d0.ch) && !d0.sup && !d0.sub) {
+        while (q < out.length && isLetterAtomCh(out[q].ch) && !out[q].sup
+          && !out[q].sub) {
+          q++;
+        }
+        if (q < out.length && out[q].ch === '(') {
+          // 字母串后跟 "(" = 函数调用，参数括号组归分母（sin(x)/2）
+          const close = matchParenAtomForward(out, q);
+          if (close > 0) {
+            q = close + 1;
+          }
+        }
+        found = true;
+      } else if (isDigitAtomCh(d0.ch) && !d0.sup && !d0.sub) {
+        while (q < out.length && isDigitAtomCh(out[q].ch) && !out[q].sup
+          && !out[q].sub) {
+          q++;
+        }
+        found = true;
+      } else if ((d0.kids !== undefined && d0.kids.length > 0) || d0.dim) {
+        q = i + 2; // 根号原子 / 占位框
+        found = true;
+      }
+      if (found) {
+        // 吸收紧随角标与 ! % ° 后缀（内核 ^ 与后缀绑得比 / 紧：1/2^3=1/(2^3)）
+        for (;;) {
+          if (q < out.length && (out[q].sup || out[q].sub)) {
+            q++;
+            continue;
+          }
+          if (q < out.length && (out[q].ch === '!' || out[q].ch === '%'
+            || out[q].ch === '°')) {
+            q++;
+            continue;
+          }
+          break;
+        }
+        de = q - 1;
+      }
+    }
+    // ---- 组装：替换 [ns, de] 为分式原子 ----
+    if (ns < i && de > i) {
+      const numAtoms = out.slice(ns, i);
+      const denAtoms = out.slice(i + 1, de + 1);
+      const frac: MathAtom = {
+        ch: '', sup: false, sub: false, over: false, dim: false,
+        caret: false,
+        start: numAtoms[0].start,
+        end: denAtoms[denAtoms.length - 1].end,
+        fracNum: applyFractions(numAtoms),
+        fracDen: applyFractions(denAtoms),
+        slash: a.start
+      };
+      out.splice(ns, de - ns + 1, frac);
+      i = ns + 1;
+    } else {
+      i++;
+    }
+  }
+  return out;
+}
+
+// 原子表（含子表）中是否存在分式原子
+function atomsHaveFrac(atoms: MathAtom[]): boolean {
+  for (let j = 0; j < atoms.length; j++) {
+    const a = atoms[j];
+    if (a.fracNum !== undefined) {
+      return true;
+    }
+    if (a.kids !== undefined && a.kids.length > 0) {
+      if (atomsHaveFrac(a.kids)) {
+        return true;
+      }
+    }
+    if (a.idx !== undefined && a.idx.length > 0 && atomsHaveFrac(a.idx)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+// 显示用原子表 = 线性解析 + 堆栈分式后处理：编辑/静态渲染、光标停靠与
+// 点触反查统一入口。CanvasView.deriveCaretScript 维持用线性 parseMath
+// Atoms——角标态判定与分式无关
+function parseDisplayAtoms(raw: string): MathAtom[] {
+  return applyFractions(parseMathAtoms(raw));
+}
+
 // 在原子表中按光标索引插入光标伪原子：落在某个原子区间内 → 该原子前；
 // 恰在零宽下标框处 → 光标落框内（第九包①）；落在末尾 → 追加；落在根号
 // 组区间内 → 下钻内容子原子（第十一包⑥）。
@@ -490,7 +709,7 @@ export function parseMathAtoms(raw: string): MathAtom[] {
 // 态也入框，脚本框仅框内态入框（框外态保持基线、框前可见，上游 同款）
 export function buildDisplayAtoms(raw: string, caret: number,
   caretScript: boolean = false): MathAtom[] {
-  const atoms = parseMathAtoms(raw);
+  const atoms = parseDisplayAtoms(raw);
   const cp = Math.max(0, Math.min(caret, raw.length));
   let csup = false;
   let csub = false;
@@ -535,7 +754,30 @@ export function buildDisplayAtoms(raw: string, caret: number,
     }
   }
   if (host !== undefined) {
-    if (host.kids !== undefined && host.kids.length > 0 && cp > host.start) {
+    if (host.fracNum !== undefined && host.fracDen !== undefined
+      && cp > host.start) {
+      // 分式内（五十包）：cp≤slash → 分子（cp=slash 落分子尾=键入续写
+      // 分子，与原文插入语义一致）；否则分母。frac 尾（cp==end）不进：
+      // host 探测 end>cp 已让位给下一原子=框外
+      const inNum = host.slash === undefined || cp <= host.slash;
+      const list = inNum ? host.fracNum : host.fracDen;
+      if (list !== undefined) {
+        let ih = -1;
+        for (let k = 0; k < list.length; k++) {
+          if (list[k].end > cp
+            || (list[k].start === cp && list[k].end === list[k].start)) {
+            ih = k;
+            break;
+          }
+        }
+        if (ih >= 0) {
+          list.splice(ih, 0, caretAtom);
+        } else {
+          list.push(caretAtom);
+        }
+      }
+    } else if (host.kids !== undefined && host.kids.length > 0
+      && cp > host.start) {
       // 根号组内：光标先查根次组（NthRoot 根次，四十七包④），再落内容
       // 子原子（第十一包⑥）。根次组尾=空占位框时直接 caretIn 画进框
       let placed = false;
@@ -699,70 +941,81 @@ export function mathCaretStops(raw: string): MathCaretStop[] {
     }
     stops.push({ pos: pos, script: script, empty: empty });
   };
-  push(0, false);
-  const atoms = parseMathAtoms(raw);
-  let j = 0;
-  while (j < atoms.length) {
-    const a = atoms[j];
-    if (a.sup || a.sub) {
-      let op = -1;
-      if (a.start < raw.length
-        && (raw.charAt(a.start) === '^' || raw.charAt(a.start) === '_')) {
-        op = a.start;
-      } else if (a.start > 0
-        && (raw.charAt(a.start - 1) === '^' || raw.charAt(a.start - 1) === '_')) {
-        op = a.start - 1;
+  // 原子表 → 停靠点（五十包重构为递归 walk：分式分子/分母、根号内容全
+  // 遍历——根号内角标因此首获框内停靠；分式产 分式首/分子内逐原子/斜杠
+  // 位/分母内逐原子 框外停靠，分式尾=下一原子 start 或串尾）
+  const walk = (atoms: MathAtom[]): void => {
+    let j = 0;
+    while (j < atoms.length) {
+      const a = atoms[j];
+      if (a.fracNum !== undefined && a.fracDen !== undefined) {
+        push(a.start, false);
+        walk(a.fracNum);
+        push(a.slash !== undefined ? a.slash : a.start, false);
+        walk(a.fracDen);
+        j++;
+        continue;
       }
-      let k = j;
-      while (k + 1 < atoms.length && (atoms[k + 1].sup || atoms[k + 1].sub)) {
-        k++;
+      if (a.sup || a.sub) {
+        let op = -1;
+        if (a.start < raw.length
+          && (raw.charAt(a.start) === '^' || raw.charAt(a.start) === '_')) {
+          op = a.start;
+        } else if (a.start > 0
+          && (raw.charAt(a.start - 1) === '^' || raw.charAt(a.start - 1) === '_')) {
+          op = a.start - 1;
+        }
+        let k = j;
+        while (k + 1 < atoms.length && (atoms[k + 1].sup || atoms[k + 1].sub)) {
+          k++;
+        }
+        if (op >= 0) {
+          const rng = scriptContentRange(raw, op);
+          if (hasIdentBase(raw, op)) {
+            push(op, false); // 框外框首（base 尾）；空 base 不产（第十一包③）
+          }
+          const emptyRun = rng[1] === rng[0];
+          for (let p = rng[0]; p <= rng[1]; p++) {
+            push(p, true, emptyRun); // 框内逐字符（空内容仅一站并标记，第十二包③）
+          }
+          push(scriptStructureEnd(raw, op), false); // 框外结构尾
+        } else {
+          // 无 ^/_ op 的脚本 run（log( 模板底数组，四十七包⑤）：内容 = 首原子
+          // 吞 '(' 之后至末尾（逗号已拆为独立隐字符原子，run 末即内容尾），
+          // 逐字符脚本停靠 + run 尾框外停靠
+          const cs = a.start < raw.length && raw.charAt(a.start) === '('
+            ? a.start + 1 : a.start;
+          const ce = atoms[k].end > cs && raw.charAt(atoms[k].end - 1) === ','
+            ? atoms[k].end - 1 : atoms[k].end;
+          for (let p = cs; p <= ce; p++) {
+            push(p, true, ce === cs);
+          }
+          push(atoms[k].end, false);
+        }
+        j = k + 1;
+        continue;
       }
-      if (op >= 0) {
-        const rng = scriptContentRange(raw, op);
-        if (hasIdentBase(raw, op)) {
-          push(op, false); // 框外框首（base 尾）；空 base 不产（第十一包③）
-        }
-        const emptyRun = rng[1] === rng[0];
-        for (let p = rng[0]; p <= rng[1]; p++) {
-          push(p, true, emptyRun); // 框内逐字符（空内容仅一站并标记，第十二包③）
-        }
-        push(scriptStructureEnd(raw, op), false); // 框外结构尾
-      } else {
-        // 无 ^/_ op 的脚本 run（log( 模板底数组，四十七包⑤）：内容 = 首原子
-        // 吞 '(' 之后至末尾（逗号已拆为独立隐字符原子，run 末即内容尾），
-        // 逐字符脚本停靠 + run 尾框外停靠
-        const cs = a.start < raw.length && raw.charAt(a.start) === '('
-          ? a.start + 1 : a.start;
-        const ce = atoms[k].end > cs && raw.charAt(atoms[k].end - 1) === ','
-          ? atoms[k].end - 1 : atoms[k].end;
-        for (let p = cs; p <= ce; p++) {
-          push(p, true, ce === cs);
-        }
-        push(atoms[k].end, false);
-      }
-      j = k + 1;
-      continue;
-    }
-    push(a.start, false);
-    if (a.kids !== undefined) {
-      // NthRoot 根次组（四十七包④）：根次内容逐字符（脚本态停靠）——
-      // 根次首原子吞 "NthRoot("，内容自 op+8 起，末原子尾即逗号位
-      if (a.idx !== undefined && a.idx.length > 0) {
-        const op = a.start;
-        const comma = a.idx[a.idx.length - 1].end;
-        if (comma >= op + 8 && comma <= raw.length
-          && raw.charAt(comma) === ',') {
-          for (let p = op + 8; p <= comma; p++) {
-            push(p, true, comma === op + 8);
+      push(a.start, false);
+      if (a.kids !== undefined) {
+        // NthRoot 根次组（四十七包④）：根次内容逐字符（脚本态停靠）——
+        // 根次首原子吞 "NthRoot("，内容自 op+8 起，末原子尾即逗号位
+        if (a.idx !== undefined && a.idx.length > 0) {
+          const op = a.start;
+          const comma = a.idx[a.idx.length - 1].end;
+          if (comma >= op + 8 && comma <= raw.length
+            && raw.charAt(comma) === ',') {
+            for (let p = op + 8; p <= comma; p++) {
+              push(p, true, comma === op + 8);
+            }
           }
         }
+        walk(a.kids); // 根号内容全遍历（五十包；原逐 kid start push）
       }
-      for (let k2 = 0; k2 < a.kids.length; k2++) {
-        push(a.kids[k2].start, false); // 根号内容逐原子（第十一包⑥）
-      }
+      j++;
     }
-    j++;
-  }
+  };
+  push(0, false);
+  walk(parseDisplayAtoms(raw));
   push(raw.length, false);
   return stops;
 }
@@ -856,10 +1109,10 @@ export function functionOpenBefore(raw: string, open: number): number {
 // 字符上方一条直线。
 
 interface MathPiece {
-  kind: number;      // 0 字符 1 占位框 2 根号 3 光标
+  kind: number;      // 0 字符 1 占位框 2 根号 3 光标 4 分式（五十包）
   ch: string;
   x: number;         // 绝对 x（根号内容递归定位）
-  size: number;      // 字号（框/根号为 0）
+  size: number;      // 字号（框/根号/分式为标称字号：分式基线几何由此推导）
   sup: boolean;
   sub: boolean;
   over: boolean;
@@ -869,6 +1122,9 @@ interface MathPiece {
   kw: number;        // 根号内容总宽
   radH: number;      // 根号整体高
   hw: number;        // 根号钩宽（四十七包④ NthRoot 带根次时加宽让位）
+  fracNum?: MathPiece[]; // 分式分子片（kind 4 专属，五十包）
+  fracDen?: MathPiece[]; // 分式分母片
+  slash?: number;    // "/" 原文下标（点触反查下钻分子/分母判别，五十包）
   dy?: number;       // 垂直基线偏移（根次组片专属：非 undefined 时覆盖
                      //  sup/sub 基线几何，mathDraw 按它定位）
   start: number;     // 覆盖原文区间 [start, end)（四十六包点触定位反查用；
@@ -899,6 +1155,33 @@ function mathLayout(ctx: CanvasRenderingContext2D, atoms: MathAtom[],
         sub: a.sub, over: false, caretIn: false, w: 0, kids: [], kw: 0, radH: 0,
         hw: 0, start: a.start, end: a.end };
       pieces.push(pc);
+      continue;
+    }
+    if (a.fracNum !== undefined && a.fracDen !== undefined) {
+      // 堆栈分式（五十包）：分子/分母各自子布局后水平居中，横线跨较宽侧
+      // +2。基线几何由 size 推导、mathDraw kind 4 用同式（num −0.62·size /
+      // bar −0.34 / den +0.46）；子布局根号高压 radH−6 防溢出 30 行高
+      const subRadH = Math.max(10, radH - 6);
+      const numLay = mathLayout(ctx, a.fracNum, 0, baseY - charS * 0.62,
+        charS, scrS, boxW, boxWs, subRadH, hookW, k);
+      const denLay = mathLayout(ctx, a.fracDen, 0, baseY + charS * 0.46,
+        charS, scrS, boxW, boxWs, subRadH, hookW, k);
+      const fw = Math.max(numLay.width, denLay.width) + 2;
+      const nx = x + (fw - numLay.width) / 2;
+      const dx = x + (fw - denLay.width) / 2;
+      for (let q = 0; q < numLay.pieces.length; q++) {
+        numLay.pieces[q].x += nx;
+      }
+      for (let q = 0; q < denLay.pieces.length; q++) {
+        denLay.pieces[q].x += dx;
+      }
+      const pf: MathPiece = { kind: 4, ch: '', x: x, size: charS,
+        sup: false, sub: false, over: false, caretIn: false, w: fw,
+        kids: [], kw: 0, radH: 0, hw: 0,
+        fracNum: numLay.pieces, fracDen: denLay.pieces, slash: a.slash,
+        start: a.start, end: a.end };
+      pieces.push(pf);
+      x += fw + 3;
       continue;
     }
     if (a.kids !== undefined && a.kids.length > 0) {
@@ -1044,6 +1327,22 @@ function mathDraw(ctx: CanvasRenderingContext2D, pieces: MathPiece[],
       ctx.stroke();
       mathDraw(ctx, p.kids, baseY, charColor, dimColor, caretColor,
         showCaret, hookW, k);
+    } else if (p.kind === 4) {
+      // 分式（五十包）：横线一次 stroke + 分子/分母两子表按各自基线递归
+      //（基线几何与 mathLayout kind 4 同式推导，size=标称字号）
+      const nb = baseY - p.size * 0.62;
+      const db = baseY + p.size * 0.46;
+      const bb = baseY - p.size * 0.34;
+      ctx.strokeStyle = charColor;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(p.x + 0.5, bb);
+      ctx.lineTo(p.x + p.w - 0.5, bb);
+      ctx.stroke();
+      mathDraw(ctx, p.fracNum !== undefined ? p.fracNum : [], nb,
+        charColor, dimColor, caretColor, showCaret, hookW, k);
+      mathDraw(ctx, p.fracDen !== undefined ? p.fracDen : [], db,
+        charColor, dimColor, caretColor, showCaret, hookW, k);
     } else if (p.kind === 3 && showCaret) {
       let y0 = baseY - 11;
       let y1 = baseY + 2;
@@ -1084,10 +1383,21 @@ function scriptStopSpan(pieces: MathPiece[], pos: number,
   let s1 = -1;
   for (let j = 0; j < pieces.length; j++) {
     const p = pieces[j];
-    if (p.kind === 2 && pos > p.start && pos <= p.end) {
+    if ((p.kind === 2 || p.kind === 4) && pos > p.start && pos <= p.end) {
       const inner = scriptStopSpan(p.kids, pos, empty);
       if (inner[0] >= 0) {
         return inner;
+      }
+      if (p.kind === 4) {
+        // 分式内角标（分子/分母内的 ^/_ 片，五十包）：按 slash 判别子表
+        const inNum = p.slash === undefined || pos <= p.slash;
+        const sub = inNum ? p.fracNum : p.fracDen;
+        if (sub !== undefined) {
+          const inner2 = scriptStopSpan(sub, pos, empty);
+          if (inner2[0] >= 0) {
+            return inner2;
+          }
+        }
       }
       continue;
     }
@@ -1118,6 +1428,28 @@ function baseStopXRec(pieces: MathPiece[], pos: number): number {
     if (p.end <= pos) {
       continue;
     }
+    if (p.kind === 4 && pos > p.start) {
+      // 分式内框外停靠（五十包）：按 slash 判别下钻分子/分母；cp=slash
+      // 落分子尾（末个有宽片右缘），与 buildDisplayAtoms 下钻规则一致
+      const inNum = p.slash === undefined || pos <= p.slash;
+      const sub = inNum ? p.fracNum : p.fracDen;
+      if (sub !== undefined) {
+        const inner = baseStopXRec(sub, pos);
+        if (inner >= 0) {
+          return inner;
+        }
+        let fr = -1;
+        for (let t = 0; t < sub.length; t++) {
+          if (sub[t].w > 0) {
+            fr = sub[t].x + sub[t].w;
+          }
+        }
+        if (fr >= 0) {
+          return fr;
+        }
+      }
+      return p.x;
+    }
     if (p.kind === 2 && pos > p.start) {
       const inner = baseStopXRec(p.kids, pos);
       if (inner >= 0) {
@@ -1139,13 +1471,29 @@ function baseStopXRec(pieces: MathPiece[], pos: number): number {
 }
 
 // 脚本停靠点是上标还是下标（光标 y 偏好仲裁用）：找覆盖 pos 的脚本原子
-//（start<pos≤end，首片吞语法字符故 start 是 ^/_ 的下标）
+//（start<pos≤end，首片吞语法字符故 start 是 ^/_ 的下标）。五十包起递归
+// 下钻分式分子/分母与根号内容（walk 产的框内停靠在这些子表里）
 function stopIsSup(raw: string, pos: number): boolean {
-  const atoms = parseMathAtoms(raw);
+  return stopIsSupIn(parseDisplayAtoms(raw), pos);
+}
+
+function stopIsSupIn(atoms: MathAtom[], pos: number): boolean {
   for (let j = 0; j < atoms.length; j++) {
     const a = atoms[j];
+    if (a.fracNum !== undefined && a.fracDen !== undefined) {
+      const inNum = a.slash === undefined || pos <= a.slash;
+      const sub = inNum ? a.fracNum : a.fracDen;
+      if (sub !== undefined && stopIsSupIn(sub, pos)) {
+        return true;
+      }
+      continue;
+    }
     if ((a.sup || a.sub) && pos > a.start && pos <= a.end) {
       return a.sup;
+    }
+    if (a.kids !== undefined && a.kids.length > 0 && pos > a.start
+      && stopIsSupIn(a.kids, pos)) {
+      return true;
     }
   }
   return false;
@@ -1160,7 +1508,8 @@ export function mathPickCaretStop(ctx: CanvasRenderingContext2D, raw: string,
   if (stops.length === 0) {
     return null;
   }
-  const lay = mathLayout(ctx, parseMathAtoms(raw), 0, 22, 15, 11, 9, 8, 22, 9, k);
+  const lay = mathLayout(ctx, parseDisplayAtoms(raw), 0, 22, 15, 11, 9, 8,
+    22, 9, k);
   const ds: number[] = [];
   for (let i = 0; i < stops.length; i++) {
     if (stops[i].script) {
@@ -1219,6 +1568,7 @@ export struct MathText {
   @Prop @Watch('repaint') fontSize: number = 13;
   @Prop @Watch('repaint') color: string = '#333333';
   @State private contentW: number = 40;
+  @State private contentH: number = 20;
   private settings: RenderingContextSettings = new RenderingContextSettings(true);
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
   private ready: boolean = false;
@@ -1233,14 +1583,22 @@ export struct MathText {
   private paint(): void {
     const k = this.den;
     const fs = this.fontSize;
-    const baseY = fs + 4;
+    const atoms = parseDisplayAtoms(this.raw);
+    // 分式行动态加高（五十包）：基线 fs+6、行高 fs+15 容纳分母；无分式
+    // 维持 fs+4 / fs+7 原几何
+    const hasFrac = atomsHaveFrac(atoms);
+    const baseY = fs + (hasFrac ? 6 : 4);
+    const lineH = fs + (hasFrac ? 15 : 7);
     const hookW = Math.max(7, Math.round(fs * 0.55));
-    this.ctx.clearRect(0, 0, this.contentW + 100, fs + 20);
-    const lay = mathLayout(this.ctx, parseMathAtoms(this.raw), 0, baseY,
+    this.ctx.clearRect(0, 0, this.contentW + 100, lineH + 40);
+    const lay = mathLayout(this.ctx, atoms, 0, baseY,
       fs, fs - 2, 8, 7, fs + 6, hookW, k);
     const total = Math.max(12, Math.ceil(lay.width));
     if (Math.abs(total - this.contentW) > 0.5) {
       this.contentW = total;
+    }
+    if (Math.abs(lineH - this.contentH) > 0.5) {
+      this.contentH = lineH;
     }
     mathDraw(this.ctx, lay.pieces, baseY, this.color, Theme.faint(this.dark),
       Theme.accent(this.dark), false, hookW, k);
@@ -1249,7 +1607,7 @@ export struct MathText {
   build() {
     Canvas(this.ctx)
       .width(this.contentW)
-      .height(this.fontSize + 7)
+      .height(this.contentH)
       .constraintSize({ maxWidth: '78%' })
       .clip(true)
       .onReady(() => {
