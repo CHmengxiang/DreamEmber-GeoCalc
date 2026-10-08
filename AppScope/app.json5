@@ -3,7 +3,7 @@
     "bundleName": "chmx.geoCalc.dreamEmber",
     "vendor": "chmx",
     "versionCode": 1000016,
-    "versionName": "1.0.4",
+    "versionName": "1.0.4.1",
     "buildVersion": "17",
     "icon": "$media:app_icon",
     "label": "$string:app_name"
