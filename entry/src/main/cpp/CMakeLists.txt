@@ -104,6 +104,7 @@ add_library(dreamember SHARED
     kernel/ggbfile.cpp
     cas/cas_wrapper.cpp
     cas/ohos_stubs.cpp
+    ratex/ratex_napi.cpp
 )
 target_include_directories(dreamember PRIVATE
     ${NATIVERENDER_ROOT_PATH}
@@ -112,3 +113,18 @@ target_include_directories(dreamember PRIVATE
 )
 target_compile_definitions(dreamember PRIVATE WITH_GIAC=1 USE_GMP_REPLACEMENTS=1)
 target_link_libraries(dreamember PUBLIC giac tommath libace_napi.z.so libhilog_ndk.z.so z)   # z: sysroot zlib（.ggb zip 容器）
+
+# ---------- RaTeX（五十二包）：预编译 libratex_ffi.so 接入 ----------
+# Rust 交叉编译产物（aarch64/x86_64 两份，与 abiFilters 对应），仅依赖 libc.so。
+# CMake 按当前 ABI 从预编译目录复制并随 HAP 打包。
+set(RATEX_PREBUILT_DIR ${NATIVERENDER_ROOT_PATH}/ratex/prebuilt)
+if(OHOS_ARCH STREQUAL arm64-v8a)
+    set(RATEX_LIB ${RATEX_PREBUILT_DIR}/arm64-v8a/libratex_ffi.so)
+elseif(OHOS_ARCH STREQUAL x86_64)
+    set(RATEX_LIB ${RATEX_PREBUILT_DIR}/x86_64/libratex_ffi.so)
+endif()
+if(DEFINED RATEX_LIB)
+    add_library(ratex_ffi SHARED IMPORTED GLOBAL)
+    set_target_properties(ratex_ffi PROPERTIES IMPORTED_LOCATION ${RATEX_LIB})
+    target_link_libraries(dreamember PUBLIC ratex_ffi)
+endif()

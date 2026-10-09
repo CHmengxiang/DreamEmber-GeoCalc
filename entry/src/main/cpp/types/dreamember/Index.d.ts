@@ -62,3 +62,10 @@ export const kernelPushUndo: () => string;        // "ok"
 export const kernelUndo: () => string;            // "ok" | "no"
 export const kernelRedo: () => string;            // "ok" | "no"
 export const kernelUndoState: () => string;       // "撤销深度,重做深度"
+
+// 五十二包 RaTeX（libratex_ffi.so NAPI 桥）：LaTeX 排版显示层
+// ratexLayout(latex, displayMode): "ok|<DisplayList JSON>" | "error:<msg>"
+// displayMode 0=inline 1=display（协议见 Ratex docs/DISPLAYLIST_JSON_PROTOCOL.md）
+export const ratexLayout: (latex: string, displayMode: number) => string;
+// ratexConvert(linear): "ok|<latex>"（完整转换）| "raw|<原文>"（含未知构造）
+export const ratexConvert: (linear: string) => string;

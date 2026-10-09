@@ -45,6 +45,9 @@ static napi_value NativeVersion(napi_env env, napi_callback_info info)
 // kernel_napi.cpp 提供的注册入口（kernelInput/kernelRender/手势等）
 void DreamemberRegisterKernelApis(napi_env env, napi_value exports);
 
+// ratex_napi.cpp 提供的注册入口（RaTeX LaTeX 排版，五十二包）
+void DreamemberRegisterRatexApis(napi_env env, napi_value exports);
+
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports)
 {
@@ -54,6 +57,7 @@ static napi_value Init(napi_env env, napi_value exports)
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     DreamemberRegisterKernelApis(env, exports);
+    DreamemberRegisterRatexApis(env, exports);
     return exports;
 }
 EXTERN_C_END

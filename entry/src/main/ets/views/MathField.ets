@@ -92,19 +92,14 @@
 // 坐标没跟着动 → shiftPiecesX 递归平移（kind 2 kids / kind 4 子表一并，
 // 点触反查等一切读片坐标处随之一致；NthRoot 根次片同获修正）。
 import { Theme } from '../model/Theme';
-import display from '@ohos.display';
+import { RatexView, ratexConvertLinear, ratexLayoutLatex, RatexLayoutResult } from './RatexView';
 
 // 屏幕密度（px/vp，如 3x 设备 = 3.0）：Canvas 坐标与 measureText 为 vp
 // 口径、唯独 font-size 为物理 px（第十五包③四轮证据链终案）——字号
 // ×k 换算、几何与宽度 vp 原值直用。第十七包②起 CanvasView 键盘避让的
 // Area.globalPosition（px）换算也复用本函数
-export function canvasDensity(): number {
-  try {
-    return display.getDefaultDisplaySync().densityPixels;
-  } catch (e) {
-    return 3;
-  }
-}
+import { canvasDensity } from './canvasUtil';
+export { canvasDensity };
 
 export interface MathAtom {
   ch: string;      // 显示文本（dim 占位为 '□'）
@@ -1582,18 +1577,50 @@ export function mathPickCaretStop(ctx: CanvasRenderingContext2D, raw: string,
 // MathText — 静态公式渲染（Canvas 版，第十二包①）：与 MathField 同一
 // painter，无光标；用于代数区行内展示对象的值/定义。宽度按实测内容收缩，
 // 超宽由 constraintSize 裁剪（行内不做滚动）。
+// 五十二包：RaTeX 优先渲染——线性串先经 native ratexConvert 转 LaTeX
+//（含未知构造返回 raw），再 ratexLayout 排版出 DisplayList，RatexView 绘
+// 制；任一步失败回退本组件旧 painter（sqrt( 线性钩形版），任何输入不出错。
 @Component
 export struct MathText {
   @Prop @Watch('repaint') raw: string = '';
   @Prop @Watch('repaint') dark: boolean = false;
   @Prop @Watch('repaint') fontSize: number = 13;
   @Prop @Watch('repaint') color: string = '#333333';
+  @State private useRatex: boolean = true;   // false = RaTeX 链路失败，回退旧 painter
   @State private contentW: number = 40;
   @State private contentH: number = 20;
   private settings: RenderingContextSettings = new RenderingContextSettings(true);
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
   private ready: boolean = false;
   private den: number = canvasDensity();
+
+  // RaTeX 链路快速判定（零渲染）：线性串可完整转 LaTeX 且排版出有效
+  // DisplayList 才走 RaTeX；结果缓存避免 build 与 paint 双重排版开销。
+  private lay: RatexLayoutResult | null = null;
+
+  private tryRatex(): boolean {
+    if (!this.useRatex) {
+      return false;
+    }
+    const latex = ratexConvertLinear(this.raw);
+    if (latex === null) {
+      this.useRatex = false;
+      return false;
+    }
+    const lay = ratexLayoutLatex(latex);
+    if (lay === null) {
+      this.useRatex = false;
+      return false;
+    }
+    this.lay = lay;
+    return true;
+  }
+
+  private onRatexResult(ok: boolean): void {
+    if (!ok && this.useRatex) {
+      this.useRatex = false;   // 回退旧 painter（触发 re-render）
+    }
+  }
 
   repaint(): void {
     if (this.ready) {
@@ -1602,6 +1629,9 @@ export struct MathText {
   }
 
   private paint(): void {
+    if (this.useRatex && this.tryRatex()) {
+      return;   // RaTeX 布局就绪，RatexView 子组件负责绘制
+    }
     const k = this.den;
     const fs = this.fontSize;
     const atoms = parseDisplayAtoms(this.raw);
@@ -1626,16 +1656,26 @@ export struct MathText {
   }
 
   build() {
-    Canvas(this.ctx)
-      .width(this.contentW)
-      .height(this.contentH)
-      .constraintSize({ maxWidth: '78%' })
-      .clip(true)
-      .onReady(() => {
-        this.ready = true;
-        this.paint();
+    if (this.useRatex && this.tryRatex()) {
+      RatexView({
+        raw: this.raw,
+        dark: this.dark,
+        fontSize: this.fontSize,
+        color: this.color,
+        onResult: (ok: boolean): void => this.onRatexResult(ok)
       })
-      .onAreaChange(() => this.repaint())
+    } else {
+      Canvas(this.ctx)
+        .width(this.contentW)
+        .height(this.contentH)
+        .constraintSize({ maxWidth: '78%' })
+        .clip(true)
+        .onReady(() => {
+          this.ready = true;
+          this.paint();
+        })
+        .onAreaChange(() => this.repaint())
+    }
   }
 }
 
