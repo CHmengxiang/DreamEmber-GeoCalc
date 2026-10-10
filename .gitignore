@@ -41,3 +41,6 @@ build_win/
 
 # ===== 模块内调试 dump（uitest dumpLayout 误存 src/main，三十九包清理）=====
 entry/src/main/d*.json
+
+# ===== 构建派生副本（CMake file(COPY) 生成，不入库）=====
+entry/src/libs/

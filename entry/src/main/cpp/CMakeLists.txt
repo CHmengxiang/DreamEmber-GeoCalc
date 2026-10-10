@@ -116,15 +116,21 @@ target_link_libraries(dreamember PUBLIC giac tommath libace_napi.z.so libhilog_n
 
 # ---------- RaTeX（五十二包）：预编译 libratex_ffi.so 接入 ----------
 # Rust 交叉编译产物（aarch64/x86_64 两份，与 abiFilters 对应），仅依赖 libc.so。
-# CMake 按当前 ABI 从预编译目录复制并随 HAP 打包。
+# 五十三包修复：不得以 IMPORTED 绝对路径链接——prebuilt so 无 SONAME 时
+# ld.lld 会把 IMPORTED_LOCATION 的完整路径（开发机盘符路径）原样写进
+# libdreamember.so 的 DT_NEEDED，真机 dlopen libdreamember.so 直接失败
+# （jscrash 2026-10-09 根因：kernelRender of undefined ← native 模块未加载）。
+# 改用 -L + -l: 相对名链接 → DT_NEEDED=libratex_ffi.so，运行期从同目录
+# libs/<abi>/libratex_ffi.so 解析；同时复制 so 到 entry/libs/<abi>/ 确保
+# hvigor 随 HAP 打包。
 set(RATEX_PREBUILT_DIR ${NATIVERENDER_ROOT_PATH}/ratex/prebuilt)
 if(OHOS_ARCH STREQUAL arm64-v8a)
-    set(RATEX_LIB ${RATEX_PREBUILT_DIR}/arm64-v8a/libratex_ffi.so)
+    set(RATEX_LIB_DIR ${RATEX_PREBUILT_DIR}/arm64-v8a)
 elseif(OHOS_ARCH STREQUAL x86_64)
-    set(RATEX_LIB ${RATEX_PREBUILT_DIR}/x86_64/libratex_ffi.so)
+    set(RATEX_LIB_DIR ${RATEX_PREBUILT_DIR}/x86_64)
 endif()
-if(DEFINED RATEX_LIB)
-    add_library(ratex_ffi SHARED IMPORTED GLOBAL)
-    set_target_properties(ratex_ffi PROPERTIES IMPORTED_LOCATION ${RATEX_LIB})
-    target_link_libraries(dreamember PUBLIC ratex_ffi)
+if(DEFINED RATEX_LIB_DIR)
+    file(COPY ${RATEX_LIB_DIR}/libratex_ffi.so
+         DESTINATION ${NATIVERENDER_ROOT_PATH}/../../libs/${OHOS_ARCH})
+    target_link_libraries(dreamember PUBLIC -L${RATEX_LIB_DIR} -l:libratex_ffi.so)
 endif()
