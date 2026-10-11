@@ -2,9 +2,10 @@
 // 五十二包：RaTeX（纯 Rust KaTeX 兼容排版引擎，MIT）真机桥接原型。
 // 链路：ArkTS 传内核线性串（f(x) = sqrt(x)/2 等）→ 本层转 LaTeX →
 // libratex_ffi.so 排版 → DisplayList JSON 原样返回（ArkTS 解析绘制）。
-// 转换失败（不认识的构造）返回原文，由 ArkTS 判定回退旧 painter。
+// 五十八包起恒交 RaTeX 排版（ok|），排版失败由 ArkTS 回退旧 painter 兜底。
 #include "napi/native_api.h"
 #include <string>
+#include <cstring>
 #include "ratex/ratex.h"
 
 namespace {
@@ -169,6 +170,46 @@ std::string LinearToLatex(const std::string &s, bool &identity)
                 }
             }
         }
+        // abs(x) → \left|x\right|（五十八包：identity 放行后 RaTeX 成为
+        // 缺省链路，纯字母直通会把 abs 渲染成斜体 a·b·s，倒退于旧 painter
+        // 的 |·|；排版引擎不支持 \left| 时整串排版失败走回退，无回归）
+        if (s.compare(i, 4, "abs(") == 0
+            && (i == 0 || !isalnum((unsigned char)s[i - 1]))) {
+            const size_t m = MatchParen(s, i + 3);
+            if (m != std::string::npos) {
+                out += "\\left|" + s.substr(i + 4, m - i - 4) + "\\right|";
+                identity = false;
+                i = m + 1;
+                continue;
+            }
+        }
+        // 常用函数名 → \sin 等（五十八包：仅调用形态——名字后紧 '(' 且前
+        // 面非字母，避免命中标识符中段；长名在前防前缀误配 sinh/sin）
+        if (s[i] >= 'a' && s[i] <= 'z'
+            && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
+            static const char *kFns[] = {
+                "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh",
+                "asin", "acos", "atan", "sin", "cos", "tan", "cot",
+                "sec", "csc", "ln", "log", "exp", "min", "max",
+                "floor", "ceil", "round", "sgn"
+            };
+            bool fnHit = false;
+            for (const char *fn : kFns) {
+                const size_t len = strlen(fn);
+                if (s.compare(i, len, fn) == 0 && i + len < s.size()
+                    && s[i + len] == '(') {
+                    out += '\\';
+                    out += fn;
+                    i += len;
+                    identity = false;
+                    fnHit = true;
+                    break;
+                }
+            }
+            if (fnHit) {
+                continue;
+            }
+        }
         // ^ / _ 脚本：^2 → ^{2}；^(n+1) → ^{n+1}
         if (s[i] == '^' || s[i] == '_') {
             const char op = s[i];
@@ -256,8 +297,19 @@ std::string LinearToLatex(const std::string &s, bool &identity)
             }
             continue;
         }
-        // LaTeX 保留字符原样放行（{} 之外的 ^_ 已处理；& % # # 等 v1
-        // 不出现于内核输出，出现则走回退，不在此转义）
+        // LaTeX 特殊字符转义（五十八包）：identity 放行后这些字符若原样
+        // 进排版引擎会改变语义（% 注释吞行、# & $ 宏参数/对齐/数学模式切
+        // 换、{} 分组），转义后按字面渲染
+        if (s[i] == '%' || s[i] == '#' || s[i] == '&' || s[i] == '$'
+            || s[i] == '{' || s[i] == '}') {
+            out += '\\';
+            out += s[i];
+            identity = false;
+            ++i;
+            continue;
+        }
+        // 其余字符原样放行（^_ 已处理；未知 Unicode 交给排版引擎，失败
+        // 由 ArkTS 回退旧 painter 兜底）
         out += s[i];
         ++i;
     }
@@ -342,8 +394,11 @@ static napi_value RatexLayout(napi_env env, napi_callback_info info)
 }
 
 // ratexConvert(linear: string): string
-// 线性数学串 → LaTeX；可完整转换返回 "ok|<latex>"，含未知构造返回
-// "raw|<原文>"（ArkTS 回退旧 painter）。
+// 线性数学串 → LaTeX，恒返回 "ok|<latex>"（五十八包：identity=串中无被
+// 转换的构造，曾据此判回退——但简单式 y=2x+1、分式 1/2 等纯线性串因此
+// 全部错过 RaTeX（真机 57 包反馈③④）。现放开：RaTeX 成为缺省链路，线
+// 性渲染与内核求值一致；排版失败的兜底回退在 ArkTS 侧（ratexLayout 失
+// 败 → 旧 painter），任何输入不出错。
 static napi_value RatexConvert(napi_env env, napi_callback_info info)
 {
     size_t argc = 1;
@@ -356,7 +411,8 @@ static napi_value RatexConvert(napi_env env, napi_callback_info info)
     const std::string linear = NapiToStr(env, argv[0]);
     bool identity = true;
     const std::string latex = LinearToLatex(linear, identity);
-    const std::string out = (identity ? "raw|" : "ok|") + latex;
+    (void)identity;
+    const std::string out = "ok|" + latex;
     napi_value res;
     napi_create_string_utf8(env, out.c_str(), out.size(), &res);
     return res;

@@ -34,5 +34,17 @@ int main()
     expect("y=\xCF\x80x+\xE2\x88\x9E", "y=\\pi x+\\infty");// πx+∞
     expect("x\xE2\x88\x88" "A", "x\\in A");                // x∈A
     expect("1\xC2\xB1" "2", "1\\pm2");                     // 1±2（数字终止命令名，不补空格）
+    // ---- 五十八包：identity 放行 + 特殊字符转义 + abs/函数名 ----
+    expect("y=2x+1", "y=2x+1");                            // 简单式直通（RaTeX 缺省链路）
+    expect("1/2x", "1/2x");                                // 分式线性直通（与内核求值一致）
+    expect("50%", "50\\%");                                // % 转义（防 LaTeX 注释吞行）
+    expect("a#b", "a\\#b");
+    expect("a&b", "a\\&b");
+    expect("a$b", "a\\$b");
+    expect("abs(x)", "\\left|x\\right|");                  // abs → 绝对值
+    expect("sin(x)+cos(y)", "\\sin(x)+\\cos(y)");          // 函数名直立体
+    expect("sinh(x)", "\\sinh(x)");                        // 长名优先不误配 sin
+    expect("asin(x)", "\\asin(x)");
+    expect("xsin(x)", "xsin(x)");                          // 标识符中段不命中
     return g_fail;
 }

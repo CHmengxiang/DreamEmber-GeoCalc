@@ -92,7 +92,8 @@
 // 坐标没跟着动 → shiftPiecesX 递归平移（kind 2 kids / kind 4 子表一并，
 // 点触反查等一切读片坐标处随之一致；NthRoot 根次片同获修正）。
 import { Theme } from '../model/Theme';
-import { RatexView, ratexConvertLinear, ratexLayoutLatex, RatexLayoutResult } from './RatexView';
+import { RatexView, ratexConvertLinear, ratexLayoutLatex, RatexLayoutResult,
+  ratexDrawItem, RATEX_FONT_SCALE } from './RatexView';
 
 // 屏幕密度（px/vp，如 3x 设备 = 3.0）：Canvas 坐标与 measureText 为 vp
 // 口径、唯独 font-size 为物理 px（第十五包③四轮证据链终案）——字号
@@ -1574,6 +1575,35 @@ export function mathPickCaretStop(ctx: CanvasRenderingContext2D, raw: string,
   return stops[pick];
 }
 
+// ---- 五十八包：编辑行 RaTeX 渲染（用户目标=在 LaTeX 渲染上直接编辑）----
+// MathField 显示层接 RaTeX：完整原文可转换排版时用 DisplayList 绘制（与静
+// 态行同一观感），光标 x 用「前缀排版测宽」求取——raw[0..cp) 经整理（剥尾
+// 部悬空 ^/_ + 补配对右括号）后转 LaTeX 排版取宽（光标后的后缀不影响前缀
+// 宽度）；任一步失败整帧回退旧 painter。门控把模板中途态留给旧 painter：
+//  · 括号不配对（sqrt( 未闭合等——直通会渲染出斜体字母 "sqrt("）
+//  · 含 "()"（空参数/空脚本组的虚线占位框是输入引导，RaTeX 渲染为空）
+//  · 含 "log("（底数形态转换器未支持，直通渲染字母）、",)"、"(,"（空参
+//    中途态）
+// 光标纵向：基线锚 22（行高 30 同旧版几何），脚本态小号上移条。
+// 点触反查：停靠序列仍用 mathCaretStops（框内/框外语义不变），x 由前缀
+// 宽给出，并列沿用旧版 y 仲裁阈值。
+
+const RATEX_FIELD_FS: number = 15;   // 编辑行标称字号（同旧 painter charS）
+
+// 括号配对余额（非 0 = 存在不配对）
+function parenBalance(raw: string): number {
+  let d = 0;
+  for (let j = 0; j < raw.length; j++) {
+    const c = raw.charAt(j);
+    if (c === '(') {
+      d++;
+    } else if (c === ')') {
+      d--;
+    }
+  }
+  return d;
+}
+
 // MathText — 静态公式渲染（Canvas 版，第十二包①）：与 MathField 同一
 // painter，无光标；用于代数区行内展示对象的值/定义。宽度按实测内容收缩，
 // 超宽由 constraintSize 裁剪（行内不做滚动）。
@@ -1716,6 +1746,13 @@ export struct MathField {
   private blinkTimer: number = -1;
   private den: number = canvasDensity();
   private fieldScroller: Scroller = new Scroller();
+  // ---- 五十八包 RaTeX 编辑行状态 ----
+  private rtxLay: RatexLayoutResult | null = null;   // 完整原文排版结果
+  private rtxKey: string = '\u0000';                 // 已试转换的 raw+深浅色键
+  private rtxOk: boolean = false;
+  private rtxFs: number = RATEX_FIELD_FS * RATEX_FONT_SCALE;
+  private pwCache: Map<number, number> = new Map();  // cp→前缀宽 px（正键）；
+                                                     // len 排版成败（负键 -1-len）
 
   aboutToAppear(): void {
     this.restartBlink();
@@ -1758,7 +1795,184 @@ export struct MathField {
     }
   }
 
+  // ---- 五十八包：RaTeX 编辑行 ----
+
+  // 完整原文是否具备 RaTeX 排版条件（门控见文件头五十八包说明）
+  private canFieldRatex(raw: string): boolean {
+    if (raw.length === 0 || parenBalance(raw) !== 0) {
+      return false;
+    }
+    return raw.indexOf('()') < 0 && raw.indexOf('log(') < 0
+      && raw.indexOf(',)') < 0 && raw.indexOf('(,') < 0;
+  }
+
+  // 完整原文 → DisplayList；按 raw+深浅色记账（blink 重绘不再排版）。
+  // 失败 = 本帧走旧 painter（中途态随键入自动往复，两边显示连续）
+  private fieldRatex(): boolean {
+    const key = this.raw + (this.dark ? '\u0001d' : '\u0001l');
+    if (this.rtxKey === key) {
+      return this.rtxOk;
+    }
+    this.rtxKey = key;
+    this.pwCache.clear();
+    this.rtxLay = null;
+    this.rtxOk = false;
+    if (this.canFieldRatex(this.raw)) {
+      const latex = ratexConvertLinear(this.raw);
+      if (latex !== null) {
+        this.rtxLay = ratexLayoutLatex(latex, Theme.text(this.dark));
+        this.rtxOk = this.rtxLay !== null;
+      }
+    }
+    return this.rtxOk;
+  }
+
+  // 光标前缀宽（px，内容坐标系）：自 cp 向下找首个可排版前缀（中途态剥
+  // 语法字符后仍失败则回退更短前缀），结果按 cp 记账——点触反查多站复用
+  private prefixX(cp: number): number {
+    if (cp <= 0) {
+      return 0;
+    }
+    const memo = this.pwCache.get(cp);
+    if (memo !== undefined) {
+      return memo;
+    }
+    let best = -1;
+    for (let len = Math.min(cp, this.raw.length); len >= 0; len--) {
+      const got = this.prefixWidthAt(len);
+      if (got >= 0) {
+        best = got;
+        break;
+      }
+    }
+    const v = best >= 0 ? best : 0;
+    this.pwCache.set(cp, v);
+    return v;
+  }
+
+  // 整理后的前缀排版宽（px）；排版失败 -1（负键记账，防重复试错）
+  private prefixWidthAt(len: number): number {
+    const key = -1 - len;
+    const memo = this.pwCache.get(key);
+    if (memo !== undefined) {
+      return memo;
+    }
+    let t = this.raw.substring(0, len);
+    while (t.length > 0 && (t.charAt(t.length - 1) === '^'
+      || t.charAt(t.length - 1) === '_')) {
+      t = t.substring(0, t.length - 1);   // 悬空脚本符进 LaTeX 必失败
+    }
+    let depth = 0;
+    for (let j = 0; j < t.length; j++) {
+      if (t.charAt(j) === '(') {
+        depth++;
+      } else if (t.charAt(j) === ')') {
+        depth--;
+      }
+    }
+    for (let j = 0; j < depth; j++) {
+      t += ')';                            // 补配对：sqrt(x 中途态 → 完整模板
+    }
+    let w = -1;
+    if (t.length === 0) {
+      w = 0;
+    } else {
+      const latex = ratexConvertLinear(t);
+      if (latex !== null) {
+        const lay = ratexLayoutLatex(latex, Theme.text(this.dark));
+        if (lay !== null) {
+          w = Math.ceil(lay.widthEm * this.rtxFs);
+        }
+      }
+    }
+    this.pwCache.set(key, w);
+    return w;
+  }
+
+  // RaTeX 编辑行绘制；原文可转换排版时走此路径（返回 true = 已绘制）
+  private paintRatex(): boolean {
+    if (!this.fieldRatex()) {
+      return false;
+    }
+    const lay = this.rtxLay;
+    if (lay === null) {
+      return false;
+    }
+    const fs = this.rtxFs;
+    const padL = 8;
+    // 基线锚 22（行高 30 同旧版几何）：盒顶偏移 = 22 − ascent
+    const padY = Math.max(0, 22 - lay.heightEm * fs);
+    const w = Math.max(60, padL + Math.ceil(lay.widthEm * fs) + 12);
+    if (Math.abs(w - this.contentW) > 0.5) {
+      this.contentW = w;
+    }
+    const color = Theme.text(this.dark);
+    this.ctx.clearRect(0, 0, this.contentW + 100, 40);
+    for (let i = 0; i < lay.items.length; i++) {
+      ratexDrawItem(this.ctx, lay.items[i], fs, padY, color, padL);
+    }
+    if (this.focused && this.blink) {
+      const cx = padL + this.prefixX(this.caret);
+      let y0 = 22 - 0.73 * fs;
+      let y1 = 22 + 0.13 * fs;
+      if (this.caretScript) {
+        y0 = 22 - 0.53 * fs;
+        y1 = 22 - 0.07 * fs;
+      }
+      this.ctx.strokeStyle = Theme.accent(this.dark);
+      this.ctx.lineWidth = 1.5;
+      this.ctx.beginPath();
+      this.ctx.moveTo(cx + 0.75, y0);
+      this.ctx.lineTo(cx + 0.75, y1);
+      this.ctx.stroke();
+    }
+    return true;
+  }
+
+  // RaTeX 点触反查：停靠序列沿用 mathCaretStops，x=前缀排版宽；并列时
+  // 旧版 y 仲裁阈值（上区偏爱上标、下区偏爱下标）
+  private ratexPickCaretStop(layoutX: number, canvasY: number): MathCaretStop | null {
+    const stops = mathCaretStops(this.raw);
+    if (stops.length === 0) {
+      return null;
+    }
+    const padL = 8;
+    let best = -1;
+    const ds: number[] = [];
+    for (let i = 0; i < stops.length; i++) {
+      const sx = padL + this.prefixX(stops[i].pos);
+      ds.push(Math.abs(sx - layoutX));
+      if (best < 0 || ds[i] < ds[best]) {
+        best = i;
+      }
+    }
+    let pick = best;
+    const wantSup = canvasY < 16;
+    const wantSub = canvasY > 19;
+    for (let i = 0; i < stops.length; i++) {
+      if (Math.abs(ds[i] - ds[best]) >= 0.5) {
+        continue;
+      }
+      const st = stops[i];
+      if (!st.script && !wantSup && !wantSub) {
+        pick = i;
+        break;
+      }
+      if (st.script && (wantSup || wantSub)) {
+        const sup = stopIsSup(this.raw, st.pos);
+        if ((wantSup && sup) || (wantSub && !sup)) {
+          pick = i;
+          break;
+        }
+      }
+    }
+    return stops[pick];
+  }
+
   private paint(): void {
+    if (this.paintRatex()) {
+      return;
+    }
     const k = this.den;
     this.ctx.clearRect(0, 0, this.contentW + 100, 40);
     const disp = buildDisplayAtoms(this.raw, this.focused ? this.caret : -1,
@@ -1816,8 +2030,10 @@ export struct MathField {
       const layoutX = evt.x + off.xOffset - 8;
       const canvasY = evt.y - (this.fieldH - 30) / 2;
       this.onActivate();
-      const stop = mathPickCaretStop(this.ctx, this.raw, layoutX, canvasY,
-        this.den);
+      // 五十八包：RaTeX 模式用前缀宽反查；旧 painter 模式沿用排版反查
+      const stop = this.fieldRatex()
+        ? this.ratexPickCaretStop(layoutX, canvasY)
+        : mathPickCaretStop(this.ctx, this.raw, layoutX, canvasY, this.den);
       if (stop !== null) {
         this.onTapCaret(stop.pos, stop.script);
       }

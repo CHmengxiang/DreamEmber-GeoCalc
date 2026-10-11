@@ -26,6 +26,11 @@ import ratexNative from 'libdreamember.so';
 import font from '@ohos.font';
 import type { UIContext } from '@ohos.arkui.UIContext';
 
+// 五十八包：KaTeX 字形视觉补偿。同标称字号下 KaTeX 的 x-height/cap-height
+// 比系统 sans-serif 小一档（真机 57 包反馈①「渲染出来的字体略微小了点」），
+// em 坐标 ×fontSize 前统一放大。编辑行 MathField 的 RaTeX 路径同用本系数。
+export const RATEX_FONT_SCALE: number = 1.1;
+
 // KaTeX 字体短名 → rawfile 文件名映射（RaTeX FontId::as_str）
 const KATEX_FONTS: Map<string, string> = new Map([
   ['Main-Regular', 'KaTeX_Main-Regular.ttf'],
@@ -191,6 +196,113 @@ export function registerKatexFonts(done: () => void, ui?: UIContext): void {
   console.warn(`[ratex-rv] fonts registered=${registeredFonts.size}/${KATEX_FONTS.size}`);
 }
 
+// item 色（DisplayList 内嵌色优先，否则宿主主题色）；五十八包起为模块级
+// 函数——编辑行 MathField 的 RaTeX 路径直接复用同一绘制实现
+function ratexItemColor(item: DisplayListItem, fallback: string): string {
+  const c = item.color;
+  if (Array.isArray(c) && c.length >= 3) {
+    const to255 = (v: number): number => Math.round(Math.max(0, Math.min(1, v)) * 255);
+    const hex = (v: number): string => v.toString(16).padStart(2, '0');
+    return '#' + hex(to255(c[0])) + hex(to255(c[1])) + hex(to255(c[2]));
+  }
+  if (c !== undefined && !Array.isArray(c)) {
+    const r = c['r'];
+    const g = c['g'];
+    const b = c['b'];
+    if (typeof r === 'number' && typeof g === 'number' && typeof b === 'number') {
+      const to255 = (v: number): number => Math.round(Math.max(0, Math.min(1, v)) * 255);
+      const hex = (v: number): string => v.toString(16).padStart(2, '0');
+      return '#' + hex(to255(r)) + hex(to255(g)) + hex(to255(b));
+    }
+  }
+  return fallback;
+}
+
+// 单 item 绘制。fs=有效字号（em→vp，调用方负责乘视觉补偿）；topPad=盒
+// 顶到画布顶的偏移；padX=内容左缘水平偏移（编辑行左衬 8 用，缺省 0）
+export function ratexDrawItem(ctx: CanvasRenderingContext2D,
+  item: DisplayListItem, fs: number, topPad: number, fallbackColor: string,
+  padX: number = 0): void {
+  const color = ratexItemColor(item, fallbackColor);
+  const x = padX + (item.x !== undefined ? item.x : 0) * fs;
+  const y = topPad + (item.y !== undefined ? item.y : 0) * fs;
+  const t = item.type;
+  if (t === 'GlyphPath') {
+    // 五十六包②：内嵌轮廓优先（Path 命令 schema 与 Path item 同源，
+    // 坐标相对 item.x/y 的 em，y 已由 FFI 翻转为盒顶起算）——不依赖
+    // 字体服务，真机/模拟器渲染一致；无轮廓再走 fillText 兜底
+    if (Array.isArray(item.commands) && item.commands.length > 0) {
+      ratexDrawPath(ctx, item, fs, topPad, color, padX);
+      return;
+    }
+    const short = item.font !== undefined ? item.font : 'Main-Regular';
+    const file = KATEX_FONTS.get(short);
+    if (file === undefined || item.char_code === undefined) {
+      return;
+    }
+    const family = 'Katex' + short.replace(/-/g, '');
+    const scale = item.scale !== undefined ? item.scale : 1;
+    ctx.font = `${Math.round(fs * scale * canvasDensity())}px ${family}`;
+    ctx.fillStyle = color;
+    ctx.fillText(String.fromCodePoint(item.char_code), x, y);
+  } else if (t === 'Line') {
+    // 分数线/上划线：y 为线中心，thickness 为线宽
+    const th = Math.max(0.5, (item.thickness !== undefined ? item.thickness : 0.04) * fs);
+    const w = (item.width !== undefined ? item.width : 0) * fs;
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y - th / 2, w, th);
+  } else if (t === 'Rect') {
+    ctx.fillStyle = color;
+    ctx.fillRect(x, y,
+      (item.width !== undefined ? item.width : 0) * fs,
+      (item.height !== undefined ? item.height : 0) * fs);
+  } else if (t === 'Path') {
+    ratexDrawPath(ctx, item, fs, topPad, color, padX);
+  }
+}
+
+// Path/GlyphPath.commands 轮廓绘制（em 命令坐标相对 item.x/y，padX 平移）
+function ratexDrawPath(ctx: CanvasRenderingContext2D, item: DisplayListItem,
+  fs: number, topPad: number, color: string, padX: number = 0): void {
+  const cmds = item.commands;
+  if (!Array.isArray(cmds) || cmds.length === 0) {
+    return;
+  }
+  const ox = padX + (item.x !== undefined ? item.x : 0) * fs;
+  const oy = topPad + (item.y !== undefined ? item.y : 0) * fs;
+  ctx.beginPath();
+  let open = false;
+  for (let i = 0; i < cmds.length; i++) {
+    const c = cmds[i];
+    const t = c.type;
+    if (t === 'MoveTo' && c.x !== undefined && c.y !== undefined) {
+      ctx.moveTo(ox + c.x * fs, oy + c.y * fs);
+      open = true;
+    } else if (t === 'LineTo' && c.x !== undefined && c.y !== undefined) {
+      ctx.lineTo(ox + c.x * fs, oy + c.y * fs);
+    } else if (t === 'CubicTo' && c.x1 !== undefined && c.x2 !== undefined
+      && c.x !== undefined) {
+      ctx.bezierCurveTo(ox + c.x1 * fs, oy + (c.y1 as number) * fs,
+        ox + c.x2 * fs, oy + (c.y2 as number) * fs,
+        ox + c.x * fs, oy + (c.y as number) * fs);
+    } else if (t === 'QuadTo' && c.x1 !== undefined && c.x !== undefined) {
+      ctx.quadraticCurveTo(ox + c.x1 * fs, oy + (c.y1 as number) * fs,
+        ox + c.x * fs, oy + (c.y as number) * fs);
+    } else if (t === 'Close') {
+      ctx.closePath();
+    }
+  }
+  if (!open) {
+    return;
+  }
+  if (item.dashed === true) {
+    ctx.setLineDash([3, 2]);
+  }
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.setLineDash([]);
+}
+
 @Component
 export struct RatexView {
   @Prop @Watch('repaint') raw: string = '';
@@ -246,7 +358,8 @@ export struct RatexView {
       return;
     }
     const lay = this.lay as RatexLayoutResult;
-    const fs = this.fontSize;
+    // 五十八包①：字号视觉补偿（KaTeX 同标称字号偏小一档）
+    const fs = this.fontSize * RATEX_FONT_SCALE;
     // em → vp：坐标全 em × fontSize；Canvas 坐标 vp 口径（第十五包③终案）。
     // 五十四包③修正：item.y 为盒顶起算（基线在 y=height），直接绘制，
     // 只加 pad 顶边距——不再叠加基线偏移（旧码整体下移一个 ascent 被裁）
@@ -277,106 +390,9 @@ export struct RatexView {
     this.onResult(true);
   }
 
-  private itemColor(item: DisplayListItem, fallback: string): string {
-    const c = item.color;
-    if (Array.isArray(c) && c.length >= 3) {
-      const to255 = (v: number): number => Math.round(Math.max(0, Math.min(1, v)) * 255);
-      const hex = (v: number): string => v.toString(16).padStart(2, '0');
-      return '#' + hex(to255(c[0])) + hex(to255(c[1])) + hex(to255(c[2]));
-    }
-    if (c !== undefined && !Array.isArray(c)) {
-      const r = c['r'];
-      const g = c['g'];
-      const b = c['b'];
-      if (typeof r === 'number' && typeof g === 'number' && typeof b === 'number') {
-        const to255 = (v: number): number => Math.round(Math.max(0, Math.min(1, v)) * 255);
-        const hex = (v: number): string => v.toString(16).padStart(2, '0');
-        return '#' + hex(to255(r)) + hex(to255(g)) + hex(to255(b));
-      }
-    }
-    return fallback;
-  }
-
   private drawItem(item: DisplayListItem, fs: number, topPad: number,
     fallbackColor: string): void {
-    const color = this.itemColor(item, fallbackColor);
-    const x = (item.x !== undefined ? item.x : 0) * fs;
-    const y = topPad + (item.y !== undefined ? item.y : 0) * fs;
-    const t = item.type;
-    if (t === 'GlyphPath') {
-      // 五十六包②：内嵌轮廓优先（Path 命令 schema 与 Path item 同源，
-      // 坐标相对 item.x/y 的 em，y 已由 FFI 翻转为盒顶起算）——不依赖
-      // 字体服务，真机/模拟器渲染一致；无轮廓再走 fillText 兜底
-      if (Array.isArray(item.commands) && item.commands.length > 0) {
-        this.drawPath(item, fs, topPad, color);
-        return;
-      }
-      const short = item.font !== undefined ? item.font : 'Main-Regular';
-      const file = KATEX_FONTS.get(short);
-      if (file === undefined || item.char_code === undefined) {
-        return;
-      }
-      const family = 'Katex' + short.replace(/-/g, '');
-      const scale = item.scale !== undefined ? item.scale : 1;
-      this.ctx.font = `${Math.round(fs * scale * this.den)}px ${family}`;
-      this.ctx.fillStyle = color;
-      this.ctx.fillText(String.fromCodePoint(item.char_code), x, y);
-    } else if (t === 'Line') {
-      // 分数线/上划线：y 为线中心，thickness 为线宽
-      const th = Math.max(0.5, (item.thickness !== undefined ? item.thickness : 0.04) * fs);
-      const w = (item.width !== undefined ? item.width : 0) * fs;
-      this.ctx.fillStyle = color;
-      this.ctx.fillRect(x, y - th / 2, w, th);
-    } else if (t === 'Rect') {
-      this.ctx.fillStyle = color;
-      this.ctx.fillRect(x, y,
-        (item.width !== undefined ? item.width : 0) * fs,
-        (item.height !== undefined ? item.height : 0) * fs);
-    } else if (t === 'Path') {
-      this.drawPath(item, fs, topPad, color);
-    }
-  }
-
-  private drawPath(item: DisplayListItem, fs: number, topPad: number,
-    color: string): void {
-    const cmds = item.commands;
-    if (!Array.isArray(cmds) || cmds.length === 0) {
-      return;
-    }
-    const ox = (item.x !== undefined ? item.x : 0) * fs;
-    const oy = topPad + (item.y !== undefined ? item.y : 0) * fs;
-    const ctx = this.ctx;
-    ctx.beginPath();
-    let open = false;
-    for (let i = 0; i < cmds.length; i++) {
-      const c = cmds[i];
-      const t = c.type;
-      if (t === 'MoveTo' && c.x !== undefined && c.y !== undefined) {
-        ctx.moveTo(ox + c.x * fs, oy + c.y * fs);
-        open = true;
-      } else if (t === 'LineTo' && c.x !== undefined && c.y !== undefined) {
-        ctx.lineTo(ox + c.x * fs, oy + c.y * fs);
-      } else if (t === 'CubicTo' && c.x1 !== undefined && c.x2 !== undefined
-        && c.x !== undefined) {
-        ctx.bezierCurveTo(ox + c.x1 * fs, oy + (c.y1 as number) * fs,
-          ox + c.x2 * fs, oy + (c.y2 as number) * fs,
-          ox + c.x * fs, oy + (c.y as number) * fs);
-      } else if (t === 'QuadTo' && c.x1 !== undefined && c.x !== undefined) {
-        ctx.quadraticCurveTo(ox + c.x1 * fs, oy + (c.y1 as number) * fs,
-          ox + c.x * fs, oy + (c.y as number) * fs);
-      } else if (t === 'Close') {
-        ctx.closePath();
-      }
-    }
-    if (!open) {
-      return;
-    }
-    if (item.dashed === true) {
-      ctx.setLineDash([3, 2]);
-    }
-    ctx.fillStyle = color;
-    ctx.fill();
-    ctx.setLineDash([]);
+    ratexDrawItem(this.ctx, item, fs, topPad, fallbackColor);
   }
 
   build() {
