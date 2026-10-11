@@ -176,7 +176,7 @@ struct About {
               .fontWeight(FontWeight.Medium)
               .fontColor(this.cText())
               .margin({ bottom: 8 })
-            Text('杨丰玮')
+            Text('CH梦想')
               .fontSize(14)
               .fontColor(this.cSub())
               .lineHeight(22)
