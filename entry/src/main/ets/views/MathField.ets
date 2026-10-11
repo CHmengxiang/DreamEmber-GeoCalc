@@ -1604,13 +1604,25 @@ export struct MathText {
     }
     const latex = ratexConvertLinear(this.raw);
     if (latex === null) {
+      console.warn(`[ratex-mt] convert FAIL raw=${JSON.stringify(this.raw)}`);
       this.useRatex = false;
       return false;
     }
     const lay = ratexLayoutLatex(latex, this.color);
     if (lay === null) {
+      console.warn(`[ratex-mt] layout FAIL latex=${latex}`);
       this.useRatex = false;
       return false;
+    }
+    let nCmd = 0;
+    for (let i = 0; i < lay.items.length; i++) {
+      if (Array.isArray(lay.items[i].commands) && lay.items[i].commands!.length > 0) {
+        nCmd++;
+      }
+    }
+    if (nCmd === 0) {
+      console.warn(`[ratex-mt] OK-but-no-cmds raw=${JSON.stringify(this.raw)} ` +
+        `items=${lay.items.length}`);
     }
     this.lay = lay;
     return true;

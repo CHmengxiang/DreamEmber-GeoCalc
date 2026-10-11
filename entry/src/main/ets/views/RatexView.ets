@@ -188,6 +188,7 @@ export function registerKatexFonts(done: () => void, ui?: UIContext): void {
     }
   });
   done();
+  console.warn(`[ratex-rv] fonts registered=${registeredFonts.size}/${KATEX_FONTS.size}`);
 }
 
 @Component
@@ -227,10 +228,12 @@ export struct RatexView {
   private layout(): boolean {
     const latex = ratexConvertLinear(this.raw);
     if (latex === null) {
+      console.warn(`[ratex-rv] convert FAIL raw=${JSON.stringify(this.raw)}`);
       return false;
     }
     const lay = ratexLayoutLatex(latex, this.color);
     if (lay === null) {
+      console.warn(`[ratex-rv] layout FAIL latex=${latex}`);
       return false;
     }
     this.lay = lay;
@@ -259,8 +262,17 @@ export struct RatexView {
     this.ctx.fillStyle = color;
     this.ctx.strokeStyle = color;
     this.ctx.textBaseline = 'alphabetic';
+    let nCmd = 0;
     for (let i = 0; i < lay.items.length; i++) {
-      this.drawItem(lay.items[i], fs, pad, color);
+      const it = lay.items[i];
+      if (Array.isArray(it.commands) && it.commands.length > 0) {
+        nCmd++;
+      }
+      this.drawItem(it, fs, pad, color);
+    }
+    if (nCmd === 0 && lay.items.length > 0) {
+      console.warn(`[ratex-rv] paint NO-CMDS fs=${fs} items=${lay.items.length} ` +
+        `fonts=${registeredFonts.size}`);
     }
     this.onResult(true);
   }

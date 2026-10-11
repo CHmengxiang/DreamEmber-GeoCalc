@@ -98,6 +98,13 @@ bool GreekAtRaw(const std::string &s, size_t i)
     return GreekAt(s, i, tmp);
 }
 
+// 控制字分隔：LaTeX 词法里 \pi 后紧跟字母会读成 \pix（未知命令）。命令后
+// 一个空格被 tokenizer 吞掉、不影响视觉，仅在紧邻字母/反斜杠时需要。
+bool CmdNeedsSpace(char c)
+{
+    return isalpha((unsigned char)c) || c == '\\';
+}
+
 // 前向配对括号，返回 ')' 下标；不配对返回 npos
 size_t MatchParen(const std::string &s, size_t open)
 {
@@ -192,6 +199,9 @@ std::string LinearToLatex(const std::string &s, bool &identity)
             std::string g;
             if (GreekAt(s, i, g)) {
                 out += g;
+                if (i + 2 < s.size() && CmdNeedsSpace(s[i + 2])) {
+                    out += ' ';
+                }
                 identity = false;
                 i += 2;
                 continue;
@@ -205,25 +215,45 @@ std::string LinearToLatex(const std::string &s, bool &identity)
             i += 2;
             continue;
         }
-        // ≤ ≥ ≠（E2 89 A4/A5/0x88 0x80）与 × ÷ ± ∞ ∈ 等 Unicode 算符
+        // ≤ ≥ ≠（E2 89 A4/A5/A0）与 ∞（E2 88 9E）、∈（E2 88 88）等
+        // Unicode 算符
         if ((unsigned char)s[i] == 0xE2 && i + 2 < s.size()) {
             const unsigned char b1 = (unsigned char)s[i + 1];
             const unsigned char b2 = (unsigned char)s[i + 2];
-            if (b1 == 0x89 && b2 == 0xA4) { out += "\\leq"; identity = false; i += 3; continue; }
-            if (b1 == 0x89 && b2 == 0xA5) { out += "\\geq"; identity = false; i += 3; continue; }
-            if (b1 == 0x89 && b2 == 0xA0) { out += "\\neq"; identity = false; i += 3; continue; }
-            if (b1 == 0x88) {
-                if (b2 == 0xAB) { out += "\\times"; identity = false; i += 3; continue; }
-                if (b2 == 0xB1) { out += "\\pm"; identity = false; i += 3; continue; }
-                if (b2 == 0x88) { out += "\\infty"; identity = false; i += 3; continue; }
+            if (b1 == 0x89 && b2 == 0xA4) { out += "\\leq"; i += 3; identity = false; }
+            else if (b1 == 0x89 && b2 == 0xA5) { out += "\\geq"; i += 3; identity = false; }
+            else if (b1 == 0x89 && b2 == 0xA0) { out += "\\neq"; i += 3; identity = false; }
+            else if (b1 == 0x88) {
+                if (b2 == 0x9E) { out += "\\infty"; i += 3; identity = false; }
+                else if (b2 == 0x88) { out += "\\in"; i += 3; identity = false; }
+                else { out += s[i]; ++i; }
             }
+            else { out += s[i]; ++i; }
+            if (identity == false && i < s.size() && CmdNeedsSpace(s[i])) {
+                out += ' ';
+            }
+            continue;
         }
-        // ASCII ×（键盘 '×' 键实为 U+00D7 = 0xC3 0x97）→ \times
+        // ASCII ×（U+00D7 = 0xC3 0x97）→ \times、÷（U+00F7 = 0xC3 0xB7）→ \div
         if ((unsigned char)s[i] == 0xC3 && i + 1 < s.size()
-            && (unsigned char)s[i + 1] == 0x97) {
-            out += "\\times";
+            && ((unsigned char)s[i + 1] == 0x97 || (unsigned char)s[i + 1] == 0xB7)) {
+            out += (unsigned char)s[i + 1] == 0x97 ? "\\times" : "\\div";
             identity = false;
             i += 2;
+            if (i < s.size() && CmdNeedsSpace(s[i])) {
+                out += ' ';
+            }
+            continue;
+        }
+        // ±（U+00B1 = 0xC2 0xB1）→ \pm
+        if ((unsigned char)s[i] == 0xC2 && i + 1 < s.size()
+            && (unsigned char)s[i + 1] == 0xB1) {
+            out += "\\pm";
+            identity = false;
+            i += 2;
+            if (i < s.size() && CmdNeedsSpace(s[i])) {
+                out += ' ';
+            }
             continue;
         }
         // LaTeX 保留字符原样放行（{} 之外的 ^_ 已处理；& % # # 等 v1
