@@ -46,5 +46,10 @@ int main()
     expect("sinh(x)", "\\sinh(x)");                        // 长名优先不误配 sin
     expect("asin(x)", "\\asin(x)");
     expect("xsin(x)", "xsin(x)");                          // 标识符中段不命中
+    // ---- 五十九包：模板守卫 isalnum→isalpha（数字/右括号后=并列乘法） ----
+    expect("2sqrt(2)", "2\\sqrt{2}");                      // 2·√2（58 包真机回归）
+    expect("2abs(x)", "2\\left|x\\right|");
+    expect("2NthRoot(3,x)", "2\\sqrt[3]{x}");
+    expect("asqrt(2)", "asqrt(2)");                        // 标识符中段仍不命中
     return g_fail;
 }

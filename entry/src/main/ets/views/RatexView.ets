@@ -261,13 +261,18 @@ export function ratexDrawItem(ctx: CanvasRenderingContext2D,
   }
 }
 
-// Path/GlyphPath.commands 轮廓绘制（em 命令坐标相对 item.x/y，padX 平移）
+// Path/GlyphPath.commands 轮廓绘制（em 命令坐标相对 item.x/y，padX 平移）。
+// 五十九包：命令坐标须乘 item.scale——FFI 不把缩放烘进轮廓（宿主 dump
+// 实证：x^{2} 上标 scale=0.7、\sqrt[3] 根次 scale=0.5，命令坐标为全尺寸
+// 字形），旧码漏乘致上标与 base 同大、且上探出布局盒顶部被裁（真机 58
+// 包反馈②③同根因）；Path 型（根号钩形）无 scale 字段缺省 1 不受影响
 function ratexDrawPath(ctx: CanvasRenderingContext2D, item: DisplayListItem,
   fs: number, topPad: number, color: string, padX: number = 0): void {
   const cmds = item.commands;
   if (!Array.isArray(cmds) || cmds.length === 0) {
     return;
   }
+  const sc = item.scale !== undefined ? item.scale : 1;
   const ox = padX + (item.x !== undefined ? item.x : 0) * fs;
   const oy = topPad + (item.y !== undefined ? item.y : 0) * fs;
   ctx.beginPath();
@@ -276,18 +281,18 @@ function ratexDrawPath(ctx: CanvasRenderingContext2D, item: DisplayListItem,
     const c = cmds[i];
     const t = c.type;
     if (t === 'MoveTo' && c.x !== undefined && c.y !== undefined) {
-      ctx.moveTo(ox + c.x * fs, oy + c.y * fs);
+      ctx.moveTo(ox + c.x * fs * sc, oy + c.y * fs * sc);
       open = true;
     } else if (t === 'LineTo' && c.x !== undefined && c.y !== undefined) {
-      ctx.lineTo(ox + c.x * fs, oy + c.y * fs);
+      ctx.lineTo(ox + c.x * fs * sc, oy + c.y * fs * sc);
     } else if (t === 'CubicTo' && c.x1 !== undefined && c.x2 !== undefined
       && c.x !== undefined) {
-      ctx.bezierCurveTo(ox + c.x1 * fs, oy + (c.y1 as number) * fs,
-        ox + c.x2 * fs, oy + (c.y2 as number) * fs,
-        ox + c.x * fs, oy + (c.y as number) * fs);
+      ctx.bezierCurveTo(ox + c.x1 * fs * sc, oy + (c.y1 as number) * fs * sc,
+        ox + c.x2 * fs * sc, oy + (c.y2 as number) * fs * sc,
+        ox + c.x * fs * sc, oy + (c.y as number) * fs * sc);
     } else if (t === 'QuadTo' && c.x1 !== undefined && c.x !== undefined) {
-      ctx.quadraticCurveTo(ox + c.x1 * fs, oy + (c.y1 as number) * fs,
-        ox + c.x * fs, oy + (c.y as number) * fs);
+      ctx.quadraticCurveTo(ox + c.x1 * fs * sc, oy + (c.y1 as number) * fs * sc,
+        ox + c.x * fs * sc, oy + (c.y as number) * fs * sc);
     } else if (t === 'Close') {
       ctx.closePath();
     }

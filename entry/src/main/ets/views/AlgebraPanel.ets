@@ -83,6 +83,9 @@ export struct AlgebraPanel {
   // 第十包②：光标框内/框外双态（框内小号上/下移，框外基线）
   @Prop mathCaretScript: boolean = false;
   @Prop fieldFocused: boolean = false;
+  // 五十九包③：输入行高度随 MathField RaTeX 内容自适应（上标/根号高过
+  // 30 时伸展，回报自 MathField.onContentHeight）
+  @State inputRowH: number = 32;
   // 共享对象（父级创建并传入）：改名/编辑行的滚动避让与光标定位
   scroller: Scroller = new Scroller();
   createCtrl: TextInputController = new TextInputController();
@@ -396,6 +399,13 @@ export struct AlgebraPanel {
           focused: this.fieldFocused,
           dark: this.dark,
           onActivate: () => this.onFieldActivate(),
+          onContentHeight: (h: number): void => {
+            // 五十九包③：RaTeX 内容行高自适应（30 基准，Stack 32 基准）
+            const v = Math.max(32, Math.ceil(h) + 2);
+            if (Math.abs(v - this.inputRowH) > 0.5) {
+              this.inputRowH = v;
+            }
+          },
           onTapCaret: (pos: number, script: boolean): void =>
             this.onFieldTapCaret(pos, script)
         })
@@ -403,7 +413,7 @@ export struct AlgebraPanel {
     }
     .alignContent(Alignment.Start)
     .layoutWeight(1)
-    .height(32)
+    .height(this.inputRowH)
     .margin({ right: 6 })
   }
 

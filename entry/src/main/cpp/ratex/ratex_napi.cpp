@@ -139,8 +139,12 @@ std::string LinearToLatex(const std::string &s, bool &identity)
     size_t i = 0;
     while (i < s.size()) {
         // sqrt( → \sqrt{...}（不配对则原样）
+        // 守卫只排除字母（标识符中段 asqrt(）：内核量名不含字母紧贴模板名
+        // 的情况；数字/右括号后是并列乘法 2sqrt(2)=2·√2，必须转换——
+        // 59 包修复：原 isalnum 把数字后跟的 sqrt 也拦下，identity 放行后
+        // 渲染成字面 "2sqrt(2)"（真机 58 包反馈）
         if (s.compare(i, 5, "sqrt(") == 0
-            && (i == 0 || !isalnum((unsigned char)s[i - 1]))) {
+            && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
             const size_t m = MatchParen(s, i + 4);
             if (m != std::string::npos) {
                 out += "\\sqrt{" + s.substr(i + 5, m - i - 5) + "}";
@@ -151,7 +155,7 @@ std::string LinearToLatex(const std::string &s, bool &identity)
         }
         // NthRoot(根次, 被开方数) → \sqrt[根次]{被开方数}（须有顶层逗号）
         if (s.compare(i, 8, "NthRoot(") == 0
-            && (i == 0 || !isalnum((unsigned char)s[i - 1]))) {
+            && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
             const size_t m = MatchParen(s, i + 7);
             if (m != std::string::npos) {
                 size_t comma = std::string::npos;
@@ -174,7 +178,7 @@ std::string LinearToLatex(const std::string &s, bool &identity)
         // 缺省链路，纯字母直通会把 abs 渲染成斜体 a·b·s，倒退于旧 painter
         // 的 |·|；排版引擎不支持 \left| 时整串排版失败走回退，无回归）
         if (s.compare(i, 4, "abs(") == 0
-            && (i == 0 || !isalnum((unsigned char)s[i - 1]))) {
+            && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
             const size_t m = MatchParen(s, i + 3);
             if (m != std::string::npos) {
                 out += "\\left|" + s.substr(i + 4, m - i - 4) + "\\right|";
