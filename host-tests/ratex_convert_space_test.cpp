@@ -51,5 +51,15 @@ int main()
     expect("2abs(x)", "2\\left|x\\right|");
     expect("2NthRoot(3,x)", "2\\sqrt[3]{x}");
     expect("asqrt(2)", "asqrt(2)");                        // 标识符中段仍不命中
+    // ---- 六十包：空参灰块占位（GGB PLACEHOLDER 同款浅灰块）----
+    expect("sqrt()", "\\sqrt{\\color{#E6E6EB}\\rule{0.5em}{0.9em}}");
+    expect("2sqrt(2)", "2\\sqrt{2}");          // 有参不变（回归）
+    expect("NthRoot(3,)", "\\sqrt[3]{\\color{#E6E6EB}\\rule{0.5em}{0.9em}}");
+    expect("NthRoot(,x)", "\\sqrt[\\color{#E6E6EB}\\rule{0.3em}{0.4em}]{x}");
+    expect("x^", "x^{\\color{#E6E6EB}\\rule{0.35em}{0.5em}}");   // 悬空指数灰块
+    expect("x_", "x_{\\color{#E6E6EB}\\rule{0.35em}{0.5em}}");
+    expect("x^2", "x^{2}");                            // 有参不变（回归）
+    expect("()", "()");                                // 空括号对直通
+    expect("sin()", "\\sin()");              // 函数空参括号紧贴
     return g_fail;
 }

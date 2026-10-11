@@ -1814,8 +1814,10 @@ export struct MathField {
     if (raw.length === 0 || parenBalance(raw) !== 0) {
       return false;
     }
-    return raw.indexOf('()') < 0 && raw.indexOf('log(') < 0
-      && raw.indexOf(',)') < 0 && raw.indexOf('(,') < 0;
+    // 六十包②③：()/,)/(,/log( 全部放开——空参模板在转换器层出灰块占
+    // 位（GGB 同款浅灰块，宿主 dump \sqrt{}、\sqrt[3]{}、\sqrt[]{x} 均
+    // 排版成功），\log(x)/\log_{2}(x) 已验证；唯一余下拒绝条件=括号不配对
+    return true;
   }
 
   // 完整原文 → DisplayList；按 raw+深浅色记账（blink 重绘不再排版）。
@@ -1832,11 +1834,17 @@ export struct MathField {
     if (this.canFieldRatex(this.raw)) {
       const latex = ratexConvertLinear(this.raw);
       if (latex !== null) {
-        let lay = ratexLayoutLatex(latex, Theme.text(this.dark));
-        if (lay === null && isBinOpCh(this.raw.charAt(this.raw.length - 1))) {
-          // 五十九包：尾部二目降级在真机排版失败（+ 未随 1 键入转 LaTeX
-          // 的观察来源）——补零宽组 {} 显示，间距与补全后状态一致不打闪
+        let lay: RatexLayoutResult | null = null;
+        if (isBinOpCh(this.raw.charAt(this.raw.length - 1))) {
+          // 六十包①：尾部二目无条件补零宽组——真机对裸尾部二目是「降级
+          // 成功」而非失败（宿主 dump：降级串 + 在 2.9310em、补组后
+          // 3.1532em，差 0.222em=左 medmuskip；五十九包「失败才补」在真
+          // 机从未触发，显示一直是降级串，键入 1 时 + 右移 3.7px）。补组
+          // 后显示几何与补全态一致，键入不再移位
           lay = ratexLayoutLatex(latex + '{}', Theme.text(this.dark));
+        }
+        if (lay === null) {
+          lay = ratexLayoutLatex(latex, Theme.text(this.dark));
         }
         this.rtxLay = lay;
         this.rtxOk = this.rtxLay !== null;
@@ -2021,8 +2029,12 @@ export struct MathField {
       }
     }
     let pick = best;
-    const wantSup = canvasY < 16;
-    const wantSub = canvasY > 19;
+    // 六十包：y 仲裁随自适应基线走（59 包行高可伸展后固定 16/19 失准；
+    // 以基线 22 参照的旧阈 −6/−3 换算成基线相对量）
+    const baselineY = Math.max(22, Math.ceil(this.rtxLay !== null
+      ? this.rtxLay.heightEm * this.rtxFs : 0) + 3);
+    const wantSup = canvasY < baselineY - 0.45 * this.rtxFs;
+    const wantSub = canvasY > baselineY - 0.2 * this.rtxFs;
     for (let i = 0; i < stops.length; i++) {
       if (Math.abs(ds[i] - ds[best]) >= 0.5) {
         continue;

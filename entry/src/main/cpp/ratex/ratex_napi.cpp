@@ -120,6 +120,18 @@ size_t MatchParen(const std::string &s, size_t open)
     return std::string::npos;
 }
 
+// 空参占位灰块（六十包②，看齐 GGB：TeXSerializer.PLACEHOLDER = 浅灰实
+// 心块 \bgcolor{#E6E6EB}\scalebox{1}[1.6]{\phantom{g}}，编辑器里空参数
+// 的可见提示；RaTeX 无 bgcolor/scalebox，以 \color+\rule 等效——rule 的
+// em 尺寸相对当前字号，根号/上标/次根内自动缩放，DisplayList 里是粗
+// Line 块，绘制端零改动。GGB 对「光标所在空 field」只画光标不画框，我
+// 们光标自绘同理，故一律灰块即可）
+const char kPlaceholder[] = "\\color{#E6E6EB}\\rule{0.5em}{0.9em}";
+// 根次槽位（\sqrt[...]）的窄版灰块
+const char kPlaceholderIdx[] = "\\color{#E6E6EB}\\rule{0.3em}{0.4em}";
+// 脚本槽位（^/_）的窄版灰块
+const char kPlaceholderScript[] = "\\color{#E6E6EB}\\rule{0.35em}{0.5em}";
+
 // 从 from 起的脚本内容（无括号组时取连续字母数字字符）
 size_t ScriptRunEnd(const std::string &s, size_t from)
 {
@@ -147,7 +159,15 @@ std::string LinearToLatex(const std::string &s, bool &identity)
             && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
             const size_t m = MatchParen(s, i + 4);
             if (m != std::string::npos) {
-                out += "\\sqrt{" + s.substr(i + 5, m - i - 5) + "}";
+                out += "\\sqrt{";
+                // 空参（键盘 √ 模板 sqrt() 未填）：灰块占位（六十包②——
+                // 原先空参走旧 painter 虚线框致整行退旧渲染）
+                if (m == i + 5) {
+                    out += kPlaceholder;
+                } else {
+                    out += s.substr(i + 5, m - i - 5);
+                }
+                out += "}";
                 identity = false;
                 i = m + 1;
                 continue;
@@ -166,8 +186,19 @@ std::string LinearToLatex(const std::string &s, bool &identity)
                     else if (s[q] == ',' && depth == 0) { comma = q; break; }
                 }
                 if (comma != std::string::npos) {
-                    out += "\\sqrt[" + s.substr(i + 8, comma - i - 8) + "]{"
-                         + s.substr(comma + 1, m - comma - 1) + "}";
+                    out += "\\sqrt[";
+                    if (comma == i + 8) {
+                        out += kPlaceholderIdx;   // 根次未填（NthRoot(,x)）
+                    } else {
+                        out += s.substr(i + 8, comma - i - 8);
+                    }
+                    out += "]{";
+                    if (m == comma + 1) {
+                        out += kPlaceholder;      // 被开方数未填（NthRoot(3,)）
+                    } else {
+                        out += s.substr(comma + 1, m - comma - 1);
+                    }
+                    out += "}";
                     identity = false;
                     i = m + 1;
                     continue;
@@ -235,7 +266,13 @@ std::string LinearToLatex(const std::string &s, bool &identity)
                 i = j;
                 continue;
             }
+            // 悬空脚本（x^、x_ 输入中途态，六十包③）：出灰块占位进组——
+            // 原样放行 ^/_ 时 RaTeX 报 "Expected group after" 整串排版失
+            // 败退旧渲染；补灰块后排版成功且占位可见（GGB ^{\jlmcursor}
+            // /^{灰块} 同语义）
             out += op;
+            out += "{" + std::string(kPlaceholderScript) + "}";
+            identity = false;
             ++i;
             continue;
         }
