@@ -176,7 +176,8 @@ bool KnownFn(const std::string &s, size_t from, size_t to)
         "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh",
         "asin", "acos", "atan", "sin", "cos", "tan", "cot",
         "sec", "csc", "ln", "log", "exp", "min", "max",
-        "floor", "ceil", "round", "sgn", "sqrt", "NthRoot", "abs"
+        "floor", "ceil", "round", "sgn", "sqrt", "NthRoot", "abs",
+        "Floor", "Ceil", "Derivative", "Integral"
     };
     if (to <= from) return false;
     const size_t len = to - from;
@@ -414,6 +415,219 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
                 identity = false;
                 i = m + 1;
                 continue;
+            }
+        }
+        // Derivative(f) → \frac{d(f)}{dx}（六十五包②，键盘 d□/d□ 键插命
+        // 令名——不转渲染斜体字面 D·e·r…）。二参：第二参全数字=求导阶
+        // \frac{d^{n}(f)}{dx^{n}}，否则=变量 \frac{d(f)}{d(v)}。空槽灰块，
+        // 探针走基线上下文（宿主 dump：d(x^2)/dx、d^2 形态、灰块全过）
+        if (s.compare(i, 11, "Derivative(") == 0
+            && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
+            const size_t m = MatchParen(s, i + 10, to);
+            if (m != std::string::npos) {
+                size_t comma = std::string::npos;
+                int dep = 0;
+                for (size_t q = i + 11; q < m; ++q) {
+                    if (s[q] == '(') ++dep;
+                    else if (s[q] == ')') --dep;
+                    else if (s[q] == ',' && dep == 0) { comma = q; break; }
+                }
+                bool orderForm = false;
+                if (comma != std::string::npos && comma + 1 < m) {
+                    orderForm = true;
+                    for (size_t q = comma + 1; q < m; ++q) {
+                        if (!isdigit((unsigned char)s[q])) {
+                            orderForm = false;
+                            break;
+                        }
+                    }
+                }
+                const size_t cs0 = i + 11;
+                const size_t ce0 = comma != std::string::npos ? comma : m;
+                out += "\\frac{d";
+                if (orderForm) {
+                    out += "^{";
+                    out += s.substr(comma + 1, m - comma - 1);
+                    out += "}";
+                }
+                out += "(";
+                if (ce0 == cs0) {
+                    if (markerAt == cs0 && !caretDone) {
+                        out += kCaretMarker;
+                        caretDone = true;
+                    }
+                    out += kPlaceholder;
+                } else {
+                    out += LinearToLatexCaret(s, identity, cs0, ce0,
+                                              markerAt, caretDone,
+                                              kCaretMarker, depth + 1);
+                }
+                out += ")}{d";
+                if (orderForm) {
+                    out += "x^{";
+                    out += s.substr(comma + 1, m - comma - 1);
+                    out += "}";
+                } else if (comma != std::string::npos) {
+                    const size_t cs1 = comma + 1;
+                    out += "(";
+                    if (m == cs1) {
+                        if (markerAt == cs1 && !caretDone) {
+                            out += kCaretMarker;
+                            caretDone = true;
+                        }
+                        out += kPlaceholder;
+                    } else {
+                        out += LinearToLatexCaret(s, identity, cs1, m,
+                                                  markerAt, caretDone,
+                                                  kCaretMarker, depth + 1);
+                    }
+                    out += ")";
+                } else {
+                    out += "x";
+                }
+                out += "}";
+                identity = false;
+                i = m + 1;
+                continue;
+            }
+        }
+        // Integral(f) → \int f\,dx；Integral(f, v) → \int f\,dv（多字/非字
+        // 母变量 d(v)）；Integral(f, a, b) → \int_{a}^{b} f\,dx（GGB 定积
+        // 分形态）；≥4 参不转（落通用字面）。空槽灰块（限槽小灰块），探针
+        // 走基线上下文（宿主 dump：单参/变量/定限/灰块全过）
+        if (s.compare(i, 9, "Integral(") == 0
+            && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
+            const size_t m = MatchParen(s, i + 8, to);
+            if (m != std::string::npos) {
+                size_t c1 = std::string::npos;
+                size_t c2 = std::string::npos;
+                bool tooMany = false;
+                int dep = 0;
+                for (size_t q = i + 9; q < m; ++q) {
+                    if (s[q] == '(') ++dep;
+                    else if (s[q] == ')') --dep;
+                    else if (s[q] == ',' && dep == 0) {
+                        if (c1 == std::string::npos) {
+                            c1 = q;
+                        } else if (c2 == std::string::npos) {
+                            c2 = q;
+                        } else {
+                            tooMany = true;
+                            break;
+                        }
+                    }
+                }
+                if (!tooMany) {
+                    const size_t fs = i + 9;
+                    const size_t fe = c1 != std::string::npos ? c1 : m;
+                    auto emitArg = [&](size_t as, size_t ae, const char *ph) {
+                        if (ae == as) {
+                            if (markerAt == as && !caretDone) {
+                                out += kCaretMarker;
+                                caretDone = true;
+                            }
+                            out += ph;
+                        } else {
+                            out += LinearToLatexCaret(s, identity, as, ae,
+                                                      markerAt, caretDone,
+                                                      kCaretMarker, depth + 1);
+                        }
+                    };
+                    if (c2 != std::string::npos) {
+                        out += "\\int_{";
+                        emitArg(c1 + 1, c2, kPlaceholderIdx);
+                        out += "}^{";
+                        emitArg(c2 + 1, m, kPlaceholderIdx);
+                        out += "} ";
+                    } else {
+                        out += "\\int ";
+                    }
+                    emitArg(fs, fe, kPlaceholder);
+                    if (c2 != std::string::npos) {
+                        out += "\\,dx";
+                    } else if (c1 != std::string::npos) {
+                        out += "\\,d";
+                        if (c1 + 2 == m && isalpha((unsigned char)s[c1 + 1])) {
+                            out += s.substr(c1 + 1, 1);
+                        } else {
+                            out += "(";
+                            emitArg(c1 + 1, m, kPlaceholder);
+                            out += ")";
+                        }
+                    } else {
+                        out += "\\,dx";
+                    }
+                    identity = false;
+                    i = m + 1;
+                    continue;
+                }
+            }
+        }
+        // 循环小数 0.(3)/1.2(34) → 0.\overline{3}（六十五包③，键盘 □̄ 键
+        // 插 0.()——旧 painter over 原子有上划线，RaTeX 链补齐同款）。判
+        // 据与 ArkTS parseMathAtoms 同：'(' 前回溯「整数段.小数段」，整数
+        // 位至少一位；不配对/中缀不转（2(3) 仍并列乘法字面）。空 () 出
+        // (灰块)——与 ArkTS 空参分支（'(' 灰 ')') 同形
+        if (s[i] == '(' && i > from
+            && (isdigit((unsigned char)s[i - 1]) || s[i - 1] == '.')) {
+            size_t k1 = i;
+            while (k1 > from && isdigit((unsigned char)s[k1 - 1])) {
+                --k1;
+            }
+            bool ok = false;
+            size_t dotPos = i;
+            if (k1 == i && s[i - 1] == '.') {
+                // 0.() 形态：'(' 紧跟小数点，点前须有整数位
+                size_t k2 = i - 1;
+                while (k2 > from && isdigit((unsigned char)s[k2 - 1])) {
+                    --k2;
+                }
+                if (k2 < i - 1) {
+                    ok = true;
+                }
+            } else if (k1 < i && k1 > from && s[k1 - 1] == '.') {
+                // 1.2(34) 形态
+                size_t k2 = k1 - 1;
+                while (k2 > from && isdigit((unsigned char)s[k2 - 1])) {
+                    --k2;
+                }
+                if (k2 < k1 - 1) {
+                    ok = true;
+                }
+            }
+            if (ok) {
+                const size_t m = MatchParen(s, i, to);
+                if (m != std::string::npos) {
+                    // 循环位必须全数字（与 ArkTS parseMathAtoms 同判据——
+                    // 0.5(x) 是 0.5·(x) 并列乘法，字母循环位不转）
+                    bool repOk = true;
+                    for (size_t q = i + 1; q < m; ++q) {
+                        if (!isdigit((unsigned char)s[q])) {
+                            repOk = false;
+                            break;
+                        }
+                    }
+                    if (repOk) {
+                        if (m == i + 1) {
+                            out += "(";
+                            if (markerAt == i + 1 && !caretDone) {
+                                out += kCaretMarker;
+                                caretDone = true;
+                            }
+                            out += kPlaceholder;
+                            out += ")";
+                        } else {
+                            out += "\\overline{";
+                            out += LinearToLatexCaret(s, identity, i + 1, m,
+                                                      markerAt, caretDone,
+                                                      kCaretMarker, depth + 1);
+                            out += "}";
+                        }
+                        identity = false;
+                        i = m + 1;
+                        continue;
+                    }
+                }
             }
         }
         // 常用函数名 → \sin 等（五十八包：仅调用形态——名字后紧 '(' 且前

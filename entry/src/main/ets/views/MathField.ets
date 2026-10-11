@@ -477,14 +477,25 @@ export function parseMathAtoms(raw: string): MathAtom[] {
       if (dotPos >= 0) {
         const m = matchParen(raw, i);
         if (m > 0) {
-          if (m === i + 1) {
-            const a11: MathAtom = { ch: '□', sup: false, sub: false, over: true, dim: true, caret: false, start: i, end: m + 1 };
-            atoms.push(a11);
-          } else {
-            pushRun(atoms, raw, i + 1, m, false, false, true, false, i, m + 1);
+          // 循环位必须全数字（六十五包③：0.5(x) 是 0.5·(x) 并列乘法，
+          // 旧判据只回溯整数段.小数段，字母循环位误加上划线）
+          let repOk = true;
+          for (let q = i + 1; q < m; q++) {
+            if (!isDigitCh(raw.charAt(q))) {
+              repOk = false;
+              break;
+            }
           }
-          i = m + 1;
-          continue;
+          if (repOk) {
+            if (m === i + 1) {
+              const a11: MathAtom = { ch: '□', sup: false, sub: false, over: true, dim: true, caret: false, start: i, end: m + 1 };
+              atoms.push(a11);
+            } else {
+              pushRun(atoms, raw, i + 1, m, false, false, true, false, i, m + 1);
+            }
+            i = m + 1;
+            continue;
+          }
         }
       }
     }
@@ -908,11 +919,12 @@ export function templateUnwrapRange(raw: string, caret: number): number[] {
   return [j, m + 1];
 }
 
-// 键盘模板命令名（与转换器 kFns/模板分支同集；六十三包①）
+// 键盘模板命令名（与转换器 kFns/模板分支同集；六十三包①；六十五包
+// +Derivative/Integral——键盘 d□/d□、∫□d□ 键插命令名，空槽⌫整删同款）
 const kTplNames: string[] = ['sqrt', 'abs', 'NthRoot', 'log', 'ln', 'exp',
   'sin', 'cos', 'tan', 'cot', 'sec', 'csc', 'asin', 'acos', 'atan',
   'arcsin', 'arccos', 'arctan', 'sinh', 'cosh', 'tanh', 'floor', 'ceil',
-  'round', 'sgn', 'min', 'max', 'Floor', 'Ceil'];
+  'round', 'sgn', 'min', 'max', 'Floor', 'Ceil', 'Derivative', 'Integral'];
 
 // 空槽模板退格（六十三包①，GGB 空 field ⌫ 删整个模板同款）：NthRoot(,)
 // 内 ⌫ 原先只删逗号 → NthRoot() 无顶层逗号不可转 → 整行渲染斜体字面
@@ -923,7 +935,10 @@ const kTplNames: string[] = ['sqrt', 'abs', 'NthRoot', 'log', 'ln', 'exp',
 // backspaceAtCaret ')' 分支把顶层逗号当参数末字符删掉 → NthRoot(3) 字
 // 面）、槽非空走 ')' 分支删末字符进槽（GGB bkspLastFunctionArg）；根号
 // /真数槽内非槽首位 = 普通删字符（旧版回扫 comma 旗标把任何位置都当槽
-// 首只移光标不删字——根号内有数字退格左移的根因）
+// 首只移光标不删字——根号内有数字退格左移的根因）。六十五包⑤：槽内
+// 判据再修——旧版查 idxPart===''（首槽空）当整删条件，根次空+根号有数
+// 时根号内 ⌫ 一按全没；槽内必非空恒普通删、末槽空判据改 content 尾
+// 逗号（三参 Integral 同判）、首槽槽首非空退到名前（GGB prevCharacter）
 export function emptyTemplateBksp(raw: string, caret: number): number[] {
   if (caret <= 0 || caret > raw.length) {
     return [];
@@ -972,21 +987,35 @@ export function emptyTemplateBksp(raw: string, caret: number): number[] {
     return [];
   }
   const content = raw.substring(open + 1, close);
-  if (name === 'NthRoot' || (name === 'log' && content.indexOf(',') >= 0)) {
-    const ci = content.indexOf(',');
-    const idxPart = ci >= 0 ? content.substring(0, ci) : content;
-    const radPart = ci >= 0 ? content.substring(ci + 1) : '';
+  const ci = content.indexOf(',');
+  if (name === 'NthRoot' || (name === 'log' && ci >= 0)
+    || ((name === 'Derivative' || name === 'Integral') && ci >= 0)) {
+    // 多槽模板（NthRoot 双槽；log 底数/真数；Derivative/Integral 顶层逗号
+    // 多参）按槽位四判（六十五包⑤重订）：右缘=末槽界、槽首（紧贴 ','）、
+    // 首槽槽首（紧贴 '('）、槽内。当前槽空 → 整删（六十三包口径）；槽内
+    // 必非空 → 恒普通删字符——旧版槽内查 idxPart===''（首槽空判据）把
+    // 「根次空+根号有数」的根号内 ⌫ 误判整删：不管几个数字一按全没、
+    // 灰块不回（本轮用户反馈）
     if (atClose) {
-      // 右缘：末槽（被开方数/真数）空 → 整删；非空 → [] 走 ')' 分支
-      return radPart === '' ? [nameStart, close + 1] : [];
+      // 右缘：末槽空（content 以 ',' 结尾——NthRoot(3,) 与三参
+      // Integral(f,1,) 同判；旧版按首逗号拆 radPart，中间槽非空时末槽
+      // 空漏判）→ 整删；末槽非空 → [] 走 ')' 分支删末槽末字符进槽
+      //（GGB bkspLastFunctionArg）
+      return close > open + 1 && raw.charAt(close - 1) === ','
+        ? [nameStart, close + 1] : [];
     }
     if (raw.charAt(caret - 1) === ',') {
-      // 被开方数/真数槽首：槽空整删（用户口径「直接删除」），槽非空槽首
-      // 退格只移光标进上一槽（GGB prev field，逗号保护）
-      return radPart === '' ? [nameStart, close + 1] : [caret - 1];
+      // 槽首：本槽空（右邻 ',' 或 ')'）→ 整删；非空 → 只移光标进上一槽
+      //（GGB prev field，逗号保护）
+      return caret === close || raw.charAt(caret) === ','
+        ? [nameStart, close + 1] : [caret - 1];
     }
-    // 根次/底数槽内或根号内非槽首：槽空整删，槽非空走普通删字符
-    return idxPart === '' ? [nameStart, close + 1] : [];
+    if (open === caret - 1) {
+      // 首槽槽首：槽空整删；非空退到模板名前（GGB prevCharacter 同款——
+      // 不可走普通删把 '(' 删成 "NthRoot,85)" 垃圾）
+      return ci === 0 ? [nameStart, close + 1] : [nameStart];
+    }
+    return [];
   }
   return content === '' ? [nameStart, close + 1] : [];
 }

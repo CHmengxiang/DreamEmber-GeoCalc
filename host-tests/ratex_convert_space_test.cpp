@@ -154,5 +154,34 @@ int main()
     expect("Floor(x)", "\\lfloor x \\rfloor");             // ⌊⌋ 键
     expect("Ceil(2.5)", "\\lceil 2.5 \\rceil");            // ⌈⌉ 键
     expect("Floor()", "\\lfloor " + G + " \\rfloor");      // 空参灰块
+    // ---- 六十五包②③：Derivative/Integral 显示模板 + 循环小数上划线 ----
+    const std::string GI = "\\color{#E6E6EB}\\rule{0.5em}{0.65em}";
+    expect("Derivative(x^2)", "\\frac{d(x^{2})}{dx}");           // d□/d□ 键
+    expect("Derivative()", "\\frac{d(" + G + ")}{dx}");          // 空槽灰块
+    expect("Derivative(x^3,2)", "\\frac{d^{2}(x^{3})}{dx^{2}}"); // 二阶
+    expect("Derivative(x,y)", "\\frac{d(x)}{d(y)}");             // 变量
+    expect("Derivative(f,)", "\\frac{d(f)}{d(" + G + ")}");      // 变量槽空
+    expect("Derivative(,2)", "\\frac{d^{2}(" + G + ")}{dx^{2}}");// 函数槽空
+    expect("1/Derivative(x)", "\\frac{1}{\\frac{d(x)}{dx}}");    // KnownFn 吸收
+    expect("Integral(x^2)", "\\int x^{2}\\,dx");                 // ∫□d□ 键
+    expect("Integral()", "\\int " + G + "\\,dx");                // 空槽灰块
+    expect("Integral(x^2,t)", "\\int x^{2}\\,dt");               // 单字变量
+    expect("Integral(x^2,alpha)", "\\int x^{2}\\,d(alpha)");     // 多字变量
+    expect("Integral(x^2,1,2)", "\\int_{1}^{2} x^{2}\\,dx");     // 定积分
+    expect("Integral(,1,2)", "\\int_{1}^{2} " + G + "\\,dx");    // 函数槽空
+    expect("Integral(x^2,,)", "\\int_{" + GI + "}^{" + GI
+        + "} x^{2}\\,dx");                                       // 限槽空小灰块
+    expect("Integral(f,a,b,c)", "Integral(f,a,b,c)");            // ≥4 参不转
+    expect("0.(3)", "0.\\overline{3}");                          // □̄ 键上划线
+    expect("1.2(34)", "1.2\\overline{34}");
+    expect("0.()", "0.(" + G + ")");                             // 空循环位=(灰)
+    expect("2(3)", "2(3)");                                      // 并列乘不转
+    expect("0.5(x)", "0.5(x)");                                  // 字母循环位不转
+    expect("sin(0.5)", "\\sin(0.5)");                            // 函数调用不误转
+    expectCaret("Derivative(", "x^2)", "\\frac{d(" + M + "x^{2})}{dx}");
+    expectCaret("Integral(", "x^2)", "\\int " + M + "x^{2}\\,dx");
+    expectCaret("Integral(x^2,1", ",2)", "\\int_{1" + M
+        + "}^{2} x^{2}\\,dx");                                   // 下限内探针
+    expectCaret("0.(", "3)", "0.\\overline{" + M + "3}");        // 循环位内探针
     return g_fail;
 }
