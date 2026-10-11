@@ -918,18 +918,24 @@ const kTplNames: string[] = ['sqrt', 'abs', 'NthRoot', 'log', 'ln', 'exp',
 // 内 ⌫ 原先只删逗号 → NthRoot() 无顶层逗号不可转 → 整行渲染斜体字面
 // "NthRoot()"。语义：当前槽空 → 整删 [名首, ')' 含)；多槽模板槽首 ⌫
 // （紧贴分隔逗号）且当前槽非空 → 只移光标进上一槽（[t]），防逗号被删
-// 断链。返回 [from,to) 整删 / [t] 仅移光标 / [] 无命中走原路径
+// 断链。返回 [from,to) 整删 / [t] 仅移光标 / [] 无命中走原路径。
+// 六十四包①③按槽位重判：右缘（紧贴 ')'）= 末槽——槽空整删（旧版落
+// backspaceAtCaret ')' 分支把顶层逗号当参数末字符删掉 → NthRoot(3) 字
+// 面）、槽非空走 ')' 分支删末字符进槽（GGB bkspLastFunctionArg）；根号
+// /真数槽内非槽首位 = 普通删字符（旧版回扫 comma 旗标把任何位置都当槽
+// 首只移光标不删字——根号内有数字退格左移的根因）
 export function emptyTemplateBksp(raw: string, caret: number): number[] {
   if (caret <= 0 || caret > raw.length) {
     return [];
   }
   let open = -1;
-  let comma = false;
+  let atClose = false;
   if (raw.charAt(caret - 1) === ')') {
     // 光标紧贴 ')'：模板右缘——配对反查并确认即本模板闭括号
     const ob = matchParenBackward(raw, caret - 1);
     if (ob >= 0 && matchParen(raw, ob) === caret - 1) {
       open = ob;
+      atClose = true;
     }
   }
   if (open < 0) {
@@ -944,8 +950,6 @@ export function emptyTemplateBksp(raw: string, caret: number): number[] {
           break;
         }
         depth--;
-      } else if (c === ',' && depth === 0) {
-        comma = true;
       }
     }
   }
@@ -961,7 +965,10 @@ export function emptyTemplateBksp(raw: string, caret: number): number[] {
     return [];
   }
   const close = matchParen(raw, open);
-  if (close < caret) {
+  // 右缘 caret=close+1 合法（六十四包①：旧守卫 close<caret 把 atClose
+  // 分支全挡成死代码，右缘退格漏给 ')' 分支误删逗号/括号）；caret 越过
+  // 模板（close<caret-1）才拒绝——回扫遇 ')' 记深度，越界本就扫不到 open
+  if (close < caret - 1) {
     return [];
   }
   const content = raw.substring(open + 1, close);
@@ -969,12 +976,16 @@ export function emptyTemplateBksp(raw: string, caret: number): number[] {
     const ci = content.indexOf(',');
     const idxPart = ci >= 0 ? content.substring(0, ci) : content;
     const radPart = ci >= 0 ? content.substring(ci + 1) : '';
-    if (comma || raw.charAt(caret - 1) === ',') {
-      // 被开方数/真数槽：槽空整删（用户口径「直接删除」），槽非空槽首
+    if (atClose) {
+      // 右缘：末槽（被开方数/真数）空 → 整删；非空 → [] 走 ')' 分支
+      return radPart === '' ? [nameStart, close + 1] : [];
+    }
+    if (raw.charAt(caret - 1) === ',') {
+      // 被开方数/真数槽首：槽空整删（用户口径「直接删除」），槽非空槽首
       // 退格只移光标进上一槽（GGB prev field，逗号保护）
       return radPart === '' ? [nameStart, close + 1] : [caret - 1];
     }
-    // 根次/底数槽：槽空整删，槽非空走普通删字符
+    // 根次/底数槽内或根号内非槽首：槽空整删，槽非空走普通删字符
     return idxPart === '' ? [nameStart, close + 1] : [];
   }
   return content === '' ? [nameStart, close + 1] : [];
@@ -996,6 +1007,33 @@ export interface MathCaretStop {
   script: boolean;
   empty?: boolean;   // 框内停靠且脚本内容为空（信息性标记；第十六包②起
                      // 不再据此跳站——空框 ←/→ 均可进出，跳站曾致单向门）
+}
+
+// log( 二参模板的顶层逗号下标（与 parseMathAtoms 同判据：名前非字母 +
+// 配对括号内有顶层逗号）；非二参模板返回 -1（六十四包②）
+function logTemplateComma(raw: string, start: number): number {
+  if (!raw.startsWith('log(', start)) {
+    return -1;
+  }
+  if (start > 0 && isAlphaCh(raw.charAt(start - 1))) {
+    return -1;
+  }
+  const m = matchParen(raw, start + 3);
+  if (m < 0) {
+    return -1;
+  }
+  let depth = 0;
+  for (let q = start + 4; q < m; q++) {
+    const c = raw.charAt(q);
+    if (c === '(') {
+      depth++;
+    } else if (c === ')') {
+      depth--;
+    } else if (c === ',' && depth === 0) {
+      return q;
+    }
+  }
+  return -1;
 }
 
 // ←/→ 的停靠序列（按视觉顺序，第十一包② v2 改按脚本 run 走）：普通原子
@@ -1066,6 +1104,14 @@ export function mathCaretStops(raw: string): MathCaretStop[] {
           push(atoms[k].end, false);
         }
         j = k + 1;
+        continue;
+      }
+      // 六十四包②：log(底,真数) 模板名 l/o/g 三原子区不可停靠（GGB 函数
+      // 名一体）——整名只产一站：角标 ← 直达 log 左、log 左 → 直达角标，
+      // 点触亦不可落名内；非二参模板（无顶层逗号）仍逐字母停靠
+      if (a.ch === 'l' && logTemplateComma(raw, a.start) >= 0) {
+        push(a.start, false);
+        j += 3;
         continue;
       }
       push(a.start, false);
@@ -1589,6 +1635,27 @@ function stopIsSupIn(atoms: MathAtom[], pos: number): boolean {
   return false;
 }
 
+// 根号/NthRoot 原子的结构尾（end）位置集合（六十四包④）：RaTeX 的 √ 闭
+// 钩无前进宽度——内容尾与结构尾探针 x 相同（宿主实证 \sqrt{8} 均为
+// 1.33334em），点触反查给结构尾站 +2px 右缘偏置（旧 painter 内容尾/结构
+// 尾天然差 2px 同款），使根号界内点击落根号内、界外点击落根号外
+function radicalEndPositions(atoms: MathAtom[], out: Set<number>): void {
+  for (let j = 0; j < atoms.length; j++) {
+    const a = atoms[j];
+    if (a.kids !== undefined && a.kids.length > 0) {
+      out.add(a.end);
+      radicalEndPositions(a.kids, out);
+    }
+    if (a.idx !== undefined && a.idx.length > 0) {
+      radicalEndPositions(a.idx, out);
+    }
+    if (a.fracNum !== undefined && a.fracDen !== undefined) {
+      radicalEndPositions(a.fracNum, out);
+      radicalEndPositions(a.fracDen, out);
+    }
+  }
+}
+
 // 点触定位：layoutX/layoutY 为排版坐标（x 相对内容起点、y 相对 Canvas 顶，
 // 行高 30、基线 22——MathField.paint 同参排版）。返回最近停靠点；并列时
 // 按 y 仲裁：上区偏爱上标框内站、下区偏爱下标框内站、中区偏爱框外站。
@@ -1626,24 +1693,35 @@ export function mathPickCaretStop(ctx: CanvasRenderingContext2D, raw: string,
       ties.push(i);
     }
   }
-  let pick = best;
+  let pick = -1;
   if (ties.length > 1) {
     // y 仲裁（四十七包①阈值校准：上标字形/框 canvas y≈[11,22]、下标
     // ≈[16,27]——旧值 15/24 与下标框错位，点下标框被判「中区」偏爱框
     // 外站，光标进不去下标）
     const wantSup = layoutY < 16;
     const wantSub = layoutY > 19;
-    for (let t = 0; t < ties.length && pick === best; t++) {
+    for (let t = 0; t < ties.length && pick < 0; t++) {
       const st = stops[ties[t]];
-      if (!st.script && !wantSup && !wantSub) {
-        pick = ties[t];
-      } else if (st.script && (wantSup || wantSub)) {
+      if (st.script && (wantSup || wantSub)) {
         const sup = stopIsSup(raw, st.pos);
         if ((wantSup && sup) || (wantSub && !sup)) {
           pick = ties[t];
         }
       }
     }
+    if (pick < 0) {
+      // 六十四包④：并列优先最外的框外站（倒序取末个 frame，同 RaTeX 路
+      // 径）——旧版取首个框外站，结构尾站会被内容尾站压过
+      for (let t = ties.length - 1; t >= 0; t--) {
+        if (!stops[ties[t]].script) {
+          pick = ties[t];
+          break;
+        }
+      }
+    }
+  }
+  if (pick < 0) {
+    pick = best;
   }
   return stops[pick];
 }
@@ -2176,18 +2254,22 @@ export struct MathField {
       return null;
     }
     const padL = 8;
+    // 六十四包④：根号结构尾站右缘 +2px 偏置（radicalEndPositions 注释）
+    const radEnds: Set<number> = new Set();
+    radicalEndPositions(parseDisplayAtoms(this.raw), radEnds);
     let best = -1;
     const ds: number[] = [];
     for (let i = 0; i < stops.length; i++) {
       // 六十一包②：停靠 x 同光标绘制走探针（x^2 尾停靠=指数内真实落点，
       // 与绘制一致）；未命中回退前缀排版宽
-      const sx = padL + this.caretXEm(stops[i].pos) * this.rtxFs;
+      const sx = padL + this.caretXEm(stops[i].pos) * this.rtxFs
+        + (radEnds.has(stops[i].pos) ? 2 : 0);
       ds.push(Math.abs(sx - layoutX));
       if (best < 0 || ds[i] < ds[best]) {
         best = i;
       }
     }
-    let pick = best;
+    let pick = -1;
     // 六十包：y 仲裁随自适应基线走（59 包行高可伸展后固定 16/19 失准；
     // 以基线 22 参照的旧阈 −6/−3 换算成基线相对量）
     const baselineY = Math.max(22, Math.ceil(this.rtxLay !== null
@@ -2199,10 +2281,6 @@ export struct MathField {
         continue;
       }
       const st = stops[i];
-      if (!st.script && !wantSup && !wantSub) {
-        pick = i;
-        break;
-      }
       if (st.script && (wantSup || wantSub)) {
         const sup = stopIsSup(this.raw, st.pos);
         if ((wantSup && sup) || (wantSub && !sup)) {
@@ -2210,6 +2288,20 @@ export struct MathField {
           break;
         }
       }
+    }
+    if (pick < 0) {
+      // 六十四包④：并列优先最外的框外站（倒序取末个 frame）——根号内容
+      // 尾与结构尾探针 x 相同（宿主实证 √8 均为 1.633em：√ 闭钩无前进宽
+      // 度），旧版取首位使根号外点击落根号内；纯脚本并列维持最近站
+      for (let i = stops.length - 1; i >= 0; i--) {
+        if (Math.abs(ds[i] - ds[best]) < 0.5 && !stops[i].script) {
+          pick = i;
+          break;
+        }
+      }
+    }
+    if (pick < 0) {
+      pick = best;
     }
     return stops[pick];
   }
