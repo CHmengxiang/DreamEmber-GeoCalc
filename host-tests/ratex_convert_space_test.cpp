@@ -23,14 +23,15 @@ static void expect(const std::string &in, const std::string &want)
         in.c_str(), got.c_str(), want.c_str());
 }
 
-// 六十一包②：光标探针——prefix+rest 拼接转换，markerAt=prefix 字节长
+// 六十一包②/六十二包：光标探针——prefix+rest 拼接转换，markerAt=prefix 字节长
 static void expectCaret(const std::string &prefix, const std::string &rest,
     const std::string &want)
 {
     bool identity = true;
     bool caretDone = false;
-    const std::string got = LinearToLatexCaret(prefix + rest, identity,
-        prefix.size(), caretDone);
+    const std::string s = prefix + rest;
+    const std::string got = LinearToLatexCaret(s, identity, 0, s.size(),
+        prefix.size(), caretDone, kCaretMarker, 0);
     const bool ok = got == want && caretDone;
     if (!ok) g_fail++;
     printf("%s in=%s|%s got=%s want=%s\n", ok ? "PASS" : "FAIL",
@@ -50,7 +51,7 @@ int main()
     expect("1\xC2\xB1" "2", "1\\pm2");                     // 1±2（数字终止命令名，不补空格）
     // ---- 五十八包：identity 放行 + 特殊字符转义 + abs/函数名 ----
     expect("y=2x+1", "y=2x+1");                            // 简单式直通（RaTeX 缺省链路）
-    expect("1/2x", "1/2x");                                // 分式线性直通（与内核求值一致）
+    expect("1/2x", "\\frac{1}{2}x");                       // 分式转 \frac（62 包⑤，与内核 (1/2)x 一致）
     expect("50%", "50\\%");                                // % 转义（防 LaTeX 注释吞行）
     expect("a#b", "a\\#b");
     expect("a&b", "a\\&b");
@@ -69,34 +70,61 @@ int main()
     expect("sqrt()", "\\sqrt{\\color{#E6E6EB}\\rule{0.5em}{0.9em}}");
     expect("2sqrt(2)", "2\\sqrt{2}");          // 有参不变（回归）
     expect("NthRoot(3,)", "\\sqrt[3]{\\color{#E6E6EB}\\rule{0.5em}{0.9em}}");
-    expect("NthRoot(,x)", "\\sqrt[\\color{#E6E6EB}\\rule{0.3em}{0.4em}]{x}");
-    expect("x^", "x^{\\color{#E6E6EB}\\rule{0.35em}{0.5em}}");   // 悬空指数灰块
-    expect("x_", "x_{\\color{#E6E6EB}\\rule{0.35em}{0.5em}}");
+    expect("NthRoot(,x)", "\\sqrt[\\color{#E6E6EB}\\rule{0.5em}{0.65em}]{x}");
+    expect("x^", "x^{\\color{#E6E6EB}\\rule{0.42em}{0.6em}}");   // 悬空指数灰块
+    expect("x_", "x_{\\color{#E6E6EB}\\rule{0.42em}{0.6em}}");
     expect("x^2", "x^{2}");                            // 有参不变（回归）
     expect("()", "()");                                // 空括号对直通
     expect("sin()", "\\sin()");              // 函数空参括号紧贴
-    // ---- 六十一包②：光标探针（M=魔色 rule，GGB CursorAtom 同源模型）----
+    // ---- 六十二包⑤：/ → \frac（内核左结合语义保真）+ 模板递归 ----
+    expect("1/2", "\\frac{1}{2}");
+    expect("1/2x", "\\frac{1}{2}x");                   // 内核 (1/2)·x
+    expect("2x/3y", "\\frac{2x}{3}y");                 // 内核 ((2x)/3)·y
+    expect("1/2/3", "\\frac{\\frac{1}{2}}{3}");        // 左结合嵌套
+    expect("1+2/3", "1+\\frac{2}{3}");
+    expect("x^2/3", "\\frac{x^{2}}{3}");
+    expect("sqrt(2)/3", "\\frac{\\sqrt{2}}{3}");
+    expect("2sqrt(2)/3", "\\frac{2\\sqrt{2}}{3}");
+    expect("sin(x)/2", "\\frac{\\sin(x)}{2}");
+    expect("1/(2+3)", "\\frac{1}{(2+3)}");
+    expect("(a+b)/(c+d)", "\\frac{(a+b)}{(c+d)}");
+    expect("1/2^2", "\\frac{1}{2^{2}}");
+    expect("y(x) = \xCF\x80/2", "y(x) = \\frac{\\pi}{2}");
+    expect("1/", "1/");                                // 悬空分母不转
+    expect("/2", "/2");                                // 悬空分子不转
+    expect("a\xC3\xB7" "b/c", "a\\div b/c");           // ÷ 前邻不转（保内核值）
+    expect("sqrt(sqrt(2))", "\\sqrt{\\sqrt{2}}");      // 嵌套模板（递归修复）
+    expect("sqrt(1/2)", "\\sqrt{\\frac{1}{2}}");       // 根内分式
+    // ---- 六十二包①②：探针分上下文（根号内 0.6em/根次 1.1em）----
     const std::string M = "{\\color{#010203}\\rule{0.05em}{0.8em}}";
+    const std::string MR = "{\\color{#010203}\\rule{0.05em}{0.6em}}";
+    const std::string MI = "{\\color{#010203}\\rule{0.05em}{1.1em}}";
     const std::string G =
         "\\color{#E6E6EB}\\rule{0.5em}{0.9em}";        // 空参灰块
-    const std::string GS = "\\color{#E6E6EB}\\rule{0.35em}{0.5em}";
+    const std::string GS = "\\color{#E6E6EB}\\rule{0.42em}{0.6em}";
     expectCaret("", "", M);                            // 空串首
     expectCaret("x", "", "x" + M);                     // 单字符尾
     expectCaret("y=2x+1", "", "y=2x+1" + M);           // 串尾
     expectCaret("y=2x+", "1", "y=2x+" + M + "1");      // 二目后=真实落点
     expectCaret("sqrt(2)", "", "\\sqrt{2}" + M);       // 落点在根号后=组外
-    expectCaret("sqrt(2", ")", "\\sqrt{2" + M + "}");  // 根号内尾（')' 之前）
-    expectCaret("sqrt(", "2)", "\\sqrt{" + M + "2}");  // 根号内首
+    expectCaret("sqrt(2", ")", "\\sqrt{2" + MR + "}"); // 根号内尾（')' 之前）
+    expectCaret("sqrt(", "2)", "\\sqrt{" + MR + "2}"); // 根号内首
     expectCaret("sqrt()", "", "\\sqrt{" + G + "}" + M);      // 空根号后=组外
-    expectCaret("sqrt(", ")", "\\sqrt{" + M + G + "}");      // 空根号内探针在灰块前
+    expectCaret("sqrt(", ")", "\\sqrt{" + MR + G + "}");     // 空根号内探针在灰块前
     expectCaret("x^", "", "x^{" + M + GS + "}");       // 悬空指数探针在灰块前
     expectCaret("x^2", "", "x^{2" + M + "}");          // 指数尾（箭头不出组）
     expectCaret("x^", "2", "x^{" + M + "2}");          // 指数首
     expectCaret("x_", "2", "x_{" + M + "2}");          // 下标首
     expectCaret("x^(n", "+1)", "x^{n" + M + "+1}");    // ^( 组内
-    expectCaret("NthRoot(3", ",x)", "\\sqrt[3" + M + "]{x}"); // 根次槽尾（跨逗号）
-    expectCaret("NthRoot(3,", "x)", "\\sqrt[3]{" + M + "x}"); // 被开方数首
+    expectCaret("NthRoot(3", ",x)", "\\sqrt[3" + MI + "]{x}"); // 根次槽探针 1.1em
+    expectCaret("NthRoot(3,", "x)", "\\sqrt[3]{" + MR + "x}"); // 被开方数首 0.6em
     expectCaret("abs(", "x)", "\\left|" + M + "x\\right|");   // abs 内首
     expectCaret("y=\xCE\xB1", "", "y=\\alpha" + M);    // 希腊字母尾（UTF-8 字节落点）
+    // ---- 六十二包⑤：分式内探针 ----
+    expectCaret("1+", "2/3", "1+\\frac{" + M + "2}{3}");     // 分子首
+    expectCaret("1/2", "", "\\frac{1}{2" + M + "}");         // 串尾=分母尾
+    expectCaret("1/", "2", "\\frac{1}{" + M + "2}");         // 分母首
+    expectCaret("1", "/2", "\\frac{1" + M + "}{2}");         // 落点在 / 处=分子尾
+    expectCaret("sqrt(1", "/2)", "\\sqrt{\\frac{1" + MR + "}{2}}"); // 根内分式
     return g_fail;
 }

@@ -1589,7 +1589,7 @@ export function mathPickCaretStop(ctx: CanvasRenderingContext2D, raw: string,
 // 点触反查：停靠序列仍用 mathCaretStops（框内/框外语义不变），x 由前缀
 // 宽给出，并列沿用旧版 y 仲裁阈值。
 
-const RATEX_FIELD_FS: number = 15;   // 编辑行标称字号（同旧 painter charS）
+const RATEX_FIELD_FS: number = 17;   // 编辑行标称字号（六十二包④ 15→17）
 
 // 括号配对余额（非 0 = 存在不配对）
 function parenBalance(raw: string): number {
@@ -1815,13 +1815,29 @@ export struct MathField {
 
   // 完整原文是否具备 RaTeX 排版条件（门控见文件头五十八包说明）
   private canFieldRatex(raw: string): boolean {
-    if (raw.length === 0 || parenBalance(raw) !== 0) {
+    // 六十二包⑤：括号多开（sqrt( 中途态）自动补右括号显示——GGB 模板中途
+    // 态即结构化渲染同语义；多闭（语法错误态）仍回旧 painter
+    if (raw.length === 0 || parenBalance(raw) < 0) {
       return false;
     }
     // 六十包②③：()/,)/(,/log( 全部放开——空参模板在转换器层出灰块占
     // 位（GGB 同款浅灰块，宿主 dump \sqrt{}、\sqrt[3]{}、\sqrt[]{x} 均
-    // 排版成功），\log(x)/\log_{2}(x) 已验证；唯一余下拒绝条件=括号不配对
+    // 排版成功），\log(x)/\log_{2}(x) 已验证
     return true;
+  }
+
+  // 括号多开时补齐右括号（仅显示层；原值/光标不动）——sqrt(2 → sqrt(2)
+  // 的排版中途态与 GGB 一样直接呈现完整模板结构
+  private closedRaw(): string {
+    const bal = parenBalance(this.raw);
+    if (bal <= 0) {
+      return this.raw;
+    }
+    let t = this.raw;
+    for (let j = 0; j < bal; j++) {
+      t += ')';
+    }
+    return t;
   }
 
   // 完整原文 → DisplayList；按 raw+深浅色记账（blink 重绘不再排版）。
@@ -1837,7 +1853,7 @@ export struct MathField {
     this.rtxLay = null;
     this.rtxOk = false;
     if (this.canFieldRatex(this.raw)) {
-      const latex = ratexConvertLinear(this.raw);
+      const latex = ratexConvertLinear(this.closedRaw());
       if (latex !== null) {
         let lay: RatexLayoutResult | null = null;
         if (isBinOpCh(this.raw.charAt(this.raw.length - 1))) {
@@ -1873,8 +1889,14 @@ export struct MathField {
       return memo;
     }
     let res: number[] | null = null;
-    const latex = ratexConvertCaret(this.raw.substring(0, cp),
-      this.raw.substring(cp));
+    // 括号多开时探针串尾同样补齐（sqrt(2| 中途态模板经尾括号完成，探针
+    // 仍落在根号内容内）；与显示层 closedRaw 同语义
+    let rest = this.raw.substring(cp);
+    const bal = parenBalance(this.raw);
+    for (let j = 0; j < bal; j++) {
+      rest += ')';
+    }
+    const latex = ratexConvertCaret(this.raw.substring(0, cp), rest);
     if (latex !== null) {
       const lay = ratexLayoutLatex(latex, Theme.text(this.dark));
       if (lay !== null) {

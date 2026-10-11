@@ -3,9 +3,13 @@
 // 链路：ArkTS 传内核线性串（f(x) = sqrt(x)/2 等）→ 本层转 LaTeX →
 // libratex_ffi.so 排版 → DisplayList JSON 原样返回（ArkTS 解析绘制）。
 // 五十八包起恒交 RaTeX 排版（ok|），排版失败由 ArkTS 回退旧 painter 兜底。
+// 六十一包：光标魔色探针（ratexConvert 可选 rest 参，prefix/rest 边界插探
+// 针）；六十二包：模板内容 span 递归（嵌套模板/希腊全转换）+ / → \frac
+// （内核左结合语义保真）+ 探针分上下文三种（根号内 0.6em/根次 1.1em）。
 #include "napi/native_api.h"
 #include <string>
 #include <cstring>
+#include <vector>
 #include "ratex/ratex.h"
 
 namespace {
@@ -107,10 +111,10 @@ bool CmdNeedsSpace(char c)
 }
 
 // 前向配对括号，返回 ')' 下标；不配对返回 npos
-size_t MatchParen(const std::string &s, size_t open)
+size_t MatchParen(const std::string &s, size_t open, size_t to)
 {
     int depth = 0;
-    for (size_t i = open; i < s.size(); ++i) {
+    for (size_t i = open; i < to && i < s.size(); ++i) {
         if (s[i] == '(') ++depth;
         else if (s[i] == ')') {
             --depth;
@@ -127,10 +131,11 @@ size_t MatchParen(const std::string &s, size_t open)
 // Line 块，绘制端零改动。GGB 对「光标所在空 field」只画光标不画框，我
 // 们光标自绘同理，故一律灰块即可）
 const char kPlaceholder[] = "\\color{#E6E6EB}\\rule{0.5em}{0.9em}";
-// 根次槽位（\sqrt[...]）的窄版灰块
-const char kPlaceholderIdx[] = "\\color{#E6E6EB}\\rule{0.3em}{0.4em}";
-// 脚本槽位（^/_）的窄版灰块
-const char kPlaceholderScript[] = "\\color{#E6E6EB}\\rule{0.35em}{0.5em}";
+// 根次槽位（\sqrt[...]）的灰块——六十二包②加大（原 0.3/0.4em 经引擎
+// ×0.5 后仅 2.5×3.3px 看不见）
+const char kPlaceholderIdx[] = "\\color{#E6E6EB}\\rule{0.5em}{0.65em}";
+// 脚本槽位（^/_）的灰块——六十二包③加大（下标位原尺寸过小难辨）
+const char kPlaceholderScript[] = "\\color{#E6E6EB}\\rule{0.42em}{0.6em}";
 // 光标探针（六十一包②，GGB CursorAtom 同源模型）：转换器在光标落点插入
 // 的魔色 rule，排版后 DisplayList 里该色 Line 项的 x/y/thickness 即光标
 // x 与上下文盒——rule 的 em 尺寸随当前 style 自动缩放（宿主 dump：上标内
@@ -138,41 +143,91 @@ const char kPlaceholderScript[] = "\\color{#E6E6EB}\\rule{0.35em}{0.5em}";
 // 线），ArkTS 据此自绘光标，二态 caretScript 不再参与 RaTeX 视觉路径。
 // 外层 {} 成组：悬空 ^/^（ 切片后 ^ 后跟本探针时整组成为上标，语义正确
 const char kCaretMarker[] = "{\\color{#010203}\\rule{0.05em}{0.8em}}";
+// 根号内专用探针（六十二包①）：0.6em——根号内容为同尺寸 cramped style，
+// 统一 0.8em 时内外变化不明显；根内收细后切换可见（宿主 dump 定标）
+const char kCaretMarkerRoot[] = "{\\color{#010203}\\rule{0.05em}{0.6em}}";
+// 根次槽位专用探针（六十二包②）：引擎 rootStyle ×0.5，0.8em→0.4em 基本
+// 不可见；1.1em→0.55em 恢复可见
+const char kCaretMarkerIdx[] = "{\\color{#010203}\\rule{0.05em}{1.1em}}";
 
-// 从 from 起的脚本内容（无括号组时取连续字母数字字符）
-size_t ScriptRunEnd(const std::string &s, size_t from)
+// 字节级判定（/ 分式因子扫描用）：° U+00B0=0xC2 0xB0、× U+00D7=0xC3 0x97、
+// ÷ U+00F7=0xC3 0xB7
+bool DegreeAt(const std::string &s, size_t i)
+{
+    return i + 1 < s.size() && (unsigned char)s[i] == 0xC2
+        && (unsigned char)s[i + 1] == 0xB0;
+}
+bool TimesAt(const std::string &s, size_t i)
+{
+    return i + 1 < s.size() && (unsigned char)s[i] == 0xC3
+        && (unsigned char)s[i + 1] == 0x97;
+}
+bool DivAt(const std::string &s, size_t i)
+{
+    return i + 1 < s.size() && (unsigned char)s[i] == 0xC3
+        && (unsigned char)s[i + 1] == 0xB7;
+}
+
+// 分母前扫的「名+括号组」整体吸收判定：名须为已知函数/模板（x(2) 是
+// 并列乘法只取 x，sin(x) 是调用取整体）
+bool KnownFn(const std::string &s, size_t from, size_t to)
+{
+    static const char *kNames[] = {
+        "arcsin", "arccos", "arctan", "sinh", "cosh", "tanh",
+        "asin", "acos", "atan", "sin", "cos", "tan", "cot",
+        "sec", "csc", "ln", "log", "exp", "min", "max",
+        "floor", "ceil", "round", "sgn", "sqrt", "NthRoot", "abs"
+    };
+    if (to <= from) return false;
+    const size_t len = to - from;
+    for (const char *nm : kNames) {
+        if (strlen(nm) == len && s.compare(from, len, nm) == 0) return true;
+    }
+    return false;
+}
+
+// 从 from 起的脚本内容（限 to；无括号组时取连续字母数字字符）
+size_t ScriptRunEnd(const std::string &s, size_t from, size_t to)
 {
     size_t j = from;
-    while (j < s.size()
+    while (j < to && j < s.size()
            && (isalnum((unsigned char)s[j]) || s[j] == '_' || GreekAtRaw(s, j))) {
         j += GreekAtRaw(s, j) ? 2 : 1;
     }
     return j;
 }
 
-// 两参入口（显示链路+宿主回归）：不插探针，输出与六十包逐字节一致
+// 两参入口（显示链路+宿主回归）：不插探针，全串转换
 std::string LinearToLatexCaret(const std::string &s, bool &identity,
-                               size_t markerAt, bool &caretDone);
+                               size_t from, size_t to, size_t markerAt,
+                               bool &caretDone, const char *marker, int depth);
 std::string LinearToLatex(const std::string &s, bool &identity)
 {
     bool caretDone = false;
-    return LinearToLatexCaret(s, identity, std::string::npos, caretDone);
+    return LinearToLatexCaret(s, identity, 0, s.size(), std::string::npos,
+                              caretDone, kCaretMarker, 0);
 }
 
-// 六十一包②：markerAt=光标落点（prefix 的字节长）时，主循环走到该下标或
-// 模板槽位切到该下标即插入 kCaretMarker；caretDone 防双发。markerAt 落在
-// 串尾时主循环顶部不触发，函数尾统一补插。显示链路（markerAt=npos）全部
-// 检查短路，零开销
+// 六十一包②/六十二包⑤：[from,to) 跨度转换（模板内容递归，嵌套模板/分式
+// 全转换）；markerAt=光标落点（prefix 字节长）时——主循环走到该下标、或
+// 子跨度尾==markerAt（span 端点即落点：模板槽尾/分式分子尾等）、或外层串
+// 尾——插入 marker（根号内传 Root 版、根次槽传 Idx 版，探针随上下文变
+// 尺寸）；caretDone 防双发。markerAt=npos（显示链路）全检查短路
 std::string LinearToLatexCaret(const std::string &s, bool &identity,
-                               size_t markerAt, bool &caretDone)
+                               size_t from, size_t to, size_t markerAt,
+                               bool &caretDone, const char *marker, int depth)
 {
     identity = true;
     std::string out;
     out.reserve(s.size() + 16);
-    size_t i = 0;
-    while (i < s.size()) {
+    // 分式分子回扫需要「输出截断点」：loop-top 逐位记 out 长（ns 恒为
+    // loop-top 位——因子只可能起于跨度首/运算符后）
+    std::vector<size_t> outLen(to + 1, std::string::npos);
+    size_t i = from;
+    while (i < to) {
+        outLen[i] = out.size();
         if (i == markerAt && !caretDone) {
-            out += kCaretMarker;
+            out += marker;
             caretDone = true;
         }
         // sqrt( → \sqrt{...}（不配对则原样）
@@ -182,28 +237,25 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
         // 渲染成字面 "2sqrt(2)"（真机 58 包反馈）
         if (s.compare(i, 5, "sqrt(") == 0
             && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
-            const size_t m = MatchParen(s, i + 4);
+            const size_t m = MatchParen(s, i + 4, to);
             if (m != std::string::npos) {
                 out += "\\sqrt{";
                 const size_t cs = i + 5;
-                // 空参（键盘 √ 模板 sqrt() 未填）：灰块占位（六十包②——
-                // 原先空参走旧 painter 虚线框致整行退旧渲染）；光标落点在
-                // 空槽内时探针插灰块前（键入字符将出现的位置）
+                // 空参（键盘 √ 模板 sqrt() 未填）：灰块占位（六十包②）；
+                // 落点在空槽内探针插灰块前（键入字符将出现的位置）
                 if (m == cs) {
                     if (markerAt == cs && !caretDone) {
-                        out += kCaretMarker;
+                        out += kCaretMarkerRoot;
                         caretDone = true;
                     }
                     out += kPlaceholder;
-                } else if (markerAt >= cs && markerAt <= m && !caretDone) {
-                    // 光标落点在内容内：按落点切两段、中间插探针（输出仍是
-                    // 一条平面 LaTeX 串，RaTeX 行内间距不受切分影响）
-                    out += s.substr(cs, markerAt - cs);
-                    out += kCaretMarker;
-                    caretDone = true;
-                    out += s.substr(markerAt, m - markerAt);
                 } else {
-                    out += s.substr(cs, m - cs);
+                    // 内容递归转换（六十二包⑤：嵌套模板/分式/希腊字母全
+                    // 转换——61 包为切片直出，嵌套 sqrt 不转）；根号内传
+                    // Root 探针（①：0.6em，根号内外变化明显）
+                    out += LinearToLatexCaret(s, identity, cs, m, markerAt,
+                                              caretDone, kCaretMarkerRoot,
+                                              depth + 1);
                 }
                 out += "}";
                 identity = false;
@@ -214,51 +266,45 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
         // NthRoot(根次, 被开方数) → \sqrt[根次]{被开方数}（须有顶层逗号）
         if (s.compare(i, 8, "NthRoot(") == 0
             && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
-            const size_t m = MatchParen(s, i + 7);
+            const size_t m = MatchParen(s, i + 7, to);
             if (m != std::string::npos) {
                 size_t comma = std::string::npos;
-                int depth = 0;
+                int dep = 0;
                 for (size_t q = i + 8; q < m; ++q) {
-                    if (s[q] == '(') ++depth;
-                    else if (s[q] == ')') --depth;
-                    else if (s[q] == ',' && depth == 0) { comma = q; break; }
+                    if (s[q] == '(') ++dep;
+                    else if (s[q] == ')') --dep;
+                    else if (s[q] == ',' && dep == 0) { comma = q; break; }
                 }
                 if (comma != std::string::npos) {
                     out += "\\sqrt[";
                     const size_t cs0 = i + 8;
                     if (comma == cs0) {
                         // 根次未填（NthRoot(,x)）；落点在空槽内探针插灰块前
+                        //（六十二包②：根次专用 1.1em 探针——引擎 rootStyle
+                        // ×0.5 后 0.55em 仍可见）
                         if (markerAt == cs0 && !caretDone) {
-                            out += kCaretMarker;
+                            out += kCaretMarkerIdx;
                             caretDone = true;
                         }
                         out += kPlaceholderIdx;
-                    } else if (markerAt >= cs0 && markerAt <= comma
-                               && !caretDone) {
-                        // 落点=逗号处视为根次尾（键入字符并入根次）
-                        out += s.substr(cs0, markerAt - cs0);
-                        out += kCaretMarker;
-                        caretDone = true;
-                        out += s.substr(markerAt, comma - markerAt);
                     } else {
-                        out += s.substr(cs0, comma - cs0);
+                        out += LinearToLatexCaret(s, identity, cs0, comma,
+                                                  markerAt, caretDone,
+                                                  kCaretMarkerIdx, depth + 1);
                     }
                     out += "]{";
                     const size_t cs1 = comma + 1;
                     if (m == cs1) {
-                        // 被开方数未填（NthRoot(3,)）；空槽同上
+                        // 被开方数未填（NthRoot(3,)）；根号内 0.6em 探针
                         if (markerAt == cs1 && !caretDone) {
-                            out += kCaretMarker;
+                            out += kCaretMarkerRoot;
                             caretDone = true;
                         }
                         out += kPlaceholder;
-                    } else if (markerAt >= cs1 && markerAt <= m && !caretDone) {
-                        out += s.substr(cs1, markerAt - cs1);
-                        out += kCaretMarker;
-                        caretDone = true;
-                        out += s.substr(markerAt, m - markerAt);
                     } else {
-                        out += s.substr(cs1, m - cs1);
+                        out += LinearToLatexCaret(s, identity, cs1, m,
+                                                  markerAt, caretDone,
+                                                  kCaretMarkerRoot, depth + 1);
                     }
                     out += "}";
                     identity = false;
@@ -272,17 +318,18 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
         // 的 |·|；排版引擎不支持 \left| 时整串排版失败走回退，无回归）
         if (s.compare(i, 4, "abs(") == 0
             && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
-            const size_t m = MatchParen(s, i + 3);
+            const size_t m = MatchParen(s, i + 3, to);
             if (m != std::string::npos) {
                 out += "\\left|";
                 const size_t cs = i + 4;
-                if (markerAt >= cs && markerAt <= m && !caretDone) {
-                    out += s.substr(cs, markerAt - cs);
-                    out += kCaretMarker;
-                    caretDone = true;
-                    out += s.substr(markerAt, m - markerAt);
+                if (m == cs) {
+                    if (markerAt == cs && !caretDone) {
+                        out += marker;
+                        caretDone = true;
+                    }
                 } else {
-                    out += s.substr(cs, m - cs);
+                    out += LinearToLatexCaret(s, identity, cs, m, markerAt,
+                                              caretDone, marker, depth + 1);
                 }
                 out += "\\right|";
                 identity = false;
@@ -320,19 +367,21 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
         // ^ / _ 脚本：^2 → ^{2}；^(n+1) → ^{n+1}
         if (s[i] == '^' || s[i] == '_') {
             const char op = s[i];
-            if (i + 1 < s.size() && s[i + 1] == '(') {
-                const size_t m = MatchParen(s, i + 1);
+            if (i + 1 < to && s[i + 1] == '(') {
+                const size_t m = MatchParen(s, i + 1, to);
                 if (m != std::string::npos) {
                     out += op;
                     out += "{";
                     const size_t cs = i + 2;
-                    if (markerAt >= cs && markerAt <= m && !caretDone) {
-                        out += s.substr(cs, markerAt - cs);
-                        out += kCaretMarker;
-                        caretDone = true;
-                        out += s.substr(markerAt, m - markerAt);
+                    if (m == cs) {
+                        if (markerAt == cs && !caretDone) {
+                            out += marker;
+                            caretDone = true;
+                        }
                     } else {
-                        out += s.substr(cs, m - cs);
+                        out += LinearToLatexCaret(s, identity, cs, m, markerAt,
+                                                  caretDone, marker,
+                                                  depth + 1);
                     }
                     out += "}";
                     identity = false;
@@ -340,19 +389,12 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
                     continue;
                 }
             }
-            const size_t j = ScriptRunEnd(s, i + 1);
+            const size_t j = ScriptRunEnd(s, i + 1, to);
             if (j > i + 1) {
                 out += op;
                 out += "{";
-                const size_t cs = i + 1;
-                if (markerAt >= cs && markerAt <= j && !caretDone) {
-                    out += s.substr(cs, markerAt - cs);
-                    out += kCaretMarker;
-                    caretDone = true;
-                    out += s.substr(markerAt, j - markerAt);
-                } else {
-                    out += s.substr(cs, j - cs);
-                }
+                out += LinearToLatexCaret(s, identity, i + 1, j, markerAt,
+                                          caretDone, marker, depth + 1);
                 out += "}";
                 identity = false;
                 i = j;
@@ -365,12 +407,116 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
             out += op;
             out += "{";
             if (markerAt == i + 1 && !caretDone) {
-                out += kCaretMarker;
+                out += marker;
                 caretDone = true;
             }
             out += kPlaceholderScript;
             out += "}";
             identity = false;
+            ++i;
+            continue;
+        }
+        // 六十二包⑤：/ → \frac{分子}{分母}——内核左结合（2x/3y=((2x)/3)y、
+        // 1/2/3=((1/2)/3)），跨距按同语义取：分子=向左吸收连续因子（字母
+        // 数字/希腊/°/括号组+名/^_脚本//链/×），分母=恰一个因子（已知名+
+        // 括号组、字母数字、希腊、°、脚本链）。分子前紧邻 ÷ 不转（a÷b/c
+        // 内核=((a÷b)/c)，frac 化视觉成 a÷(b/c) 改值）。已输出区段截断重
+        // 转（outLen 记账），跨度内嵌套模板/分式递归全转换
+        if (s[i] == '/' && depth < 32) {
+            size_t ns = i;
+            while (ns > from) {
+                const unsigned char c = (unsigned char)s[ns - 1];
+                if (c == ')') {
+                    int dep2 = 0;
+                    size_t k = ns;
+                    bool found = false;
+                    while (k > from) {
+                        --k;
+                        if (s[k] == ')') ++dep2;
+                        else if (s[k] == '(') {
+                            if (--dep2 == 0) { found = true; break; }
+                        }
+                    }
+                    if (!found) break;
+                    ns = k;
+                    while (ns > from && isalpha((unsigned char)s[ns - 1])) --ns;
+                    continue;
+                }
+                if (isalnum(c)) {
+                    while (ns > from && isalnum((unsigned char)s[ns - 1])) --ns;
+                    continue;
+                }
+                if (ns >= from + 2 && (GreekAtRaw(s, ns - 2) || DegreeAt(s, ns - 2)
+                                       || TimesAt(s, ns - 2))) {
+                    ns -= 2;
+                    continue;
+                }
+                if (c == '^' || c == '_' || c == '/') { --ns; continue; }
+                break;
+            }
+            const bool divBefore = ns >= from + 2 && DivAt(s, ns - 2);
+            size_t de = i + 1;
+            bool hasDen = false;
+            if (de < to) {
+                const unsigned char c = (unsigned char)s[de];
+                if (c == '(') {
+                    const size_t m2 = MatchParen(s, de, to);
+                    if (m2 != std::string::npos) { de = m2 + 1; hasDen = true; }
+                } else if (isalpha(c)) {
+                    while (de < to && isalpha((unsigned char)s[de])) ++de;
+                    while (de < to && isdigit((unsigned char)s[de])) ++de;
+                    if (de < to && s[de] == '(' && KnownFn(s, i + 1, de)) {
+                        const size_t m2 = MatchParen(s, de, to);
+                        if (m2 != std::string::npos) de = m2 + 1;
+                    }
+                    hasDen = true;
+                } else if (isdigit(c)) {
+                    while (de < to && isdigit((unsigned char)s[de])) ++de;
+                    hasDen = true;
+                } else if (GreekAtRaw(s, de) || DegreeAt(s, de)) {
+                    de += 2;
+                    hasDen = true;
+                }
+                if (hasDen) {
+                    // 脚本链 ^/_（后随一个原子：组/字母数字/希腊）
+                    while (de < to && (s[de] == '^' || s[de] == '_')) {
+                        ++de;
+                        if (de < to && s[de] == '(') {
+                            const size_t m3 = MatchParen(s, de, to);
+                            if (m3 == std::string::npos) break;
+                            de = m3 + 1;
+                        } else if (de < to && isalnum((unsigned char)s[de])) {
+                            while (de < to && isalnum((unsigned char)s[de])) ++de;
+                        } else if (de + 1 < to && GreekAtRaw(s, de)) {
+                            de += 2;
+                        } else {
+                            --de;      // 悬空脚本符留给主循环，分母不含它
+                            break;
+                        }
+                    }
+                    if (de + 1 < to && DegreeAt(s, de)) de += 2;
+                }
+            }
+            if (hasDen && ns < i && !divBefore
+                && outLen[ns] != std::string::npos) {
+                if (ns < i) {
+                    out.resize(outLen[ns]);
+                    if (caretDone && markerAt >= ns) {
+                        caretDone = false;   // 截断区内已插探针一并撤，重插
+                    }
+                }
+                out += "\\frac{";
+                out += LinearToLatexCaret(s, identity, ns, i, markerAt,
+                                          caretDone, marker, depth + 1);
+                out += "}{";
+                out += LinearToLatexCaret(s, identity, i + 1, de, markerAt,
+                                          caretDone, marker, depth + 1);
+                out += "}";
+                identity = false;
+                i = de;
+                continue;
+            }
+            out += '/';
             ++i;
             continue;
         }
@@ -452,9 +598,11 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
         out += s[i];
         ++i;
     }
-    // 光标落点在串尾：主循环顶部不再触发（i==size 时循环已退出），统一补插
-    if (markerAt != std::string::npos && !caretDone && markerAt >= s.size()) {
-        out += kCaretMarker;
+    // 落点在跨度尾：主循环顶部不再触发（i==to 时循环已退出）。子跨度尾
+    // ==markerAt（模板槽尾/分式分子尾）与外层串尾在此统一补插
+    if (markerAt != std::string::npos && !caretDone && markerAt >= to
+        && (to == markerAt || to == s.size())) {
+        out += marker;
         caretDone = true;
     }
     return out;
@@ -568,7 +716,9 @@ static napi_value RatexConvert(napi_env env, napi_callback_info info)
     }
     bool identity = true;
     bool caretDone = false;
-    const std::string latex = LinearToLatexCaret(s, identity, markerAt, caretDone);
+    const std::string latex = LinearToLatexCaret(s, identity, 0, s.size(),
+                                                 markerAt, caretDone,
+                                                 kCaretMarker, 0);
     (void)identity;
     (void)caretDone;
     const std::string out = "ok|" + latex;
