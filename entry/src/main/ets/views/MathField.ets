@@ -92,8 +92,9 @@
 // 坐标没跟着动 → shiftPiecesX 递归平移（kind 2 kids / kind 4 子表一并，
 // 点触反查等一切读片坐标处随之一致；NthRoot 根次片同获修正）。
 import { Theme } from '../model/Theme';
-import { RatexView, ratexConvertLinear, ratexLayoutLatex, RatexLayoutResult,
-  ratexDrawItem, RATEX_FONT_SCALE } from './RatexView';
+import { RatexView, ratexConvertLinear, ratexConvertCaret, ratexLayoutLatex,
+  RatexLayoutResult, ratexDrawItem, ratexItemColor,
+  RATEX_FONT_SCALE } from './RatexView';
 
 // 屏幕密度（px/vp，如 3x 设备 = 3.0）：Canvas 坐标与 measureText 为 vp
 // 口径、唯独 font-size 为物理 px（第十五包③四轮证据链终案）——字号
@@ -1764,6 +1765,9 @@ export struct MathField {
   private rtxOk: boolean = false;
   private rtxFs: number = RATEX_FIELD_FS * RATEX_FONT_SCALE;
   private pwCache: Map<number, number> = new Map();  // cp→前缀宽 px（正键）；
+  // 六十一包②：光标探针盒记账 cp→[xEm,topEm,botEm]（null=探针未命中，
+  // 回退 prefixX 旧路径），raw 变更随 pwCache 一同清
+  private probeCache: Map<number, number[] | null> = new Map();
                                                      // len 排版成败（负键 -1-len）
 
   aboutToAppear(): void {
@@ -1829,6 +1833,7 @@ export struct MathField {
     }
     this.rtxKey = key;
     this.pwCache.clear();
+    this.probeCache.clear();
     this.rtxLay = null;
     this.rtxOk = false;
     if (this.canFieldRatex(this.raw)) {
@@ -1851,6 +1856,51 @@ export struct MathField {
       }
     }
     return this.rtxOk;
+  }
+
+  // 光标探针（六十一包②，GGB CursorAtom 同源模型）：prefix+剩余串整体
+  // 转换，转换器在两段边界（=光标落点）插魔色 rule 探针，排版后该色 Line
+  // 项的 x=光标 x、y(中心)/thickness=上下文盒——脚本内引擎自动 ×0.7 缩放
+  // 并抬升/下沉、根次槽 ×0.5、根号内同尺寸贴内容基线（宿主 dump 实证），
+  // 二目后取真实落点（+ 右缘+右 medmuskip）。命中返回 [xEm,topEm,botEm]；
+  // 探针未命中/转换排版失败返回 null（调用方回退 prefixX 旧路径）
+  private probeCaret(cp: number): number[] | null {
+    if (cp < 0 || cp > this.raw.length) {
+      return null;
+    }
+    const memo = this.probeCache.get(cp);
+    if (memo !== undefined) {
+      return memo;
+    }
+    let res: number[] | null = null;
+    const latex = ratexConvertCaret(this.raw.substring(0, cp),
+      this.raw.substring(cp));
+    if (latex !== null) {
+      const lay = ratexLayoutLatex(latex, Theme.text(this.dark));
+      if (lay !== null) {
+        for (let i = 0; i < lay.items.length; i++) {
+          const it = lay.items[i];
+          if (it.type === 'Line' && ratexItemColor(it, '') === '#010203') {
+            const th = it.thickness !== undefined ? it.thickness : 0.8;
+            const yc = it.y !== undefined ? it.y : 0;
+            const x = it.x !== undefined ? it.x : 0;
+            res = [x, yc - th / 2, yc + th / 2];
+            break;
+          }
+        }
+      }
+    }
+    this.probeCache.set(cp, res);
+    return res;
+  }
+
+  // 光标 x（em，探测优先）：探针盒未命中回退前缀排版宽
+  private caretXEm(cp: number): number {
+    const pb = this.probeCaret(cp);
+    if (pb !== null) {
+      return pb[0];
+    }
+    return this.prefixX(cp) / this.rtxFs;
   }
 
   // 光标前缀宽（px，内容坐标系）：自 cp 向下找首个可排版前缀（中途态剥
@@ -1994,12 +2044,25 @@ export struct MathField {
       ratexDrawItem(this.ctx, lay.items[i], fs, padY, color, padL);
     }
     if (this.focused && this.blink) {
-      const cx = padL + this.prefixX(this.caret);
-      let y0 = baselineY - 0.73 * fs;
-      let y1 = baselineY + 0.13 * fs;
-      if (this.caretScript) {
-        y0 = baselineY - 0.53 * fs;
-        y1 = baselineY - 0.07 * fs;
+      // 六十一包②：光标盒取自探针（GGB CursorAtom 同源——当前 TeX style
+      // 的竖线：脚本内引擎缩放并抬升/下沉、根号内同尺寸贴内容基线，x=真
+      // 实落点）；探针未命中回退旧二态估算（caretScript 小光标）
+      const pb = this.probeCaret(this.caret);
+      let cx: number;
+      let y0: number;
+      let y1: number;
+      if (pb !== null) {
+        cx = padL + pb[0] * fs;
+        y0 = padY + pb[1] * fs;
+        y1 = padY + pb[2] * fs;
+      } else {
+        cx = padL + this.prefixX(this.caret);
+        y0 = baselineY - 0.73 * fs;
+        y1 = baselineY + 0.13 * fs;
+        if (this.caretScript) {
+          y0 = baselineY - 0.53 * fs;
+          y1 = baselineY - 0.07 * fs;
+        }
       }
       this.ctx.strokeStyle = Theme.accent(this.dark);
       this.ctx.lineWidth = 1.5;
@@ -2022,7 +2085,9 @@ export struct MathField {
     let best = -1;
     const ds: number[] = [];
     for (let i = 0; i < stops.length; i++) {
-      const sx = padL + this.prefixX(stops[i].pos);
+      // 六十一包②：停靠 x 同光标绘制走探针（x^2 尾停靠=指数内真实落点，
+      // 与绘制一致）；未命中回退前缀排版宽
+      const sx = padL + this.caretXEm(stops[i].pos) * this.rtxFs;
       ds.push(Math.abs(sx - layoutX));
       if (best < 0 || ds[i] < ds[best]) {
         best = i;

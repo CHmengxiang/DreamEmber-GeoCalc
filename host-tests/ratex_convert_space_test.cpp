@@ -23,6 +23,20 @@ static void expect(const std::string &in, const std::string &want)
         in.c_str(), got.c_str(), want.c_str());
 }
 
+// 六十一包②：光标探针——prefix+rest 拼接转换，markerAt=prefix 字节长
+static void expectCaret(const std::string &prefix, const std::string &rest,
+    const std::string &want)
+{
+    bool identity = true;
+    bool caretDone = false;
+    const std::string got = LinearToLatexCaret(prefix + rest, identity,
+        prefix.size(), caretDone);
+    const bool ok = got == want && caretDone;
+    if (!ok) g_fail++;
+    printf("%s in=%s|%s got=%s want=%s\n", ok ? "PASS" : "FAIL",
+        prefix.c_str(), rest.c_str(), got.c_str(), want.c_str());
+}
+
 int main()
 {
     expect("y(x) = \xCF\x80x", "y(x) = \\pi x");          // πx → \pi x（修复目标）
@@ -61,5 +75,28 @@ int main()
     expect("x^2", "x^{2}");                            // 有参不变（回归）
     expect("()", "()");                                // 空括号对直通
     expect("sin()", "\\sin()");              // 函数空参括号紧贴
+    // ---- 六十一包②：光标探针（M=魔色 rule，GGB CursorAtom 同源模型）----
+    const std::string M = "{\\color{#010203}\\rule{0.05em}{0.8em}}";
+    const std::string G =
+        "\\color{#E6E6EB}\\rule{0.5em}{0.9em}";        // 空参灰块
+    const std::string GS = "\\color{#E6E6EB}\\rule{0.35em}{0.5em}";
+    expectCaret("", "", M);                            // 空串首
+    expectCaret("x", "", "x" + M);                     // 单字符尾
+    expectCaret("y=2x+1", "", "y=2x+1" + M);           // 串尾
+    expectCaret("y=2x+", "1", "y=2x+" + M + "1");      // 二目后=真实落点
+    expectCaret("sqrt(2)", "", "\\sqrt{2}" + M);       // 落点在根号后=组外
+    expectCaret("sqrt(2", ")", "\\sqrt{2" + M + "}");  // 根号内尾（')' 之前）
+    expectCaret("sqrt(", "2)", "\\sqrt{" + M + "2}");  // 根号内首
+    expectCaret("sqrt()", "", "\\sqrt{" + G + "}" + M);      // 空根号后=组外
+    expectCaret("sqrt(", ")", "\\sqrt{" + M + G + "}");      // 空根号内探针在灰块前
+    expectCaret("x^", "", "x^{" + M + GS + "}");       // 悬空指数探针在灰块前
+    expectCaret("x^2", "", "x^{2" + M + "}");          // 指数尾（箭头不出组）
+    expectCaret("x^", "2", "x^{" + M + "2}");          // 指数首
+    expectCaret("x_", "2", "x_{" + M + "2}");          // 下标首
+    expectCaret("x^(n", "+1)", "x^{n" + M + "+1}");    // ^( 组内
+    expectCaret("NthRoot(3", ",x)", "\\sqrt[3" + M + "]{x}"); // 根次槽尾（跨逗号）
+    expectCaret("NthRoot(3,", "x)", "\\sqrt[3]{" + M + "x}"); // 被开方数首
+    expectCaret("abs(", "x)", "\\left|" + M + "x\\right|");   // abs 内首
+    expectCaret("y=\xCE\xB1", "", "y=\\alpha" + M);    // 希腊字母尾（UTF-8 字节落点）
     return g_fail;
 }

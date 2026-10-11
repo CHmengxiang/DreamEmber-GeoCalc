@@ -68,5 +68,7 @@ export const kernelUndoState: () => string;       // "撤销深度,重做深度"
 // displayMode 0=inline 1=display；color 可选 '#RRGGBB'（五十四包：主题色透传，
 // 缺省黑。协议见 Ratex docs/DISPLAYLIST_JSON_PROTOCOL.md）
 export const ratexLayout: (latex: string, displayMode: number, color?: string) => string;
-// ratexConvert(linear): "ok|<latex>"（完整转换）| "raw|<原文>"（含未知构造）
-export const ratexConvert: (linear: string) => string;
+// ratexConvert(linear, rest?): "ok|<latex>"（完整转换）| "raw|<原文>"（含未知构造）
+// 六十一包②：rest=光标后剩余串时，在 linear/rest 边界（光标落点）插入
+// 魔色 rule 探针 {\color{#010203}\rule{0.05em}{0.8em}}，供光标定位
+export const ratexConvert: (linear: string, rest?: string) => string;

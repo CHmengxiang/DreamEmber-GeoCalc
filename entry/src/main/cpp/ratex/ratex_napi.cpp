@@ -131,6 +131,13 @@ const char kPlaceholder[] = "\\color{#E6E6EB}\\rule{0.5em}{0.9em}";
 const char kPlaceholderIdx[] = "\\color{#E6E6EB}\\rule{0.3em}{0.4em}";
 // 脚本槽位（^/_）的窄版灰块
 const char kPlaceholderScript[] = "\\color{#E6E6EB}\\rule{0.35em}{0.5em}";
+// 光标探针（六十一包②，GGB CursorAtom 同源模型）：转换器在光标落点插入
+// 的魔色 rule，排版后 DisplayList 里该色 Line 项的 x/y/thickness 即光标
+// x 与上下文盒——rule 的 em 尺寸随当前 style 自动缩放（宿主 dump：上标内
+// 0.8em→0.56em 且抬升、下标内下沉、根次内 ×0.5、根号内同尺寸贴内容基
+// 线），ArkTS 据此自绘光标，二态 caretScript 不再参与 RaTeX 视觉路径。
+// 外层 {} 成组：悬空 ^/^（ 切片后 ^ 后跟本探针时整组成为上标，语义正确
+const char kCaretMarker[] = "{\\color{#010203}\\rule{0.05em}{0.8em}}";
 
 // 从 from 起的脚本内容（无括号组时取连续字母数字字符）
 size_t ScriptRunEnd(const std::string &s, size_t from)
@@ -143,13 +150,31 @@ size_t ScriptRunEnd(const std::string &s, size_t from)
     return j;
 }
 
+// 两参入口（显示链路+宿主回归）：不插探针，输出与六十包逐字节一致
+std::string LinearToLatexCaret(const std::string &s, bool &identity,
+                               size_t markerAt, bool &caretDone);
 std::string LinearToLatex(const std::string &s, bool &identity)
+{
+    bool caretDone = false;
+    return LinearToLatexCaret(s, identity, std::string::npos, caretDone);
+}
+
+// 六十一包②：markerAt=光标落点（prefix 的字节长）时，主循环走到该下标或
+// 模板槽位切到该下标即插入 kCaretMarker；caretDone 防双发。markerAt 落在
+// 串尾时主循环顶部不触发，函数尾统一补插。显示链路（markerAt=npos）全部
+// 检查短路，零开销
+std::string LinearToLatexCaret(const std::string &s, bool &identity,
+                               size_t markerAt, bool &caretDone)
 {
     identity = true;
     std::string out;
     out.reserve(s.size() + 16);
     size_t i = 0;
     while (i < s.size()) {
+        if (i == markerAt && !caretDone) {
+            out += kCaretMarker;
+            caretDone = true;
+        }
         // sqrt( → \sqrt{...}（不配对则原样）
         // 守卫只排除字母（标识符中段 asqrt(）：内核量名不含字母紧贴模板名
         // 的情况；数字/右括号后是并列乘法 2sqrt(2)=2·√2，必须转换——
@@ -160,12 +185,25 @@ std::string LinearToLatex(const std::string &s, bool &identity)
             const size_t m = MatchParen(s, i + 4);
             if (m != std::string::npos) {
                 out += "\\sqrt{";
+                const size_t cs = i + 5;
                 // 空参（键盘 √ 模板 sqrt() 未填）：灰块占位（六十包②——
-                // 原先空参走旧 painter 虚线框致整行退旧渲染）
-                if (m == i + 5) {
+                // 原先空参走旧 painter 虚线框致整行退旧渲染）；光标落点在
+                // 空槽内时探针插灰块前（键入字符将出现的位置）
+                if (m == cs) {
+                    if (markerAt == cs && !caretDone) {
+                        out += kCaretMarker;
+                        caretDone = true;
+                    }
                     out += kPlaceholder;
+                } else if (markerAt >= cs && markerAt <= m && !caretDone) {
+                    // 光标落点在内容内：按落点切两段、中间插探针（输出仍是
+                    // 一条平面 LaTeX 串，RaTeX 行内间距不受切分影响）
+                    out += s.substr(cs, markerAt - cs);
+                    out += kCaretMarker;
+                    caretDone = true;
+                    out += s.substr(markerAt, m - markerAt);
                 } else {
-                    out += s.substr(i + 5, m - i - 5);
+                    out += s.substr(cs, m - cs);
                 }
                 out += "}";
                 identity = false;
@@ -187,16 +225,40 @@ std::string LinearToLatex(const std::string &s, bool &identity)
                 }
                 if (comma != std::string::npos) {
                     out += "\\sqrt[";
-                    if (comma == i + 8) {
-                        out += kPlaceholderIdx;   // 根次未填（NthRoot(,x)）
+                    const size_t cs0 = i + 8;
+                    if (comma == cs0) {
+                        // 根次未填（NthRoot(,x)）；落点在空槽内探针插灰块前
+                        if (markerAt == cs0 && !caretDone) {
+                            out += kCaretMarker;
+                            caretDone = true;
+                        }
+                        out += kPlaceholderIdx;
+                    } else if (markerAt >= cs0 && markerAt <= comma
+                               && !caretDone) {
+                        // 落点=逗号处视为根次尾（键入字符并入根次）
+                        out += s.substr(cs0, markerAt - cs0);
+                        out += kCaretMarker;
+                        caretDone = true;
+                        out += s.substr(markerAt, comma - markerAt);
                     } else {
-                        out += s.substr(i + 8, comma - i - 8);
+                        out += s.substr(cs0, comma - cs0);
                     }
                     out += "]{";
-                    if (m == comma + 1) {
-                        out += kPlaceholder;      // 被开方数未填（NthRoot(3,)）
+                    const size_t cs1 = comma + 1;
+                    if (m == cs1) {
+                        // 被开方数未填（NthRoot(3,)）；空槽同上
+                        if (markerAt == cs1 && !caretDone) {
+                            out += kCaretMarker;
+                            caretDone = true;
+                        }
+                        out += kPlaceholder;
+                    } else if (markerAt >= cs1 && markerAt <= m && !caretDone) {
+                        out += s.substr(cs1, markerAt - cs1);
+                        out += kCaretMarker;
+                        caretDone = true;
+                        out += s.substr(markerAt, m - markerAt);
                     } else {
-                        out += s.substr(comma + 1, m - comma - 1);
+                        out += s.substr(cs1, m - cs1);
                     }
                     out += "}";
                     identity = false;
@@ -212,7 +274,17 @@ std::string LinearToLatex(const std::string &s, bool &identity)
             && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
             const size_t m = MatchParen(s, i + 3);
             if (m != std::string::npos) {
-                out += "\\left|" + s.substr(i + 4, m - i - 4) + "\\right|";
+                out += "\\left|";
+                const size_t cs = i + 4;
+                if (markerAt >= cs && markerAt <= m && !caretDone) {
+                    out += s.substr(cs, markerAt - cs);
+                    out += kCaretMarker;
+                    caretDone = true;
+                    out += s.substr(markerAt, m - markerAt);
+                } else {
+                    out += s.substr(cs, m - cs);
+                }
+                out += "\\right|";
                 identity = false;
                 i = m + 1;
                 continue;
@@ -252,7 +324,17 @@ std::string LinearToLatex(const std::string &s, bool &identity)
                 const size_t m = MatchParen(s, i + 1);
                 if (m != std::string::npos) {
                     out += op;
-                    out += "{" + s.substr(i + 2, m - i - 2) + "}";
+                    out += "{";
+                    const size_t cs = i + 2;
+                    if (markerAt >= cs && markerAt <= m && !caretDone) {
+                        out += s.substr(cs, markerAt - cs);
+                        out += kCaretMarker;
+                        caretDone = true;
+                        out += s.substr(markerAt, m - markerAt);
+                    } else {
+                        out += s.substr(cs, m - cs);
+                    }
+                    out += "}";
                     identity = false;
                     i = m + 1;
                     continue;
@@ -261,7 +343,17 @@ std::string LinearToLatex(const std::string &s, bool &identity)
             const size_t j = ScriptRunEnd(s, i + 1);
             if (j > i + 1) {
                 out += op;
-                out += "{" + s.substr(i + 1, j - i - 1) + "}";
+                out += "{";
+                const size_t cs = i + 1;
+                if (markerAt >= cs && markerAt <= j && !caretDone) {
+                    out += s.substr(cs, markerAt - cs);
+                    out += kCaretMarker;
+                    caretDone = true;
+                    out += s.substr(markerAt, j - markerAt);
+                } else {
+                    out += s.substr(cs, j - cs);
+                }
+                out += "}";
                 identity = false;
                 i = j;
                 continue;
@@ -269,9 +361,15 @@ std::string LinearToLatex(const std::string &s, bool &identity)
             // 悬空脚本（x^、x_ 输入中途态，六十包③）：出灰块占位进组——
             // 原样放行 ^/_ 时 RaTeX 报 "Expected group after" 整串排版失
             // 败退旧渲染；补灰块后排版成功且占位可见（GGB ^{\jlmcursor}
-            // /^{灰块} 同语义）
+            // /^{灰块} 同语义）。光标落点紧随其上时探针插灰块前
             out += op;
-            out += "{" + std::string(kPlaceholderScript) + "}";
+            out += "{";
+            if (markerAt == i + 1 && !caretDone) {
+                out += kCaretMarker;
+                caretDone = true;
+            }
+            out += kPlaceholderScript;
+            out += "}";
             identity = false;
             ++i;
             continue;
@@ -354,6 +452,11 @@ std::string LinearToLatex(const std::string &s, bool &identity)
         out += s[i];
         ++i;
     }
+    // 光标落点在串尾：主循环顶部不再触发（i==size 时循环已退出），统一补插
+    if (markerAt != std::string::npos && !caretDone && markerAt >= s.size()) {
+        out += kCaretMarker;
+        caretDone = true;
+    }
     return out;
 }
 
@@ -434,25 +537,40 @@ static napi_value RatexLayout(napi_env env, napi_callback_info info)
     return out;
 }
 
-// ratexConvert(linear: string): string
+// ratexConvert(linear: string, rest?: string): string
 // 线性数学串 → LaTeX，恒返回 "ok|<latex>"（五十八包：identity=串中无被
 // 转换的构造，曾据此判回退——但简单式 y=2x+1、分式 1/2 等纯线性串因此
 // 全部错过 RaTeX（真机 57 包反馈③④）。现放开：RaTeX 成为缺省链路，线
 // 性渲染与内核求值一致；排版失败的兜底回退在 ArkTS 侧（ratexLayout 失
 // 败 → 旧 painter），任何输入不出错。
+// 六十一包②：rest=光标后剩余串时，两段拼接整体转换，并在 linear/rest 边
+// 界（=光标落点，ArkTS 已按 UTF-16 切好串，边界即 UTF-8 字节下标）插入
+// 光标探针——模板跨边界（sqrt(2|) 等）由槽位切分逻辑覆盖
 static napi_value RatexConvert(napi_env env, napi_callback_info info)
 {
-    size_t argc = 1;
-    napi_value argv[1] = {nullptr};
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
     if (argc < 1) {
-        napi_throw_error(env, nullptr, "ratexConvert requires (linear)");
+        napi_throw_error(env, nullptr, "ratexConvert requires (linear, rest?)");
         return nullptr;
     }
     const std::string linear = NapiToStr(env, argv[0]);
+    size_t markerAt = std::string::npos;
+    std::string s = linear;
+    if (argc >= 2) {
+        napi_valuetype vt = napi_undefined;
+        napi_typeof(env, argv[1], &vt);
+        if (vt == napi_string) {
+            s = linear + NapiToStr(env, argv[1]);
+            markerAt = linear.size();
+        }
+    }
     bool identity = true;
-    const std::string latex = LinearToLatex(linear, identity);
+    bool caretDone = false;
+    const std::string latex = LinearToLatexCaret(s, identity, markerAt, caretDone);
     (void)identity;
+    (void)caretDone;
     const std::string out = "ok|" + latex;
     napi_value res;
     napi_create_string_utf8(env, out.c_str(), out.size(), &res);

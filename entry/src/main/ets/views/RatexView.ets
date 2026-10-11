@@ -132,6 +132,22 @@ export function ratexConvertLinear(linear: string): string | null {
   }
 }
 
+// 线性串 → LaTeX，带光标探针（六十一包②，GGB CursorAtom 同源模型）：
+// rest 缀于 linear 之后整体转换，native 在两段边界（=光标落点，ArkTS 已
+// 按 UTF-16 切好串）插入魔色 rule（#010203）；排版后从 DisplayList 找该
+// 色 Line 项即得光标 x 与上下文盒（脚本内引擎自动缩放+升降）。失败 null
+export function ratexConvertCaret(linear: string, rest: string): string | null {
+  try {
+    const r = ratexNative.ratexConvert(linear, rest) as string;
+    if (r.startsWith('ok|')) {
+      return r.substring(3);
+    }
+    return null;
+  } catch (e) {
+    return null;
+  }
+}
+
 // LaTeX → DisplayList（native 排版；异常/错误返回 null）。
 // color 可选 '#RRGGBB'（五十四包：主题色透传 native，DisplayList 内 item
 // 色即主题色；缺省黑）
@@ -197,8 +213,9 @@ export function registerKatexFonts(done: () => void, ui?: UIContext): void {
 }
 
 // item 色（DisplayList 内嵌色优先，否则宿主主题色）；五十八包起为模块级
-// 函数——编辑行 MathField 的 RaTeX 路径直接复用同一绘制实现
-function ratexItemColor(item: DisplayListItem, fallback: string): string {
+// 函数——编辑行 MathField 的 RaTeX 路径直接复用同一绘制实现。六十一包②
+// 起导出：光标探针按魔色 #010203 精确匹配定位
+export function ratexItemColor(item: DisplayListItem, fallback: string): string {
   const c = item.color;
   if (Array.isArray(c) && c.length >= 3) {
     const to255 = (v: number): number => Math.round(Math.max(0, Math.min(1, v)) * 255);
