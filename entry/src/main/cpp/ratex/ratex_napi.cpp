@@ -239,13 +239,37 @@ std::string LinearToLatex(const std::string &s, bool &identity)
 // ratexLayout(latex: string, displayMode: number): string
 // 返回 "ok|<json>" 或 "error:<msg>"。LaTeX 由调用方（ArkTS/cathode 转换层）
 // 提供；本接口不做线性转换——线性转换在 ratexConvert。
+// '#RRGGBB'（可带 #）→ RatexColor；非法输入返回 false（调用方保持缺省黑）
+static bool ParseHexColor(const std::string &hex, RatexColor &out)
+{
+    size_t i = (!hex.empty() && hex[0] == '#') ? 1 : 0;
+    if (hex.size() - i < 6) return false;
+    auto nib = [](char c) -> int {
+        if (c >= '0' && c <= '9') return c - '0';
+        if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+        if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+        return -1;
+    };
+    int r = nib(hex[i]), g = nib(hex[i + 2]), b = nib(hex[i + 4]);
+    // 中间两位
+    r = r * 16 + nib(hex[i + 1]);
+    g = g * 16 + nib(hex[i + 3]);
+    b = b * 16 + nib(hex[i + 5]);
+    if (r < 0 || g < 0 || b < 0) return false;
+    out.r = r / 255.0f;
+    out.g = g / 255.0f;
+    out.b = b / 255.0f;
+    out.a = 1.0f;
+    return true;
+}
+
 static napi_value RatexLayout(napi_env env, napi_callback_info info)
 {
-    size_t argc = 2;
-    napi_value argv[2] = {nullptr, nullptr};
+    size_t argc = 3;
+    napi_value argv[3] = {nullptr, nullptr, nullptr};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
     if (argc < 1) {
-        napi_throw_error(env, nullptr, "ratexLayout requires (latex, displayMode?)");
+        napi_throw_error(env, nullptr, "ratexLayout requires (latex, displayMode?, color?)");
         return nullptr;
     }
     const std::string latex = NapiToStr(env, argv[0]);
@@ -259,6 +283,13 @@ static napi_value RatexLayout(napi_env env, napi_callback_info info)
     }
 
     RatexColor color = {0.0f, 0.0f, 0.0f, 1.0f};
+    if (argc >= 3) {
+        napi_valuetype vt = napi_undefined;
+        napi_typeof(env, argv[2], &vt);
+        if (vt == napi_string) {
+            ParseHexColor(NapiToStr(env, argv[2]), color);
+        }
+    }
     RatexOptions opts;
     opts.struct_size = sizeof(RatexOptions);
     opts.display_mode = displayMode != 0 ? 1 : 0;

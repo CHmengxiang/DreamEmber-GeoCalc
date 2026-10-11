@@ -1607,7 +1607,7 @@ export struct MathText {
       this.useRatex = false;
       return false;
     }
-    const lay = ratexLayoutLatex(latex);
+    const lay = ratexLayoutLatex(latex, this.color);
     if (lay === null) {
       this.useRatex = false;
       return false;

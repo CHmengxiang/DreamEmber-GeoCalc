@@ -5,19 +5,26 @@
 //
 // DisplayList 协议 v1（RaTeX docs/DISPLAYLIST_JSON_PROTOCOL.md）：
 //   {version, width, height(ascent), depth(descent), items[]}，坐标全 em
-//   （×fontSize=像素），原点左上、基线 y=height。item 四型：
+//   （×fontSize=像素），**原点左上、y 向下、基线在 y=height**（五十四包
+//   修正③：item.y 直接从盒顶量取绘制，不得再叠加基线偏移——此前把 item.y
+//   加到基线上，整体下移一个 ascent，下半被画布裁掉）。item 四型：
 //   GlyphPath{font 短名, char_code, x, y, scale}（KaTeX 字体字形，字体短名
 //   ↔ rawfile/fonts/KaTeX_*.ttf 映射）、Line（分数线/上划线）、Rect、Path
 //   （MoveTo/LineTo/CubicTo/QuadTo/Close，根号大钩形等）。
 //
 // 字体加载：@ohos.font.registerFont 以 $rawfile 路径注册 KaTeX 全套 TTF
 //（family 名 = Katex<短名去连字符>）。字形绘制直接 fillText(char)
-//（KaTeX 字体注册后按 font 名渲染，无需 outline 重建）。
+//（KaTeX 字体注册后按 font 名渲染，无需 outline 重建）。五十四包修正④：
+// 真机上 fillText 曾回退系统字体——根号 √（Main-Regular，字面高 0.853em、
+// 基线下探 -0.2em）是按 KaTeX 度量与横线对位的，系统字形矮一截够不到
+// 横线，视觉上"钩与横线分离"；改走 UIContext Font 注册 + Resource 形式
+// familySrc，并加延迟重绘兜底与字体回退探测日志。
 //
 // 异步时序：registerFont 提交后触发 repaint；首次布局在字体就绪后进行。
 import { canvasDensity } from './canvasUtil';
 import ratexNative from 'libdreamember.so';
 import font from '@ohos.font';
+import type { UIContext } from '@ohos.arkui.UIContext';
 
 // KaTeX 字体短名 → rawfile 文件名映射（RaTeX FontId::as_str）
 const KATEX_FONTS: Map<string, string> = new Map([
@@ -58,7 +65,7 @@ interface DisplayListItem {
   char_code?: number;
   commands?: DisplayPathCommand[];
   dashed?: boolean;
-  color?: number[];   // [r,g,b] 0-1（协议忽略 alpha，默认不透明）
+  color?: number[] | Record<string, number>;  // [r,g,b] 或 {r,g,b,a} 0-1
 }
 
 interface DisplayPathCommand {
@@ -120,10 +127,12 @@ export function ratexConvertLinear(linear: string): string | null {
   }
 }
 
-// LaTeX → DisplayList（native 排版；异常/错误返回 null）
-export function ratexLayoutLatex(latex: string): RatexLayoutResult | null {
+// LaTeX → DisplayList（native 排版；异常/错误返回 null）。
+// color 可选 '#RRGGBB'（五十四包：主题色透传 native，DisplayList 内 item
+// 色即主题色；缺省黑）
+export function ratexLayoutLatex(latex: string, color?: string): RatexLayoutResult | null {
   try {
-    const r = ratexNative.ratexLayout(latex, 0) as string;
+    const r = ratexNative.ratexLayout(latex, 0, color) as string;
     if (!r.startsWith('ok|')) {
       return null;
     }
@@ -138,32 +147,43 @@ export function ratexLayoutOk(latex: string): boolean {
   return ratexLayoutLatex(latex) !== null;
 }
 
-// 注册全部 KaTeX 字体（幂等）。@ohos.font.registerFont 用 family 名 =
-// Katex<短名去连字符>，Canvas font 直写该 family。
-export function registerKatexFonts(done: () => void): void {
-  let fired = false;
-  const finish = (): void => {
-    if (!fired) {
-      fired = true;
-      done();
-    }
+// 注册单个 KaTeX 字体（五十四包④）：优先 UIContext Font 注册（全局
+// font.registerFont 自 API18 起废弃，真机上疑似未生效致 fillText 回退系统
+// 字体），失败再落全局接口；familySrc 用 $rawfile Resource 形式。
+function registerOneFont(family: string, file: string, ui?: UIContext): boolean {
+  const opts: font.FontOptions = {
+    familyName: family,
+    familySrc: $rawfile(`fonts/${file}`)
   };
+  if (ui !== undefined) {
+    try {
+      ui.getFont().registerFont(opts);
+      return true;
+    } catch (e) {
+      // 落全局接口重试
+    }
+  }
+  try {
+    font.registerFont(opts);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 注册全部 KaTeX 字体（幂等，按 family 记账；注册失败不记账、下个组件
+// 实例创建时重试）。registerFont 同步返回，但部分版本底层字体装载异步
+// 完成——宿主组件需延迟重绘兜底（见 RatexView.aboutToAppear）。
+export function registerKatexFonts(done: () => void, ui?: UIContext): void {
   KATEX_FONTS.forEach((file: string, short: string) => {
     if (registeredFonts.has(short)) {
       return;
     }
-    registeredFonts.add(short);
-    try {
-      font.registerFont({
-        familyName: 'Katex' + short.replace(/-/g, ''),
-        familySrc: `$rawfile/fonts/${file}`
-      });
-    } catch (e) {
-      // 注册失败（如 rawfile 缺失）：记入已注册避免重复尝试
+    if (registerOneFont('Katex' + short.replace(/-/g, ''), file, ui)) {
+      registeredFonts.add(short);
     }
   });
-  // registerFont 是同步接口（API 11 起同步生效），直接回调
-  finish();
+  done();
 }
 
 @Component
@@ -181,12 +201,17 @@ export struct RatexView {
   private fontsReady: boolean = false;
   private lay: RatexLayoutResult | null = null;
   private den: number = canvasDensity();
+  private probed: boolean = false;   // 字体回退探测只跑一次
 
   aboutToAppear(): void {
     registerKatexFonts(() => {
       this.fontsReady = true;
       this.repaint();
-    });
+    }, this.getUIContext());
+    // 兜底重绘：部分版本底层字体装载异步完成，晚到的重绘避免首帧
+    // （乃至常驻）回退系统字体
+    setTimeout(() => this.repaint(), 150);
+    setTimeout(() => this.repaint(), 600);
   }
 
   repaint(): void {
@@ -201,12 +226,32 @@ export struct RatexView {
     if (latex === null) {
       return false;
     }
-    const lay = ratexLayoutLatex(latex);
+    const lay = ratexLayoutLatex(latex, this.color);
     if (lay === null) {
       return false;
     }
     this.lay = lay;
     return true;
+  }
+
+  // 字体回退探测（一次）：KaTeX 字体没生效时 measureText 宽度与系统字体
+  // 一致——打日志留证（配合 hilog 供真机排查），不影响绘制本身
+  private probeFontOnce(): void {
+    if (this.probed || !this.fontsReady) {
+      return;
+    }
+    this.probed = true;
+    try {
+      this.ctx.font = '40px KatexMainRegular';
+      const wk = this.ctx.measureText('\u221A').width;
+      this.ctx.font = '40px sans-serif';
+      const ws = this.ctx.measureText('\u221A').width;
+      const same = Math.abs(wk - ws) < 0.5;
+      console.info(`[ratex] font probe: katex=${wk.toFixed(1)} sys=${ws.toFixed(1)}`
+        + ` fallback=${same ? 'YES(字体未生效!)' : 'no'}`);
+    } catch (e) {
+      // 探测失败不影响绘制
+    }
   }
 
   private paint(): void {
@@ -216,10 +261,12 @@ export struct RatexView {
     }
     const lay = this.lay as RatexLayoutResult;
     const fs = this.fontSize;
-    // em → vp：坐标全 em × fontSize；Canvas 坐标 vp 口径（第十五包③终案）
-    const w = Math.max(12, Math.ceil(lay.widthEm * fs) + 4);
-    const h = Math.max(fs + 6, Math.ceil((lay.heightEm + lay.depthEm) * fs) + 4);
-    const baseline = Math.ceil(lay.heightEm * fs) + 2;
+    // em → vp：坐标全 em × fontSize；Canvas 坐标 vp 口径（第十五包③终案）。
+    // 五十四包③修正：item.y 为盒顶起算（基线在 y=height），直接绘制，
+    // 只加 pad 顶边距——不再叠加基线偏移（旧码整体下移一个 ascent 被裁）
+    const pad = 2;
+    const w = Math.max(12, Math.ceil(lay.widthEm * fs) + pad * 2);
+    const h = Math.max(fs + 6, Math.ceil((lay.heightEm + lay.depthEm) * fs) + pad * 2);
     if (Math.abs(w - this.contentW) > 0.5 || Math.abs(h - this.contentH) > 0.5) {
       this.contentW = w;
       this.contentH = h;
@@ -229,8 +276,9 @@ export struct RatexView {
     this.ctx.fillStyle = color;
     this.ctx.strokeStyle = color;
     this.ctx.textBaseline = 'alphabetic';
+    this.probeFontOnce();
     for (let i = 0; i < lay.items.length; i++) {
-      this.drawItem(lay.items[i], fs, baseline, color);
+      this.drawItem(lay.items[i], fs, pad, color);
     }
     this.onResult(true);
   }
@@ -242,14 +290,24 @@ export struct RatexView {
       const hex = (v: number): string => v.toString(16).padStart(2, '0');
       return '#' + hex(to255(c[0])) + hex(to255(c[1])) + hex(to255(c[2]));
     }
+    if (c !== undefined && !Array.isArray(c)) {
+      const r = c['r'];
+      const g = c['g'];
+      const b = c['b'];
+      if (typeof r === 'number' && typeof g === 'number' && typeof b === 'number') {
+        const to255 = (v: number): number => Math.round(Math.max(0, Math.min(1, v)) * 255);
+        const hex = (v: number): string => v.toString(16).padStart(2, '0');
+        return '#' + hex(to255(r)) + hex(to255(g)) + hex(to255(b));
+      }
+    }
     return fallback;
   }
 
-  private drawItem(item: DisplayListItem, fs: number, baseline: number,
+  private drawItem(item: DisplayListItem, fs: number, topPad: number,
     fallbackColor: string): void {
     const color = this.itemColor(item, fallbackColor);
     const x = (item.x !== undefined ? item.x : 0) * fs;
-    const y = baseline + (item.y !== undefined ? item.y : 0) * fs;
+    const y = topPad + (item.y !== undefined ? item.y : 0) * fs;
     const t = item.type;
     if (t === 'GlyphPath') {
       const short = item.font !== undefined ? item.font : 'Main-Regular';
@@ -274,17 +332,18 @@ export struct RatexView {
         (item.width !== undefined ? item.width : 0) * fs,
         (item.height !== undefined ? item.height : 0) * fs);
     } else if (t === 'Path') {
-      this.drawPath(item, fs, color);
+      this.drawPath(item, fs, topPad, color);
     }
   }
 
-  private drawPath(item: DisplayListItem, fs: number, color: string): void {
+  private drawPath(item: DisplayListItem, fs: number, topPad: number,
+    color: string): void {
     const cmds = item.commands;
     if (!Array.isArray(cmds) || cmds.length === 0) {
       return;
     }
     const ox = (item.x !== undefined ? item.x : 0) * fs;
-    const oy = (item.y !== undefined ? item.y : 0) * fs;
+    const oy = topPad + (item.y !== undefined ? item.y : 0) * fs;
     const ctx = this.ctx;
     ctx.beginPath();
     let open = false;
