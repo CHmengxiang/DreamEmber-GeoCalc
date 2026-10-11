@@ -150,12 +150,14 @@ export function ratexLayoutOk(latex: string): boolean {
 // 注册单个 KaTeX 字体（五十四包④）：优先 UIContext Font 注册（全局
 // font.registerFont 自 API18 起废弃，真机上疑似未生效致 fillText 回退系统
 // 字体），失败再落全局接口；familySrc 用 $rawfile Resource 形式。
-function registerOneFont(family: string, file: string, ui?: UIContext): boolean {
+// 五十五包②：forceGlobal 跳过 UIContext 通道（探测发现回退后换通道重试用）
+function registerOneFont(family: string, file: string, ui?: UIContext,
+  forceGlobal: boolean = false): boolean {
   const opts: font.FontOptions = {
     familyName: family,
     familySrc: $rawfile(`fonts/${file}`)
   };
-  if (ui !== undefined) {
+  if (ui !== undefined && !forceGlobal) {
     try {
       ui.getFont().registerFont(opts);
       return true;
@@ -174,16 +176,46 @@ function registerOneFont(family: string, file: string, ui?: UIContext): boolean 
 // 注册全部 KaTeX 字体（幂等，按 family 记账；注册失败不记账、下个组件
 // 实例创建时重试）。registerFont 同步返回，但部分版本底层字体装载异步
 // 完成——宿主组件需延迟重绘兜底（见 RatexView.aboutToAppear）。
+// 五十五包②：单字体失败打日志（registerFont 不抛错≠底层装载成功，
+// 真机证据靠 [ratex] 日志链收集）
 export function registerKatexFonts(done: () => void, ui?: UIContext): void {
   KATEX_FONTS.forEach((file: string, short: string) => {
     if (registeredFonts.has(short)) {
       return;
     }
-    if (registerOneFont('Katex' + short.replace(/-/g, ''), file, ui)) {
+    const family = 'Katex' + short.replace(/-/g, '');
+    if (registerOneFont(family, file, ui)) {
       registeredFonts.add(short);
+    } else {
+      console.warn(`[ratex] register FAIL: ${family} (${file})`);
     }
   });
   done();
+}
+
+// 五十五包②：指定字体换全局通道重注册（探测到 fillText 仍回退系统字体
+// 时调用——UIContext 注册成功但底层未装载的场景，换通道有机会救回）。
+// 先清记账再注册，成功与否都记账（避免无限重试，交给外层重试上限）。
+export function retryKatexFonts(shorts: string[], ui?: UIContext): void {
+  shorts.forEach((short: string) => {
+    const file = KATEX_FONTS.get(short);
+    if (file === undefined) {
+      return;
+    }
+    const family = 'Katex' + short.replace(/-/g, '');
+    registeredFonts.delete(short);
+    try {
+      font.registerFont({
+        familyName: family,
+        familySrc: $rawfile(`fonts/${file}`)
+      });
+      console.warn(`[ratex] re-register via global: ${family}`);
+      registeredFonts.add(short);
+    } catch (e) {
+      console.warn(`[ratex] re-register FAIL: ${family}`);
+      registeredFonts.add(short);  // 记账防死循环，本轮放弃
+    }
+  });
 }
 
 @Component
@@ -202,6 +234,7 @@ export struct RatexView {
   private lay: RatexLayoutResult | null = null;
   private den: number = canvasDensity();
   private probed: boolean = false;   // 字体回退探测只跑一次
+  private retryCount: number = 0;    // 回退重注册轮数上限 2（五十五包②）
 
   aboutToAppear(): void {
     registerKatexFonts(() => {
@@ -234,21 +267,42 @@ export struct RatexView {
     return true;
   }
 
-  // 字体回退探测（一次）：KaTeX 字体没生效时 measureText 宽度与系统字体
-  // 一致——打日志留证（配合 hilog 供真机排查），不影响绘制本身
+  // 字体回退探测（五十四包④引入、五十五包②扩展）：measureText 宽度与
+  // 系统字体一致即判回退。探两只字体——Main-Regular 的 √（根号钩与横线
+  // 对位依赖它）与 Math-Italic 的 x（斜体字母，真机曾出现"时有时无"）。
+  // 探到回退：换全局通道重注册 + 延迟重绘再探，至多两轮（retryCount 上限）。
   private probeFontOnce(): void {
     if (this.probed || !this.fontsReady) {
       return;
     }
     this.probed = true;
     try {
-      this.ctx.font = '40px KatexMainRegular';
-      const wk = this.ctx.measureText('\u221A').width;
-      this.ctx.font = '40px sans-serif';
-      const ws = this.ctx.measureText('\u221A').width;
-      const same = Math.abs(wk - ws) < 0.5;
-      console.info(`[ratex] font probe: katex=${wk.toFixed(1)} sys=${ws.toFixed(1)}`
-        + ` fallback=${same ? 'YES(字体未生效!)' : 'no'}`);
+      const probes: Array<[string, string]> = [
+        ['Main-Regular', '\u221A'],
+        ['Math-Italic', 'x'],
+      ];
+      const fallback: string[] = [];
+      for (let i = 0; i < probes.length; i++) {
+        const short = probes[i][0];
+        const ch = probes[i][1];
+        const family = 'Katex' + short.replace(/-/g, '');
+        this.ctx.font = `40px ${family}`;
+        const wk = this.ctx.measureText(ch).width;
+        this.ctx.font = '40px sans-serif';
+        const ws = this.ctx.measureText(ch).width;
+        const same = Math.abs(wk - ws) < 0.5;
+        console.info(`[ratex] font probe ${short} ${ch}: katex=${wk.toFixed(1)}`
+          + ` sys=${ws.toFixed(1)} fallback=${same ? 'YES(字体未生效!)' : 'no'}`);
+        if (same) {
+          fallback.push(short);
+        }
+      }
+      if (fallback.length > 0 && this.retryCount < 2) {
+        this.retryCount++;
+        retryKatexFonts(fallback, this.getUIContext());
+        this.probed = false;  // 重注册后再探一轮
+        setTimeout(() => this.repaint(), 250);
+      }
     } catch (e) {
       // 探测失败不影响绘制
     }
