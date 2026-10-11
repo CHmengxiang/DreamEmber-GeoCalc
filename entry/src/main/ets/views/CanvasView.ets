@@ -163,7 +163,8 @@ import { KeyboardAvoidMode } from '@ohos.arkui.UIContext';
 import { canvasDensity, functionOpenBefore, hasIdentBase, isTypewriterCh,
   matchParenBackward, MathCaretStop, mathCaretStops, parseMathAtoms,
   scriptContentRange, scriptRunEndAtCaret, scriptStructureEnd,
-  templateUnwrapRange } from './MathField';
+  templateUnwrapRange,
+  emptyTemplateBksp } from './MathField';
 
 @Component
 export struct CanvasView {
@@ -2491,6 +2492,22 @@ export struct CanvasView {
         this.activeCtrl().caretPosition(head.length);
         return;
       }
+    }
+    // 六十三包①：空槽模板退格整删（GGB 空 field ⌫ 删整个模板——
+    // NthRoot(,) 内 ⌫ 原先只删逗号，NthRoot() 无顶层逗号不可转，整行
+    // 渲染斜体字面）；多槽模板槽首且槽非空只移光标进上一槽（逗号保护）
+    const et = emptyTemplateBksp(s, a);
+    if (et.length > 0) {
+      if (et.length === 2) {
+        this.pendingInput = s.slice(0, et[0]) + s.slice(et[1]);
+      }
+      this.selStart = et[0];
+      this.selEnd = et[0];
+      this.mathCaret = et[0];
+      this.mathCaretScript = this.deriveCaretScript(this.pendingInput, et[0],
+        et.length === 1);
+      this.activeCtrl().caretPosition(et[0]);
+      return;
     }
     if (!this.mathCaretScript) {
       const runOp = scriptRunEndAtCaret(s, a);

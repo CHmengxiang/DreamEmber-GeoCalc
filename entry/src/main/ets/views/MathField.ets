@@ -908,6 +908,78 @@ export function templateUnwrapRange(raw: string, caret: number): number[] {
   return [j, m + 1];
 }
 
+// 键盘模板命令名（与转换器 kFns/模板分支同集；六十三包①）
+const kTplNames: string[] = ['sqrt', 'abs', 'NthRoot', 'log', 'ln', 'exp',
+  'sin', 'cos', 'tan', 'cot', 'sec', 'csc', 'asin', 'acos', 'atan',
+  'arcsin', 'arccos', 'arctan', 'sinh', 'cosh', 'tanh', 'floor', 'ceil',
+  'round', 'sgn', 'min', 'max', 'Floor', 'Ceil'];
+
+// 空槽模板退格（六十三包①，GGB 空 field ⌫ 删整个模板同款）：NthRoot(,)
+// 内 ⌫ 原先只删逗号 → NthRoot() 无顶层逗号不可转 → 整行渲染斜体字面
+// "NthRoot()"。语义：当前槽空 → 整删 [名首, ')' 含)；多槽模板槽首 ⌫
+// （紧贴分隔逗号）且当前槽非空 → 只移光标进上一槽（[t]），防逗号被删
+// 断链。返回 [from,to) 整删 / [t] 仅移光标 / [] 无命中走原路径
+export function emptyTemplateBksp(raw: string, caret: number): number[] {
+  if (caret <= 0 || caret > raw.length) {
+    return [];
+  }
+  let open = -1;
+  let comma = false;
+  if (raw.charAt(caret - 1) === ')') {
+    // 光标紧贴 ')'：模板右缘——配对反查并确认即本模板闭括号
+    const ob = matchParenBackward(raw, caret - 1);
+    if (ob >= 0 && matchParen(raw, ob) === caret - 1) {
+      open = ob;
+    }
+  }
+  if (open < 0) {
+    let depth = 0;
+    for (let j = caret - 1; j >= 0; j--) {
+      const c = raw.charAt(j);
+      if (c === ')') {
+        depth++;
+      } else if (c === '(') {
+        if (depth === 0) {
+          open = j;
+          break;
+        }
+        depth--;
+      } else if (c === ',' && depth === 0) {
+        comma = true;
+      }
+    }
+  }
+  if (open < 0) {
+    return [];
+  }
+  const nameStart = functionOpenBefore(raw, open);
+  if (nameStart < 0) {
+    return [];
+  }
+  const name = raw.substring(nameStart, open);
+  if (!kTplNames.includes(name)) {
+    return [];
+  }
+  const close = matchParen(raw, open);
+  if (close < caret) {
+    return [];
+  }
+  const content = raw.substring(open + 1, close);
+  if (name === 'NthRoot' || (name === 'log' && content.indexOf(',') >= 0)) {
+    const ci = content.indexOf(',');
+    const idxPart = ci >= 0 ? content.substring(0, ci) : content;
+    const radPart = ci >= 0 ? content.substring(ci + 1) : '';
+    if (comma || raw.charAt(caret - 1) === ',') {
+      // 被开方数/真数槽：槽空整删（用户口径「直接删除」），槽非空槽首
+      // 退格只移光标进上一槽（GGB prev field，逗号保护）
+      return radPart === '' ? [nameStart, close + 1] : [caret - 1];
+    }
+    // 根次/底数槽：槽空整删，槽非空走普通删字符
+    return idxPart === '' ? [nameStart, close + 1] : [];
+  }
+  return content === '' ? [nameStart, close + 1] : [];
+}
+
 // "打字机"单字符（角标区内可直接续写的字符）：字母数字下划线 + 希腊
 export function isTypewriterCh(c: string): boolean {
   return isAlnumCh(c) || c === '_' || isGreekCh(c);

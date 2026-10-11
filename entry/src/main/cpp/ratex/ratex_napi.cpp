@@ -276,7 +276,12 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
                     else if (s[q] == ',' && dep == 0) { comma = q; break; }
                 }
                 if (comma != std::string::npos) {
-                    out += "\\sqrt[";
+                    // 六十三包②：整个根次槽包成单组——RaTeX \sqrt[..] 可选
+                    // 参解析只吃单个顶层组（宿主 dump：{探针组}{灰块} 在探
+                    // 针组闭括号处报 Expected EOF 整串失败退旧 painter，根
+                    // 次槽光标因此消失）；包组后探针/灰块/递归内容的花括号
+                    // 都在组内，任意光标位不再触发边界
+                    out += "\\sqrt[{";
                     const size_t cs0 = i + 8;
                     if (comma == cs0) {
                         // 根次未填（NthRoot(,x)）；落点在空槽内探针插灰块前
@@ -292,7 +297,7 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
                                                   markerAt, caretDone,
                                                   kCaretMarkerIdx, depth + 1);
                     }
-                    out += "]{";
+                    out += "}]{";
                     const size_t cs1 = comma + 1;
                     if (m == cs1) {
                         // 被开方数未填（NthRoot(3,)）；根号内 0.6em 探针
@@ -332,6 +337,80 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
                                               caretDone, marker, depth + 1);
                 }
                 out += "\\right|";
+                identity = false;
+                i = m + 1;
+                continue;
+            }
+        }
+        // log(底数, 真数) → \log_{底数}(真数)（六十三包④，键盘 log□ 键与
+        // 内核 Log(底,值) 的显示语义；无顶层逗号落通用 fn 分支按 \log(…)
+        // 显示。空槽出灰块，光标探针走基线上下文）
+        if (s.compare(i, 4, "log(") == 0
+            && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
+            const size_t m = MatchParen(s, i + 3, to);
+            if (m != std::string::npos) {
+                size_t comma = std::string::npos;
+                int dep = 0;
+                for (size_t q = i + 4; q < m; ++q) {
+                    if (s[q] == '(') ++dep;
+                    else if (s[q] == ')') --dep;
+                    else if (s[q] == ',' && dep == 0) { comma = q; break; }
+                }
+                if (comma != std::string::npos) {
+                    out += "\\log_{";
+                    const size_t cs0 = i + 4;
+                    if (comma == cs0) {
+                        if (markerAt == cs0 && !caretDone) {
+                            out += kCaretMarker;
+                            caretDone = true;
+                        }
+                        out += kPlaceholderIdx;
+                    } else {
+                        out += LinearToLatexCaret(s, identity, cs0, comma,
+                                                  markerAt, caretDone,
+                                                  kCaretMarker, depth + 1);
+                    }
+                    out += "}(";
+                    const size_t cs1 = comma + 1;
+                    if (m == cs1) {
+                        if (markerAt == cs1 && !caretDone) {
+                            out += kCaretMarker;
+                            caretDone = true;
+                        }
+                        out += kPlaceholder;
+                    } else {
+                        out += LinearToLatexCaret(s, identity, cs1, m,
+                                                  markerAt, caretDone,
+                                                  kCaretMarker, depth + 1);
+                    }
+                    out += ")";
+                    identity = false;
+                    i = m + 1;
+                    continue;
+                }
+            }
+        }
+        // Floor(x)/Ceil(x) → \lfloor x\rfloor、\lceil x\rceil（六十三包④，
+        // 键盘 ⌊⌋/⌈⌉ 键插入大写命令名，通用 fn 分支只认小写——不转会被
+        // 渲染成斜体字母 F·l·o·o·r）
+        if ((s.compare(i, 6, "Floor(") == 0 || s.compare(i, 5, "Ceil(") == 0)
+            && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
+            const bool isFloor = s[i] == 'F';
+            const size_t m = MatchParen(s, i + (isFloor ? 5 : 4), to);
+            if (m != std::string::npos) {
+                out += isFloor ? "\\lfloor " : "\\lceil ";
+                const size_t cs = i + (isFloor ? 6 : 5);
+                if (m == cs) {
+                    if (markerAt == cs && !caretDone) {
+                        out += marker;
+                        caretDone = true;
+                    }
+                    out += kPlaceholder;
+                } else {
+                    out += LinearToLatexCaret(s, identity, cs, m, markerAt,
+                                              caretDone, marker, depth + 1);
+                }
+                out += isFloor ? " \\rfloor" : " \\rceil";
                 identity = false;
                 i = m + 1;
                 continue;
@@ -541,23 +620,80 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
             i += 2;
             continue;
         }
-        // ≤ ≥ ≠（E2 89 A4/A5/A0）与 ∞（E2 88 9E）、∈（E2 88 88）等
-        // Unicode 算符
+        // Unicode 算符/关系/集合/逻辑/大算符 → LaTeX 命令（六十三包④扩
+        // 表：键盘符号页 ∧∨→¬⊗∥⊥∠⊂⊆≇′″ 与常用 ≈∑∏∫ 等此前未转，三字节
+        // 原样进引擎整串失败退旧渲染；未识别序列三字节整体放行）
         if ((unsigned char)s[i] == 0xE2 && i + 2 < s.size()) {
             const unsigned char b1 = (unsigned char)s[i + 1];
             const unsigned char b2 = (unsigned char)s[i + 2];
-            if (b1 == 0x89 && b2 == 0xA4) { out += "\\leq"; i += 3; identity = false; }
-            else if (b1 == 0x89 && b2 == 0xA5) { out += "\\geq"; i += 3; identity = false; }
-            else if (b1 == 0x89 && b2 == 0xA0) { out += "\\neq"; i += 3; identity = false; }
-            else if (b1 == 0x88) {
-                if (b2 == 0x9E) { out += "\\infty"; i += 3; identity = false; }
-                else if (b2 == 0x88) { out += "\\in"; i += 3; identity = false; }
-                else { out += s[i]; ++i; }
+            const char *cmd = nullptr;
+            if (b1 == 0x89) {               // 关系
+                if (b2 == 0xA4) cmd = "\\leq";
+                else if (b2 == 0xA5) cmd = "\\geq";
+                else if (b2 == 0xA0) cmd = "\\neq";
+                else if (b2 == 0x88) cmd = "\\approx";
+                else if (b2 == 0xA1) cmd = "\\equiv";
+                else if (b2 == 0x85) cmd = "\\cong";
+            } else if (b1 == 0x88) {
+                if (b2 == 0x9E) cmd = "\\infty";
+                else if (b2 == 0x88) cmd = "\\in";
+                else if (b2 == 0x89) cmd = "\\notin";
+                else if (b2 == 0x91) cmd = "\\sum";
+                else if (b2 == 0x8F) cmd = "\\prod";
+                else if (b2 == 0xAB) cmd = "\\int";
+                else if (b2 == 0xAE) cmd = "\\oint";
+                else if (b2 == 0xBC) cmd = "\\sim";
+                else if (b2 == 0x9D) cmd = "\\propto";
+                else if (b2 == 0xA7) cmd = "\\wedge";
+                else if (b2 == 0xA8) cmd = "\\vee";
+                else if (b2 == 0xA5) cmd = "\\parallel";
+                else if (b2 == 0xAA) cmd = "\\cup";
+                else if (b2 == 0xA9) cmd = "\\cap";
+                else if (b2 == 0x85) cmd = "\\emptyset";
+                else if (b2 == 0xA0) cmd = "\\angle";
+                else if (b2 == 0x87) cmd = "\\nabla";
+                else if (b2 == 0x82) cmd = "\\partial";
+                else if (b2 == 0x80) cmd = "\\forall";
+                else if (b2 == 0x83) cmd = "\\exists";
+            } else if (b1 == 0x8A) {        // 集合/二元圈算符/几何
+                if (b2 == 0x82) cmd = "\\subset";
+                else if (b2 == 0x83) cmd = "\\supset";
+                else if (b2 == 0x86) cmd = "\\subseteq";
+                else if (b2 == 0x87) cmd = "\\supseteq";
+                else if (b2 == 0x95) cmd = "\\oplus";
+                else if (b2 == 0x97) cmd = "\\otimes";
+                else if (b2 == 0xA5) cmd = "\\perp";
+            } else if (b1 == 0x86) {        // 箭头
+                if (b2 == 0x92) cmd = "\\to";
+                else if (b2 == 0x90) cmd = "\\leftarrow";
+                else if (b2 == 0x94) cmd = "\\leftrightarrow";
+            } else if (b1 == 0x87) {
+                if (b2 == 0x92) cmd = "\\Rightarrow";
+                else if (b2 == 0x94) cmd = "\\Leftrightarrow";
+            } else if (b1 == 0x80 && b2 == 0xB2) {  // ′ → '
+                out += '\'';
+                identity = false;
+                i += 3;
+                continue;
+            } else if (b1 == 0x80 && b2 == 0xB3) {  // ″ → ''
+                out += "''";
+                identity = false;
+                i += 3;
+                continue;
             }
-            else { out += s[i]; ++i; }
-            if (identity == false && i < s.size() && CmdNeedsSpace(s[i])) {
-                out += ' ';
+            if (cmd != nullptr) {
+                out += cmd;
+                identity = false;
+                i += 3;
+                if (i < s.size() && CmdNeedsSpace(s[i])) {
+                    out += ' ';
+                }
+                continue;
             }
+            out += s[i];
+            out += s[i + 1];
+            out += s[i + 2];
+            i += 3;
             continue;
         }
         // ASCII ×（U+00D7 = 0xC3 0x97）→ \times、÷（U+00F7 = 0xC3 0xB7）→ \div
@@ -571,16 +707,23 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
             }
             continue;
         }
-        // ±（U+00B1 = 0xC2 0xB1）→ \pm
-        if ((unsigned char)s[i] == 0xC2 && i + 1 < s.size()
-            && (unsigned char)s[i + 1] == 0xB1) {
-            out += "\\pm";
-            identity = false;
-            i += 2;
-            if (i < s.size() && CmdNeedsSpace(s[i])) {
-                out += ' ';
+        // ±（U+00B1 = 0xC2 0xB1）→ \pm、¬（U+00AC = 0xC2 0xAC）→ \neg
+        if ((unsigned char)s[i] == 0xC2 && i + 1 < s.size()) {
+            if ((unsigned char)s[i + 1] == 0xB1) {
+                out += "\\pm";
+                identity = false;
+                i += 2;
+                if (i < s.size() && CmdNeedsSpace(s[i])) {
+                    out += ' ';
+                }
+                continue;
             }
-            continue;
+            if ((unsigned char)s[i + 1] == 0xAC) {
+                out += "\\neg ";
+                identity = false;
+                i += 2;
+                continue;
+            }
         }
         // LaTeX 特殊字符转义（五十八包）：identity 放行后这些字符若原样
         // 进排版引擎会改变语义（% 注释吞行、# & $ 宏参数/对齐/数学模式切
