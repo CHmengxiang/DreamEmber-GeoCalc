@@ -21,7 +21,7 @@
 // 是主路径、fillText 只兜底系统回退字形（CJK 等 FFI 无字节的字体）。
 //
 // 异步时序：registerFont 提交后触发 repaint；首次布局在字体就绪后进行。
-import { canvasDensity } from './canvasUtil';
+import { canvasDensity, mathFontScale } from './canvasUtil';
 import ratexNative from 'libdreamember.so';
 import font from '@ohos.font';
 import type { UIContext } from '@ohos.arkui.UIContext';
@@ -29,6 +29,7 @@ import type { UIContext } from '@ohos.arkui.UIContext';
 // 五十八包：KaTeX 字形视觉补偿。同标称字号下 KaTeX 的 x-height/cap-height
 // 比系统 sans-serif 小一档（真机 57 包反馈①「渲染出来的字体略微小了点」），
 // em 坐标 ×fontSize 前统一放大。编辑行 MathField 的 RaTeX 路径同用本系数。
+// 六十六包①起再乘宽窗补偿 mathFontScale（ui.isWide，PC/平板观看距离补偿）
 export const RATEX_FONT_SCALE: number = 1.1;
 
 // KaTeX 字体短名 → rawfile 文件名映射（RaTeX FontId::as_str）
@@ -331,6 +332,9 @@ export struct RatexView {
   @Prop @Watch('repaint') dark: boolean = false;
   @Prop @Watch('repaint') fontSize: number = 13;
   @Prop @Watch('repaint') color: string = '#333333';
+  // 六十六包①：宽窗公式字号补偿（ui.isWide ≥640vp 断点，CanvasView 发
+  // 布）——PC/平板观看距离远，同 vp 公式显小；宽窄切换即重绘
+  @StorageProp('ui.isWide') @Watch('repaint') private isWide: boolean = false;
   onResult: (ok: boolean) => void = (_ok: boolean) => {};
   @State private contentW: number = 40;
   @State private contentH: number = 22;
@@ -380,8 +384,9 @@ export struct RatexView {
       return;
     }
     const lay = this.lay as RatexLayoutResult;
-    // 五十八包①：字号视觉补偿（KaTeX 同标称字号偏小一档）
-    const fs = this.fontSize * RATEX_FONT_SCALE;
+    // 五十八包①：字号视觉补偿（KaTeX 同标称字号偏小一档）；六十六包①：
+    // 宽窗再乘 1.35（PC/平板观看距离补偿，窄窗恒 1 与手机一致）
+    const fs = this.fontSize * RATEX_FONT_SCALE * mathFontScale(this.isWide);
     // em → vp：坐标全 em × fontSize；Canvas 坐标 vp 口径（第十五包③终案）。
     // 五十四包③修正：item.y 为盒顶起算（基线在 y=height），直接绘制，
     // 只加 pad 顶边距——不再叠加基线偏移（旧码整体下移一个 ascent 被裁）

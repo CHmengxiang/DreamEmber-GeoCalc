@@ -100,7 +100,7 @@ import { RatexView, ratexConvertLinear, ratexConvertCaret, ratexLayoutLatex,
 // 口径、唯独 font-size 为物理 px（第十五包③四轮证据链终案）——字号
 // ×k 换算、几何与宽度 vp 原值直用。第十七包②起 CanvasView 键盘避让的
 // Area.globalPosition（px）换算也复用本函数
-import { canvasDensity } from './canvasUtil';
+import { canvasDensity, mathFontScale } from './canvasUtil';
 export { canvasDensity };
 
 export interface MathAtom {
@@ -1928,6 +1928,10 @@ export struct MathField {
   // 五十九包③：RaTeX 内容需要比 30 更高的行（上标/根号）时上报宿主伸展
   // 输入行；旧 painter 路径恒 30
   onContentHeight: (h: number) => void = (_h: number) => {};
+  // 六十六包①：宽窗公式字号补偿（ui.isWide ≥640vp 断点，CanvasView 根
+  // onAreaChange 发布）——PC/平板观看距离约为手机两倍，同 vp 公式显小；
+  // 宽窗 RaTeX 编辑行字号 ×1.35，窄窗（含 PC 锁手机比例）与手机一致
+  @StorageProp('ui.isWide') @Watch('onWideChange') private isWide: boolean = false;
   @State private blink: boolean = true;
   @State private contentW: number = 320;
   @State private fieldH: number = 32;
@@ -1950,6 +1954,9 @@ export struct MathField {
                                                      // len 排版成败（负键 -1-len）
 
   aboutToAppear(): void {
+    // 六十六包①：实例可能晚于 ui.isWide 首次发布创建（初始同步不触发
+    // @Watch），按当前宽窄重算一次 RaTeX 字号
+    this.rtxFs = RATEX_FIELD_FS * RATEX_FONT_SCALE * mathFontScale(this.isWide);
     this.restartBlink();
   }
 
@@ -1982,6 +1989,18 @@ export struct MathField {
 
   onDispChange(): void {
     this.restartBlink();
+  }
+
+  // 六十六包①：宽窄切换（PC 最大化/还原、拖拽跨 640vp）——重算 RaTeX
+  // 字号并作废 px 记账（pwCache 存 widthEm×rtxFs 的 px 前缀宽，字号变了
+  // 必须作废；排版结果与探针盒是 em 几何、字号无关免清），重绘即按新
+  // 字号上报行高
+  private onWideChange(): void {
+    this.rtxFs = RATEX_FIELD_FS * RATEX_FONT_SCALE * mathFontScale(this.isWide);
+    this.pwCache.clear();
+    if (this.ready) {
+      this.paint();
+    }
   }
 
   repaint(): void {
@@ -2361,7 +2380,7 @@ export struct MathField {
     Stack({ alignContent: Alignment.Start }) {
       if (this.raw.length === 0 && !this.focused) {
         Text(this.placeholder)
-          .fontSize(13)
+          .fontSize(13 * mathFontScale(this.isWide))
           .fontColor(Theme.faint(this.dark))
           .maxLines(1)
           .margin({ left: 8 })
