@@ -272,7 +272,8 @@ export struct MathKeyboard {
         this.sp('⌫', 'bs')],
       [this.t('e^□', 'epow', 'e^', 0, 1.7), this.t('10^□', 'pow10', '10^', 0, 1.7),
         this.t('ⁿ√□', 'nthroot', 'NthRoot(,)', 1, 1.7),
-        this.gap(), this.t('□_□', 'an', '_', -1),
+        this.gap(), this.t('lim□', 'lim', 'lim(,,)', 3, 1.7),
+        this.t('□_□', 'an', '_', -1),
         this.sp('←', 'left'), this.sp('→', 'right'), this.sp('↵', 'enter')]
     ];
   }
@@ -289,6 +290,8 @@ export struct MathKeyboard {
         this.k('∠'), this.t('⌊⌋', 'floor', 'Floor()', 1),
         this.t('⌈⌉', 'ceil', 'Ceil()', 1)],
       [this.k('['), this.k(']'), this.k(':'), this.k('&'), this.k('@'),
+        this.t('⬜⬜\n⬜⬜', 'matrix', 'Matrix(,;,)', 4, 1.7),
+        this.t('{ cases', 'cases', 'Cases(; )', 2, 1.7),
         this.k('#'), this.k('$'), this.sp('⌫', 'bs')],
       [this.k(';'), this.k("'"), this.k('"'), this.k('′'), this.k('″'),
         this.sp('←', 'left'), this.sp('→', 'right'), this.sp('↵', 'enter')]
@@ -407,6 +410,39 @@ export struct MathKeyboard {
         this.dottedBox(9)
       }
       .alignItems(VerticalAlign.Bottom)
+    } else if (k.cap === 'lim') {
+      // lim□（六十七包：lim(变量,趋值,表达式) 显示模板）
+      Row({ space: 1 }) {
+        Text('lim').fontSize(12).fontColor(this.capFg())
+        Column() {
+          this.dottedBox(6)
+        }
+        .offset({ y: 3 })
+      }
+      .alignItems(VerticalAlign.Bottom)
+    } else if (k.cap === 'matrix') {
+      // 2×2 虚线网格（六十七包：Matrix(,;,,) 显示模板）
+      Column({ space: 1 }) {
+        Row({ space: 1 }) {
+          this.dottedBox(6)
+          this.dottedBox(6)
+        }
+        Row({ space: 1 }) {
+          this.dottedBox(6)
+          this.dottedBox(6)
+        }
+      }
+      .alignItems(HorizontalAlign.Center)
+    } else if (k.cap === 'cases') {
+      // { + 两行虚线框（六十七包：Cases(; ) 显示模板）
+      Row({ space: 1 }) {
+        Text('{').fontSize(15).fontColor(this.capFg())
+        Column({ space: 1 }) {
+          this.dottedBox(7)
+          this.dottedBox(7)
+        }
+      }
+      .alignItems(VerticalAlign.Center)
     } else if (k.cap === 'epow') {
       Row({ space: 0 }) {
         Text('e').fontSize(13).fontColor(this.capFg())

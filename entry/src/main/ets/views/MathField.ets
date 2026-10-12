@@ -924,7 +924,8 @@ export function templateUnwrapRange(raw: string, caret: number): number[] {
 const kTplNames: string[] = ['sqrt', 'abs', 'NthRoot', 'log', 'ln', 'exp',
   'sin', 'cos', 'tan', 'cot', 'sec', 'csc', 'asin', 'acos', 'atan',
   'arcsin', 'arccos', 'arctan', 'sinh', 'cosh', 'tanh', 'floor', 'ceil',
-  'round', 'sgn', 'min', 'max', 'Floor', 'Ceil', 'Derivative', 'Integral'];
+  'round', 'sgn', 'min', 'max', 'Floor', 'Ceil', 'Derivative', 'Integral',
+  'lim', 'Matrix', 'Cases'];
 
 // 空槽模板退格（六十三包①，GGB 空 field ⌫ 删整个模板同款）：NthRoot(,)
 // 内 ⌫ 原先只删逗号 → NthRoot() 无顶层逗号不可转 → 整行渲染斜体字面
@@ -988,8 +989,28 @@ export function emptyTemplateBksp(raw: string, caret: number): number[] {
   }
   const content = raw.substring(open + 1, close);
   const ci = content.indexOf(',');
+  // 六十七包：Matrix/Cases 多槽模板——分号与逗号都算槽界（逗号分列、
+  // 分号分行），槽位四判与 NthRoot 同款：右缘末槽空（content 尾 , 或 ;）
+  // 整删、槽首（紧贴 ,/;）本槽空整删否则退进上一槽、首槽槽首同 NthRoot
+  if (name === 'Matrix' || name === 'Cases') {
+    const atSlotEdge = (ch: string): boolean => {
+      return ch === ',' || ch === ';';
+    };
+    if (atClose) {
+      return close > open + 1 && atSlotEdge(raw.charAt(close - 1))
+        ? [nameStart, close + 1] : [];
+    }
+    if (atSlotEdge(raw.charAt(caret - 1))) {
+      return caret === close || atSlotEdge(raw.charAt(caret))
+        ? [nameStart, close + 1] : [caret - 1];
+    }
+    if (open === caret - 1) {
+      return atSlotEdge(content.charAt(0)) ? [nameStart, close + 1] : [nameStart];
+    }
+    return [];
+  }
   if (name === 'NthRoot' || (name === 'log' && ci >= 0)
-    || ((name === 'Derivative' || name === 'Integral') && ci >= 0)) {
+    || ((name === 'Derivative' || name === 'Integral' || name === 'lim') && ci >= 0)) {
     // 多槽模板（NthRoot 双槽；log 底数/真数；Derivative/Integral 顶层逗号
     // 多参）按槽位四判（六十五包⑤重订）：右缘=末槽界、槽首（紧贴 ','）、
     // 首槽槽首（紧贴 '('）、槽内。当前槽空 → 整删（六十三包口径）；槽内

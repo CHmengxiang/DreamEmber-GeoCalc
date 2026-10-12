@@ -34,6 +34,13 @@ std::string NapiToStr(napi_env env, napi_value v)
 //  · α..ω 希腊字母 → \alpha 等（与内核 IsGreekAt 同字节判定）
 //  · 分式 / 不转：内核 1/2x=(1/2)x 左结合语义与 \frac 可视分组有差，
 //    v1 保持线性（RaTeX 渲染 1/2x 与内核求值一致）
+// 六十七包：
+//  · lim(x, a) → \lim_{x \to a}f（内核 Lim(变量, 趋值, 表达式) 显示语义；
+//    三参 lim(f, x, a) → \lim_{x \to a} f 同款；键盘 lim□ 键插 lim(,,)）
+//  · Matrix(a,b;c,d) / Cases(...; ...) → \begin{pmatrix}/\begin{cases}（
+//    键盘矩阵/分段键插 Matrix(,;,)：顶层逗号分列、顶层分号分行；显示
+//    模板，内核无 Matrix 命令——键盘键只在 MathField 显示层工作，回车
+//    前须删模板（GGB Matrix 同为显示对象语义）
 bool GreekAt(const std::string &s, size_t i, std::string &out)
 {
     // 内核规则：0xCE 开头（U+0370–03FF 希腊区）两字节；0xCF 0x80 = π 单列
@@ -177,7 +184,7 @@ bool KnownFn(const std::string &s, size_t from, size_t to)
         "asin", "acos", "atan", "sin", "cos", "tan", "cot",
         "sec", "csc", "ln", "log", "exp", "min", "max",
         "floor", "ceil", "round", "sgn", "sqrt", "NthRoot", "abs",
-        "Floor", "Ceil", "Derivative", "Integral"
+        "Floor", "Ceil", "Derivative", "Integral", "lim", "Matrix", "Cases"
     };
     if (to <= from) return false;
     const size_t len = to - from;
@@ -561,6 +568,167 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
                     i = m + 1;
                     continue;
                 }
+            }
+        }
+        // lim(变量, 趋值, 表达式) → \lim_{变量 \to 趋值} 表达式（六十七包①，
+        // 键盘 lim□ 键插 lim(,,)；内核 expr 无 lim 函数、命令表无 Lim——
+        // 纯显示模板，回车前删模板走普通算式）。二参 lim(f, x) → \lim_{x} f
+        //（退格中途态）。空槽灰块，探针走基线上下文。≥4 参不转
+        if (s.compare(i, 4, "lim(") == 0
+            && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
+            const size_t m = MatchParen(s, i + 3, to);
+            if (m != std::string::npos) {
+                size_t c1 = std::string::npos;
+                size_t c2 = std::string::npos;
+                bool tooMany = false;
+                int dep = 0;
+                for (size_t q = i + 4; q < m; ++q) {
+                    if (s[q] == '(') ++dep;
+                    else if (s[q] == ')') --dep;
+                    else if (s[q] == ',' && dep == 0) {
+                        if (c1 == std::string::npos) {
+                            c1 = q;
+                        } else if (c2 == std::string::npos) {
+                            c2 = q;
+                        } else {
+                            tooMany = true;
+                            break;
+                        }
+                    }
+                }
+                if (!tooMany) {
+                    const size_t fs2 = c2 != std::string::npos ? c2 + 1 : (c1 != std::string::npos ? c1 + 1 : m);
+                    const size_t fe2 = m;
+                    out += "\\lim_{";
+                    // 下标组：变量（或二参形态的首参）
+                    if (c1 != std::string::npos) {
+                        if (c1 == i + 4) {
+                            if (markerAt == i + 4 && !caretDone) {
+                                out += kCaretMarker;
+                                caretDone = true;
+                            }
+                            out += kPlaceholderIdx;
+                        } else {
+                            out += LinearToLatexCaret(s, identity, i + 4, c1,
+                                                      markerAt, caretDone,
+                                                      kCaretMarker, depth + 1);
+                        }
+                    } else {
+                        if (markerAt == i + 4 && !caretDone) {
+                            out += kCaretMarker;
+                            caretDone = true;
+                        }
+                        out += kPlaceholderIdx;
+                    }
+                    if (c2 != std::string::npos) {
+                        out += " \\to ";
+                        if (c2 == c1 + 1) {
+                            if (markerAt == c2 && !caretDone) {
+                                out += kCaretMarker;
+                                caretDone = true;
+                            }
+                            out += kPlaceholderIdx;
+                        } else {
+                            out += LinearToLatexCaret(s, identity, c1 + 1, c2,
+                                                      markerAt, caretDone,
+                                                      kCaretMarker, depth + 1);
+                        }
+                    }
+                    out += "} ";
+                    // 主体（三参形态第三参；空槽灰块）。二参 lim(f, x)（无
+                    // 第二逗号）主体不存在、直接收尾
+                    if (c2 == std::string::npos) {
+                        identity = false;
+                        i = m + 1;
+                        continue;
+                    }
+                    if (fe2 == fs2) {
+                        if (markerAt == fs2 && !caretDone) {
+                            out += kCaretMarker;
+                            caretDone = true;
+                        }
+                        out += kPlaceholder;
+                    } else {
+                        out += LinearToLatexCaret(s, identity, fs2, fe2,
+                                                  markerAt, caretDone,
+                                                  kCaretMarker, depth + 1);
+                    }
+                    identity = false;
+                    i = m + 1;
+                    continue;
+                }
+            }
+        }
+        // Matrix(a,b;c,d) → \begin{pmatrix}a&b\\c&d\end{pmatrix}、
+        // Cases(...; ...) → \begin{cases}...\end{cases}（六十七包②，键盘
+        // 矩阵/分段键插 Matrix(,;,) / Cases(; )：顶层逗号分列、顶层分号
+        // 分行（与内核参数拆分同深度感知）；空槽灰块，光标探针走基线上下
+        // 文（宿主 dump：pmatrix/cases 嵌套 frac/sqrt/探针 cell 全过）。
+        // 首尾单元格空 → 空单元格直出（引擎排版空 cell OK）
+        if ((s.compare(i, 7, "Matrix(") == 0 || s.compare(i, 6, "Cases(") == 0)
+            && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
+            const bool isMat = s[i] == 'M';
+            const size_t nameLen = isMat ? 7 : 6;
+            // MatchParen 从 '(' 本位起扫（sqrt/NthRoot 同款：s[i+len-1]=='('）
+            const size_t m = MatchParen(s, i + nameLen - 1, to);
+            if (m != std::string::npos) {
+                // 顶层扫描：逗号→列界，分号→行界（引号内不切，与内核同）
+                struct EnvCell { size_t b, e; };
+                std::vector<EnvCell> cells;
+                std::vector<size_t> colEnds;   // 每行末 cell 下标+1（列数校验用）
+                size_t cs = i + nameLen;
+                int dep = 0;
+                bool inStr = false;
+                for (size_t q = i + nameLen; q < m; ++q) {
+                    const char cq = s[q];
+                    if (inStr) {
+                        if (cq == '"') inStr = false;
+                        continue;
+                    }
+                    if (cq == '"') { inStr = true; continue; }
+                    if (cq == '(' || cq == '{') ++dep;
+                    else if (cq == ')' || cq == '}') --dep;
+                    else if ((cq == ',' || cq == ';') && dep == 0) {
+                        cells.push_back({cs, q});
+                        if (cq == ';') colEnds.push_back(cells.size());
+                        cs = q + 1;
+                    }
+                }
+                cells.push_back({cs, m});
+                colEnds.push_back(cells.size());
+                out += isMat ? "\\begin{pmatrix}" : "\\begin{cases}";
+                for (size_t ci = 0; ci < cells.size(); ++ci) {
+                    if (ci > 0) {
+                        // 行界处 \\，列界处 &
+                        bool isRow = false;
+                        for (size_t ce : colEnds) {
+                            if (ce == ci) { isRow = true; break; }
+                        }
+                        out += isRow ? "\\\\ " : " & ";
+                    }
+                    const EnvCell &cl = cells[ci];
+                    // 空格容差：键盘初态 Cases(; ) 的空段是纯空格——修剪后
+                    // 为空按空槽处理（灰块）
+                    size_t cb = cl.b;
+                    size_t ce2 = cl.e;
+                    while (cb < ce2 && (s[cb] == ' ' || s[cb] == '\t')) ++cb;
+                    while (ce2 > cb && (s[ce2 - 1] == ' ' || s[ce2 - 1] == '\t')) --ce2;
+                    if (ce2 == cb) {
+                        if (markerAt == cl.b && !caretDone) {
+                            out += kCaretMarker;
+                            caretDone = true;
+                        }
+                        out += kPlaceholder;
+                    } else {
+                        out += LinearToLatexCaret(s, identity, cb, ce2,
+                                                  markerAt, caretDone,
+                                                  kCaretMarker, depth + 1);
+                    }
+                }
+                out += isMat ? "\\end{pmatrix}" : "\\end{cases}";
+                identity = false;
+                i = m + 1;
+                continue;
             }
         }
         // 循环小数 0.(3)/1.2(34) → 0.\overline{3}（六十五包③，键盘 □̄ 键

@@ -183,5 +183,44 @@ int main()
     expectCaret("Integral(x^2,1", ",2)", "\\int_{1" + M
         + "}^{2} x^{2}\\,dx");                                   // 下限内探针
     expectCaret("0.(", "3)", "0.\\overline{" + M + "3}");        // 循环位内探针
+    // ---- 六十七包：lim / Matrix / Cases 显示模板 ----
+    expect("lim(x,0,x^2)", "\\lim_{x \\to 0} x^{2}");            // lim□ 三参
+    expect("lim(x,0)", "\\lim_{x} ");                            // 二参中途态
+    expect("lim(,0,x)", "\\lim_{" + GI + " \\to 0} x");          // 变量槽空
+    expect("lim(x,,x)", "\\lim_{x \\to " + GI + "} x");          // 趋值槽空
+    expect("lim(x,0,)", "\\lim_{x \\to 0} " + G);                // 主体槽空
+    expect("lim(,,)", "\\lim_{" + GI + " \\to " + GI + "} " + G); // 全空槽
+    expect("lim(f,a,b,c)", "lim(f,a,b,c)");                      // ≥4 参不转
+    expect("2lim(x,0,x)", "2\\lim_{x \\to 0} x");                // 数字后并列
+    expect("asqrt(2)lim(x,0,x)", "asqrt(2)\\lim_{x \\to 0} x");  // ')' 后并列（守卫只挡字母）
+    expect("1/lim(x,0,x)", "\\frac{1}{\\lim_{x \\to 0} x}");     // KnownFn 吸收
+    expect("Matrix(1,2;3,4)",
+        "\\begin{pmatrix}1 & 2\\\\ 3 & 4\\end{pmatrix}");        // 2×2 矩阵
+    expect("Matrix(1;2;3)",
+        "\\begin{pmatrix}1\\\\ 2\\\\ 3\\end{pmatrix}");          // 3×1 列
+    expect("Matrix(1,2,3)",
+        "\\begin{pmatrix}1 & 2 & 3\\end{pmatrix}");              // 1×3 行
+    expect("Matrix(,;,)",
+        "\\begin{pmatrix}" + G + " & " + G + "\\\\ " + G + " & " + G
+        + "\\end{pmatrix}");                                     // 键盘初态全空
+    expect("Matrix(sqrt(2),1/2;\xCF\x80,0)",
+        "\\begin{pmatrix}\\sqrt{2} & \\frac{1}{2}\\\\ \\pi & 0\\end{pmatrix}"); // 嵌套
+    expect("Cases(x>0;-x<0)",
+        "\\begin{cases}x>0\\\\ -x<0\\end{cases}");               // 分段两行
+    expect("Cases(; )",
+        "\\begin{cases}" + G + "\\\\ " + G + "\\end{cases}");    // 键盘初态
+    expect("Cases(x, x>0; 0, x<0)",
+        "\\begin{cases}x & x>0\\\\ 0 & x<0\\end{cases}");        // 段内逗号并列
+    expect("sqrt(Cases(a;b))",
+        "\\sqrt{\\begin{cases}a\\\\ b\\end{cases}}");            // 模板嵌套
+    expectCaret("lim(", ",,)", "\\lim_{" + M + GI + " \\to " + GI
+        + "} " + G);                                             // lim 变量槽探针
+    expectCaret("lim(x,", ",x)", "\\lim_{x \\to " + M + GI + "} x"); // 趋值槽探针
+    expectCaret("Matrix(1,", "2;3,4)",
+        "\\begin{pmatrix}1 & " + M + "2\\\\ 3 & 4\\end{pmatrix}"); // 矩阵格探针
+    expectCaret("Matrix(1,2;", "3,4)",
+        "\\begin{pmatrix}1 & 2\\\\ " + M + "3 & 4\\end{pmatrix}"); // 第二行探针
+    expectCaret("Cases(", "; )", "\\begin{cases}" + M + G
+        + "\\\\ " + G + "\\end{cases}");                         // cases 段探针
     return g_fail;
 }
