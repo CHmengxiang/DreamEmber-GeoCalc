@@ -4,13 +4,13 @@
 
 **梦烬几何**是一款面向学生、教师和数学爱好者的几何与代数图形计算器，采用纯原生 ArkTS + NAPI C++ 内核开发，全部功能离线可用，不申请任何权限、不收集任何数据。
 
-> **v1.0.5 正式版已发布**（标签 [v1.0.5](../../releases/tag/v1.0.5)）：全量功能可用的几何作图 + 代数计算器，新增专业 LaTeX 公式排版渲染（RaTeX 引擎，KaTeX 字形内嵌离线绘制）、PC/平板宽窗三栏布局与公式字号自适应。
+> **v1.0.5 正式版已发布**（标签 [v1.0.5](../../releases/tag/v1.0.5)）：全量功能可用的几何作图 + 代数计算器，新增专业 LaTeX 公式排版渲染（排版引擎采用开源 RaTeX，自研线性串→LaTeX 转换器与 KaTeX 字形内嵌离线绘制）、PC/平板宽窗三栏布局与公式字号自适应。
 
 ## 功能特性
 
 - **几何作图**：点、线段、直线、射线、圆、多边形、角、切线、中点、交点、垂线、垂直平分线、角平分线、向量等对象，以及旋转、位似、平移等几何变换；随时度量长度、距离、面积、周长、斜率与角度；
 - **代数区**：所有对象集中列出，行内改名、改值、改定义，改一步图就变；
-- **函数与命令**：内置数学符号键盘（根号、分式、角度、不等号等），命令提示逐字补全；求导、积分、求根、极值等由本地计算机代数引擎精确计算；公式输入行与代数区采用专业 LaTeX 排版（自研 RaTeX 引擎，KaTeX 字形轮廓内嵌、完全离线渲染）；
+- **函数与命令**：内置数学符号键盘（根号、分式、角度、不等号等），命令提示逐字补全；求导、积分、求根、极值等由本地计算机代数引擎精确计算；公式输入行与代数区采用专业 LaTeX 排版（开源排版引擎 [RaTeX](https://github.com/erweixin/RaTeX) + 自研线性串→LaTeX 转换器，KaTeX 字形轮廓内嵌、完全离线渲染）；
 - **滑动条**：数值参数化，拖动滑块图形实时联动，名称/当前值/最小/最大四字段行内编辑；
 - **表格区**：类电子表格逐格编辑，提交即生成对象，支持与数据视图联动；
 - **双形态布局**：手机竖屏单手操作；平板与 2in1 宽屏自动切换三栏停靠布局，自由窗口任意缩放；宽窗下公式字号自适应放大；
@@ -59,7 +59,7 @@ DreamEmber-GeoCalc/
 │       ├── ets/                 # ArkTS UI（页面、组件、内核交互编排、数学键盘）
 │       ├── cpp/
 │       │   ├── kernel/          # 几何内核 C++（对象模型、表达式求值、视图、文件读写）
-│       │   ├── ratex/           # RaTeX LaTeX 排版引擎 FFI（libratex_ffi.so，Rust 预编译）
+│       │   ├── ratex/           # LaTeX 排版桥（RaTeX 引擎预编译 libratex_ffi.so + 自研转换器 ratex_napi.cpp）
 │       │   ├── cas/             # CAS 薄封装（对接 giac）
 │       │   ├── giac/            # 第三方 CAS 库 giac（GPL-3.0+，静态链接）
 │       │   ├── kernel_napi.cpp  # NAPI 导出层（约 38 个接口）
@@ -90,7 +90,11 @@ g++ -std=c++17 -D_USE_MATH_DEFINES -include cmath -include cstring -I . \
 
 本项目以 **GPL-3.0-or-later** 协议开源，详见 [LICENSE](LICENSE)。
 
-内核静态链接了开源计算机代数库 **giac**（© Bernard Parisse / Institut Fourier，GPL-3.0-or-later；源码随本仓库发布于 `entry/src/main/cpp/giac/`）。依据 GPL 条款，本项目整体以 GNU GPL-3.0-or-later 发布。
+本应用使用以下第三方开源组件（完整声明见 [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)）：
+
+- **giac**（© Bernard Parisse / Institut Fourier，GPL-3.0-or-later）——计算机代数系统，静态链接进内核，源码随本仓库发布于 `entry/src/main/cpp/giac/`；依据 GPL 条款，本项目整体以 GNU GPL-3.0-or-later 发布；
+- **[RaTeX](https://github.com/erweixin/RaTeX)**（© erweixin，MIT）——KaTeX 兼容的纯 Rust LaTeX 数学排版引擎，以预编译 `libratex_ffi.so` 随包分发；
+- **KaTeX 数学字体**（© The KaTeX Authors，SIL Open Font License 1.1）——公式字形，20 个 TTF 随包 rawfile 分发（包内含 `OFL.txt`）。
 
 ## 声明
 

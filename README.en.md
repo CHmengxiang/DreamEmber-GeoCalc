@@ -4,13 +4,13 @@
 
 **DreamEmber GeoCalc** is built with pure-native ArkTS plus an NAPI C++ kernel (no Web components in core features). It works entirely offline, requests no permissions and collects no data.
 
-> **v1.0.5 stable released** (tag [v1.0.5](../../releases/tag/v1.0.5)): full-featured construction + algebra calculator, now with professional LaTeX formula typesetting (self-developed RaTeX engine with embedded KaTeX glyph outlines, rendered fully offline), three-pane wide-window layout for tablets / 2-in-1 PCs, and window-adaptive formula font size.
+> **v1.0.5 stable released** (tag [v1.0.5](../../releases/tag/v1.0.5)): full-featured construction + algebra calculator, now with professional LaTeX formula typesetting (open-source [RaTeX](https://github.com/erweixin/RaTeX) layout engine + self-developed linear→LaTeX converter, with embedded KaTeX glyph outlines rendered fully offline), three-pane wide-window layout for tablets / 2-in-1 PCs, and window-adaptive formula font size.
 
 ## Features
 
 - **Geometric construction**: points, segments, lines, rays, circles, polygons, angles, tangents, midpoints, intersections, perpendiculars, perpendicular/angle bisectors, vectors; transformations (rotation, dilation, translation); measure length, distance, area, perimeter, slope and angle;
 - **Algebra view**: all objects listed with inline rename / revalue / redefine, live-linked to the canvas;
-- **Functions & commands**: built-in math symbol keyboard, incremental command completion; derivative, integral, root and extremum computed exactly by the local CAS engine; formulas rendered with professional LaTeX typesetting (self-developed RaTeX engine, KaTeX glyph outlines embedded, fully offline);
+- **Functions & commands**: built-in math symbol keyboard, incremental command completion; derivative, integral, root and extremum computed exactly by the local CAS engine; formulas rendered with professional LaTeX typesetting (open-source [RaTeX](https://github.com/erweixin/RaTeX) engine + self-developed linear→LaTeX converter, KaTeX glyph outlines embedded, fully offline);
 - **Sliders**: parametrize values, drag to update graphics in real time, four fields edited inline;
 - **Spreadsheet**: cell-by-cell editing, submit to create objects, linked with the data view;
 - **Dual layout**: single-hand portrait on phones; three-pane docked layout on tablets / 2-in-1 with freely resizable windows; formula font size scales up automatically in wide windows;
@@ -38,7 +38,11 @@ The C++ kernel and the statically linked **giac** CAS source are compiled automa
 
 ## License
 
-Released under **GPL-3.0-or-later** (see [LICENSE](LICENSE)). The kernel statically links the open-source CAS library **giac** (© Bernard Parisse / Institut Fourier, GPL-3.0-or-later; source shipped in `entry/src/main/cpp/giac/`), so the whole project is distributed under GNU GPL-3.0-or-later.
+Released under **GPL-3.0-or-later** (see [LICENSE](LICENSE)). Third-party components used (full notices in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)):
+
+- **giac** (© Bernard Parisse / Institut Fourier, GPL-3.0-or-later) — the CAS statically linked into the kernel, source shipped in `entry/src/main/cpp/giac/`; accordingly the whole project is distributed under GNU GPL-3.0-or-later;
+- **[RaTeX](https://github.com/erweixin/RaTeX)** (© erweixin, MIT) — KaTeX-compatible pure-Rust LaTeX math layout engine, shipped prebuilt as `libratex_ffi.so`;
+- **KaTeX math fonts** (© The KaTeX Authors, SIL Open Font License 1.1) — 20 TTFs shipped as rawfile assets (`OFL.txt` included).
 
 ## Disclaimer
 
