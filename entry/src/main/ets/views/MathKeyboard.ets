@@ -470,12 +470,15 @@ export struct MathKeyboard {
 
   build() {
     Column() {
-      // 页签行（最左 ⌨ = 切换到系统键盘，上游 同款入口）
-      Row({ space: 8 }) {
+      // 页签行（最左 ⌨ = 切换到系统键盘，上游 同款入口）。
+      // 六十八包④（真机反馈①）：页签缩宽（padding 12→8）、••• 改窄点距
+      // （真机嫌宽把「完成」挤出）、「完成」改 ×（功能不变 onHide），
+      // ••• 与 × 靠右渲染
+      Row({ space: 6 }) {
         Text('⌨')
           .fontSize(15)
           .fontColor(this.dark ? '#A8ADB5' : '#555555')
-          .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+          .padding({ left: 8, right: 8, top: 4, bottom: 4 })
           .borderRadius(12)
           .backgroundColor(this.dark ? '#3E424A' : '#D0D4DE')
           .stateStyles({
@@ -491,7 +494,7 @@ export struct MathKeyboard {
             .fontSize(13)
             .fontColor(this.tabFg(this.tab === idx))
             .fontWeight(this.tab === idx ? FontWeight.Medium : FontWeight.Normal)
-            .padding({ left: 12, right: 12, top: 4, bottom: 4 })
+            .padding({ left: 8, right: 8, top: 4, bottom: 4 })
             .borderRadius(12)
             .backgroundColor(this.tabBg(this.tab === idx))
             .stateStyles({
@@ -508,10 +511,11 @@ export struct MathKeyboard {
         Blank()
         // 六十八包②：••• = 指令面板入口（安卓 GGB 自带键盘同位同款——
         // 点开全屏指令搜索页，见 CanvasView.commandOverlay）
-        Text('•••')
+        Text('∙∙∙')
           .fontSize(13)
+          .fontWeight(FontWeight.Bold)
           .fontColor(this.dark ? '#A8ADB5' : '#555555')
-          .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+          .padding({ left: 7, right: 7, top: 4, bottom: 4 })
           .borderRadius(12)
           .backgroundColor(this.dark ? '#3E424A' : '#D0D4DE')
           .stateStyles({
@@ -522,10 +526,10 @@ export struct MathKeyboard {
           .onClick(() => {
             this.onCommands();
           })
-        Text('完成')
-          .fontSize(13)
+        Text('×')
+          .fontSize(16)
           .fontColor(this.dark ? '#8FB6FF' : '#007DFF')
-          .padding({ left: 12, right: 4, top: 4, bottom: 4 })
+          .padding({ left: 8, right: 8, top: 2, bottom: 4 })
           .onClick(() => {
             this.onHide();
           })

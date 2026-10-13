@@ -100,8 +100,14 @@ struct Index {
     }
   }
 
-  // 返回键栈：菜单 → 设置 → 无浮层走系统默认（退后台）
+  // 返回键栈：指令面板 → 菜单 → 设置 → 无浮层走系统默认（退后台）。
+  // 六十八包④（真机反馈⑤）：面板浮层期间系统右滑返回只关面板（键盘原样），
+  // 不再穿透收键盘/退桌面——AppStorage 键作 CanvasView → Index 信号
   onBackPress(): boolean {
+    if (AppStorage.get<boolean>('ui.cmdOverlayUp') === true) {
+      AppStorage.setOrCreate('evt.cmdOverlayBack', Date.now());
+      return true;
+    }
     if (this.menuOpen) {
       this.menuOpen = false;
       return true;

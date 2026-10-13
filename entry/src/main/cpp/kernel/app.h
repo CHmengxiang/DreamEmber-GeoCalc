@@ -171,6 +171,11 @@ public:
     GeoElement *lookup(const std::string &label) const;
     GeoPoint *lookupPoint(const std::string &label) const;
 
+    // 六十八包④：命令函数实参解析——先查函数对象（label），查不到且形如
+    // 含 x 的表达式时构造匿名函数（GGB 语义：Integral(x^2, 1, 6) 直接
+    // 以表达式作函数）。失败置 lastError 返回 nullptr
+    GeoFunction *resolveFunctionArg(const std::string &arg);
+
     // N4 .ggb 读写：构造列表 ⇄ GeoGebra 兼容 XML（子集；N5 起含射线/向量/
     // 多边形/角/滑动条/交点/变换像，命令经 cmdName/cmdArgs 通用重放）
     std::string getXml() const;

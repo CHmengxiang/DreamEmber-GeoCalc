@@ -217,6 +217,9 @@ export struct CanvasView {
   @StorageProp('evt.saveGgb') @Watch('onSaveGgbEvt') private saveGgbTick: number = 0;
   // 第五包：CAS 视图（☰ 菜单"视图"分组发起，上游经典版 同位）
   @StorageProp('evt.openCas') @Watch('onOpenCasEvt') private openCasTick: number = 0;
+  // 六十八包④（真机反馈⑤）：面板浮层的系统返回拦截信号（Index.onBackPress
+  // 打点，这里分级关闭：二级页先回分类列表，一级才关面板）+ 显隐上报
+  @StorageProp('evt.cmdOverlayBack') @Watch('onCmdOverlayBack') private cmdOverlayBackTick: number = 0;
   // 反馈②：左上浮层 ↶/↷ 状态（快照栈深度，syncUndo 刷新，@Prop 直传 CanvasStage）
   @State private canUndo: boolean = false;
   @State private canRedo: boolean = false;
@@ -1310,7 +1313,7 @@ export struct CanvasView {
           onSwitchSystem: (): void => this.toggleToolAskKeyboard(),
           // 六十八包②：弹窗键盘 ••• 同样开指令面板（插入路由走 askInsert）
           onCommands: (): void => {
-            this.commandOverlayUp = true;
+            this.openCommandOverlay();
           },
           onCaretLeft: (): void => this.askCaretTo(this.toolAskCaretA - 1),
           onCaretRight: (): void => this.askCaretTo(this.toolAskCaretA + 1)
@@ -1576,6 +1579,20 @@ export struct CanvasView {
       this.showPanel = true;
       this.panelTab = 'cas';
     });
+  }
+
+  // 六十八包④（真机反馈⑤）：面板浮层期间的系统返回——分级关闭（二级页
+  // 先回分类列表，一级才关面板；键盘状态零扰动）
+  private onCmdOverlayBack(): void {
+    if (!this.commandOverlayUp) {
+      return;
+    }
+    if (this.commandCat.length > 0 || this.commandQuery.trim().length > 0) {
+      this.commandCat = '';
+      this.commandQuery = '';
+    } else {
+      this.closeCommandOverlay();
+    }
   }
 
   // ---- N4 .ggb 文件（打开/保存） ----
@@ -1973,7 +1990,7 @@ export struct CanvasView {
           onSwitchSystem: (): void => this.kbKeySwitch(),
           // 六十八包②：••• 开指令面板（全屏搜索页浮层，见 commandOverlay）
           onCommands: (): void => {
-            this.commandOverlayUp = true;
+            this.openCommandOverlay();
           },
           onCaretLeft: (): void => this.kbKeyCaret(-1),
           onCaretRight: (): void => this.kbKeyCaret(1)
@@ -2076,21 +2093,40 @@ export struct CanvasView {
 
   private closeCommandOverlay(): void {
     this.commandOverlayUp = false;
+    AppStorage.setOrCreate('ui.cmdOverlayUp', false);
     this.commandQuery = '';
     this.commandCat = '';
+  }
+
+  private openCommandOverlay(): void {
+    this.commandOverlayUp = true;
+    AppStorage.setOrCreate('ui.cmdOverlayUp', true);
   }
 
   @Builder
   private commandOverlay() {
     Stack({ alignContent: Alignment.Top }) {
-      // 全屏底（不透光，覆盖画布与键盘；← 或系统返回关闭）
+      // 全屏底（六十八包④真机反馈②：原 100% 高盖不住浮层底下的键盘——
+      // mathKbOverlay 锚窗口底且 expandSafeArea 下探导航条避让区，总高超出
+      // 页面。改 expandSafeArea 双边全屏 + 底部负偏移 navBottomVp 兜住下探
+      // 段，并在键盘区间垫同色条，彻底不透底；← 或系统返回关闭）
       Column()
         .width('100%')
         .height('100%')
         .backgroundColor(this.dark ? '#202226' : '#F1F3F7')
+        .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.TOP, SafeAreaEdge.BOTTOM])
         .onClick(() => {
           // 吞掉穿透点击，不关闭（GGB 同款：点空白不退）
         })
+      // 底部兜底条：盖住 mathKbOverlay 下探导航避让区露出的键盘顶边
+      //（navGap 为负值下探量，abs 即键盘在页面底之下的露出高度）
+      Column()
+        .width('100%')
+        .height(Math.abs(this.navBottomVp) + 2)
+        .backgroundColor(this.dark ? '#202226' : '#F1F3F7')
+        .align(Alignment.Bottom)
+        .hitTestBehavior(HitTestMode.Block)
+        .expandSafeArea([SafeAreaType.SYSTEM], [SafeAreaEdge.BOTTOM])
       Column() {
         // 顶栏：← + 搜索框（占位随上下文分类，GGB「在 所有指令 中搜索」）
         Row({ space: 10 }) {

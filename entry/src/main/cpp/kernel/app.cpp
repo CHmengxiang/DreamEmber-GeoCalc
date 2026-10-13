@@ -1932,7 +1932,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
     // Derivative(f) / Derivative(f, n)：数值导数（中心差分，n 阶迭代）。
     // 产物为 alt 闭包函数（源重定义后求值自动取最新定义），src = f'(x) 样式。
     if (cmdLower == "derivative" && (a.size() == 1 || a.size() == 2)) {
-        GeoFunction *f = dynamic_cast<GeoFunction *>(lookup(a[0]));
+        GeoFunction *f = resolveFunctionArg(a[0]);
         if (!f) { lastError = "Derivative 需要（函数）或（函数, 阶数）"; made = nullptr; return true; }
         int n = 1;
         if (a.size() == 2) {
@@ -2033,7 +2033,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
     }
     // Integral(f) / Integral(f, a, b)：定积分（Simpson 1/3，512 段）→ 数值对象
     if (cmdLower == "integral" && (a.size() == 1 || a.size() == 3)) {
-        GeoFunction *f = dynamic_cast<GeoFunction *>(lookup(a[0]));
+        GeoFunction *f = resolveFunctionArg(a[0]);
         if (!f) { lastError = "Integral 需要（函数）或（函数, 下限, 上限）"; made = nullptr; return true; }
         double lo = 0, hi = 0;
         GeoNumeric *loN = nullptr, *hiN = nullptr;
@@ -2069,7 +2069,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
     // Root(f, a, b)：区间内全部零点（无名多输出，上游 语义；保存重放的
     // Root(f, a, b, k) 第 n 形式只建第 k 个）。Root(f, 起点)：起点附近首个零点。
     if (cmdLower == "root" && (a.size() == 2 || a.size() == 3 || a.size() == 4)) {
-        GeoFunction *f = dynamic_cast<GeoFunction *>(lookup(a[0]));
+        GeoFunction *f = resolveFunctionArg(a[0]);
         if (!f) { lastError = "Root 需要（函数, a, b）或（函数, 起点）"; made = nullptr; return true; }
         double x0 = 0, x1 = 0;
         if (!numArg(a[1], x0)) { lastError = "求根区间起点不是数: " + a[1]; made = nullptr; return true; }
@@ -2195,7 +2195,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
     // Extremum(f, a, b)：区间内极值点（导数变号扫描 + 二分）→ 点列表；
     // 保存重放的 Extremum(f, a, b, k) 第 n 形式只建第 k 个
     if (cmdLower == "extremum" && (a.size() == 3 || a.size() == 4)) {
-        GeoFunction *f = dynamic_cast<GeoFunction *>(lookup(a[0]));
+        GeoFunction *f = resolveFunctionArg(a[0]);
         if (!f) { lastError = "Extremum 需要（函数, a, b）"; made = nullptr; return true; }
         double x0 = 0, x1 = 0;
         if (!numArg(a[1], x0) || !numArg(a[2], x1)) {
@@ -2368,7 +2368,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
     // Integral(f, a, b) / Integral(f, b) → 定积分值 + 曲线下填充（批次④）。
     // 上限用 Integral(f, b) 形式时下限取 0；a/b 为数或滑动条（依随重算+重绘）
     if (cmdLower == "integral" && (a.size() == 2 || a.size() == 3)) {
-        GeoFunction *f = dynamic_cast<GeoFunction *>(lookup(a[0]));
+        GeoFunction *f = resolveFunctionArg(a[0]);
         if (!f || !f->definable()) { lastError = "Integral 需要（函数）参数"; made = nullptr; return true; }
         GeoNumeric *na = dynamic_cast<GeoNumeric *>(lookup(a[1]));
         GeoNumeric *nb = a.size() == 3 ? dynamic_cast<GeoNumeric *>(lookup(a[2])) : nullptr;
@@ -2580,7 +2580,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             made = nullptr;
             return true;
         }
-        GeoFunction *f = dynamic_cast<GeoFunction *>(lookup(a[0]));
+        GeoFunction *f = resolveFunctionArg(a[0]);
         if (!f) { lastError = "未找到函数 " + a[0]; made = nullptr; return true; }
         const std::string giacCmd = cmdLower;   // giac 内置即小写同名命令
         const std::string ggbCmd = cmdLower == "simplify" ? "Simplify"
@@ -2868,6 +2868,34 @@ GeoPoint *Kernel::lookupPoint(const std::string &label) const
 {
     GeoElement *e = lookup(label);
     return e && e->type() == GeoType::Point ? static_cast<GeoPoint *>(e) : nullptr;
+}
+
+// 六十八包④：命令函数实参解析（GGB 语义对齐）。函数命令（Derivative/
+// Integral/Root/Extremum/Simplify…）的函数槽此前只认「已定义函数对象」，
+// 直接填表达式 Integral(x^2, 1, 6) 报「需要（函数）」——GGB 支持表达式
+// 直填。规则：先按对象名查（命中函数对象即还回）；查不到时按含 x 表达式
+// 解析，成功则构造不进构造列表的匿名函数（仅作命令实参，无标签不显示；
+// 依随语义：匿名无依随源，常量表达式即刻定型，与 GGB 直填行为一致）。
+// 解析失败/不含 x 置 lastError 返回 nullptr
+GeoFunction *Kernel::resolveFunctionArg(const std::string &arg)
+{
+    if (GeoFunction *f = dynamic_cast<GeoFunction *>(lookup(arg))) {
+        if (!f->ineqOp && !f->ineqTwoVar && f->definable()) {
+            return f;
+        }
+        lastError = "函数实参须为可绘函数（不等式/区域不可）: " + arg;
+        return nullptr;
+    }
+    Expr body;
+    std::string err;
+    if (!body.parse(arg, err) || !body.containsX()) {
+        lastError = "未找到函数 " + arg;
+        return nullptr;
+    }
+    auto anon = std::make_unique<GeoFunction>();
+    anon->src = arg;
+    anon->body = std::move(body);
+    return anon.release();
 }
 
 void Kernel::deleteLast()
