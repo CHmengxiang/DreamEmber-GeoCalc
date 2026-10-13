@@ -272,6 +272,35 @@ bool FnArity(const std::string &n, int &lo, int &hi)
     return false;
 }
 
+// 命令调用名判定（六十九包②）：tryCommand 全集的小写名。表达式解析遇
+// Name( 命中此表时不再报「未知函数」，改报命令语义的专用文案（命令不可
+// 嵌入表达式/作为对象引用参与运算）——「Integral(x,1,6)x 在 Integral 右边
+// 插字符」类编辑破坏的报错从误导的「未知函数」改为可理解提示。
+// 大小写不敏感（与命令分发 ToLower 同规）
+bool IsCommandCallName(const std::string &n)
+{
+    static const char *kCmds[] = {
+        "midpoint", "point", "line", "segment", "ray", "vector", "circle",
+        "perpendicularline", "perpendicularbisector", "anglebisector", "angle",
+        "polygon", "tangent", "intersect", "distance", "slope", "length",
+        "area", "perimeter", "circumference", "radius", "translate", "rotate",
+        "reflect", "dilate", "slider", "startanimation", "stopanimation",
+        "derivative", "nthroot", "integral", "root", "extremum", "text",
+        "sequence", "element", "first", "last", "sort", "unique", "reverse",
+        "mean", "median", "sum", "product", "sd", "variance",
+        "simplify", "expand", "factor"
+    };
+    std::string low;
+    low.reserve(n.size());
+    for (char ch : n) {
+        low += (char)tolower((unsigned char)ch);
+    }
+    for (const char *c : kCmds) {
+        if (low == c) return true;
+    }
+    return false;
+}
+
 long long GcdLL(long long a, long long b)
 {
     a = a < 0 ? -a : a;
@@ -680,7 +709,15 @@ private:
                 }
                 int lo = 0, hi = 0;
                 if (!FnArity(name, lo, hi)) {
-                    err = "未知函数 " + name;
+                    // 六十九包②：命令名（Integral 等）不是函数——独立出现
+                    // 在表达式里=命令串被编辑破坏或嵌进运算（GGB 亦不允许
+                    // 命令结果直接参与表达式），给语义明确的文案替代
+                    // 「未知函数」误导
+                    if (IsCommandCallName(name)) {
+                        err = name + " 是指令，只能单独使用，不能嵌在表达式中";
+                    } else {
+                        err = "未知函数 " + name;
+                    }
                     return nullptr;
                 }
                 if ((int)args.size() < lo || (int)args.size() > hi) {

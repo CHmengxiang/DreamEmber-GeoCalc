@@ -162,7 +162,7 @@ import window from '@ohos.window';
 //（垫底已退役，避让全靠系统抬升），下方 closeToolAsk 的 OFFSET 恢复保留
 // 作防御性复位
 import { KeyboardAvoidMode } from '@ohos.arkui.UIContext';
-import { canvasDensity, functionOpenBefore, hasIdentBase, isTypewriterCh,
+import { canvasDensity, commandCallNameAt, functionOpenBefore, hasIdentBase, isTypewriterCh,
   matchParenBackward, MathCaretStop, mathCaretStops, parseMathAtoms,
   scriptContentRange, scriptRunEndAtCaret, scriptStructureEnd,
   templateUnwrapRange,
@@ -1842,6 +1842,14 @@ export struct CanvasView {
   private askKbZeroAt: number = 0;          // 轮询中首次观察到 kbH=0（ms）
   private askKbRetried: boolean = false;    // 强制窗口补清焦标记
   private syncKbSpacer(): void {
+    // 六十九包③（真机反馈①）：指令面板浮层期间冻结键盘管线——浮层搜索框
+    // 抢焦会让代数行 onBlur → inputFocused=false，本函数随即把
+    // mathKbVisible=false 收掉自带键盘（面板底下键盘消失=用户看到的「一滑
+    // 键盘就没了」）。面板开时不写任何键盘状态，焦点变化延迟到面板关闭后
+    // 由既有链路自然消化（面板只插字符/查看，不依赖实时焦点）
+    if (this.commandOverlayUp) {
+      return;
+    }
     // 二十九包②：滑动条行内编辑字段聚焦（自带键盘浮层）→ 按键盘实高整垫。
     // 钉底输入行的实测反解不适用——目标字段在列表顶部，抽屉整体随垫高上移
     // 后字段必在浮层之上；画布相应压缩
@@ -2013,10 +2021,13 @@ export struct CanvasView {
   }
 
   private mathKbOverlayUp(): boolean {
+    // 六十九包③：面板浮层期间键盘照常挂载（浮层全屏盖住它）——搜索框
+    // 抢焦翻掉的 inputFocused 不收键盘（syncKbSpacer 同步冻结），关面板
+    // 后焦点态由既有链路自然恢复
     return this.mathKbVisible && !this.useSysKeyboard
       && this.toolAskKind === ''
       && (this.inputFocused || this.sheetKbFocus || this.tableKbFocus
-        || this.slideKbFocus);
+        || this.slideKbFocus || this.commandOverlayUp);
   }
 
   // ---- 六十八包②：GGB 式指令面板（••• 全屏搜索页）----
@@ -2047,10 +2058,13 @@ export struct CanvasView {
       });
     }
     if (this.commandCat.length > 0) {
-      const inCat = ALL_COMMANDS.filter((c: CommandMeta) => c.category === this.commandCat);
+      // 六十九包④：「所有指令」伪分类=全集（GeoGebra 分类已并入）；其余
+      // 分类按 id 过滤。最近使用置顶（仅分类页；按 rec 序、其余保持数据序）
+      const inCat = this.commandCat === 'all'
+        ? ALL_COMMANDS.slice()
+        : ALL_COMMANDS.filter((c: CommandMeta) => c.category === this.commandCat);
       const rec = this.commandRecent();
-      // 最近使用置顶（仅分类页；按 rec 序、其余保持数据序）
-      return inCat.slice().sort((a: CommandMeta, b: CommandMeta) => {
+      return inCat.sort((a: CommandMeta, b: CommandMeta) => {
         const ra = rec.indexOf(a.name);
         const rb = rec.indexOf(b.name);
         if (ra >= 0 && rb >= 0) {
@@ -2630,6 +2644,45 @@ export struct CanvasView {
         this.mathCaretScript);
       this.activeCtrl().caretPosition(this.selStart);
       return;
+    }
+    // 六十九包②：命令调用名（Integral( …）名内/名后紧贴 '(' 处不接收
+    // 插入——点触/←→ 停靠已在 mathCaretStops 禁站，此处兜底程序化设位
+    // （caretPosition 旧值重放等）：名内 → 吸到名左；紧贴 '(' → 吸到组内
+    // 首参槽。防插字符把命令串改坏（"IIntegral(..."/"Integral(x,1,6)x"
+    // 提交报「未知函数」）
+    if (a === b && t.length > 0) {
+      let na = -1;
+      let nl = 0;
+      // 找覆盖 a 的命令调用名：a 落 [start, start+nameLen] 区间即命中
+      for (let j = Math.max(0, a - 17); j <= a && j < s.length; j++) {
+        const L = commandCallNameAt(s, j);
+        if (L > 0 && a > j && a <= j + L) {
+          na = j;
+          nl = L;
+          break;
+        }
+      }
+      if (na >= 0) {
+        this.selStart = na;
+        this.selEnd = na;
+        this.mathCaret = na;
+        this.mathCaretScript = this.deriveCaretScript(s, na,
+          this.mathCaretScript);
+        this.activeCtrl().caretPosition(na);
+        return;
+      }
+      // 紧贴命令 '(' 右侧（a = 名尾 + 1 恰是 '(' 下标）→ 吸进组内首参槽
+      const L2 = commandCallNameAt(s, a);
+      if (L2 > 0) {
+        const inPos = a + L2 + 1;
+        this.selStart = inPos;
+        this.selEnd = inPos;
+        this.mathCaret = inPos;
+        this.mathCaretScript = this.deriveCaretScript(s, inPos,
+          this.mathCaretScript);
+        this.activeCtrl().caretPosition(inPos);
+        return;
+      }
     }
     // 上游 newScript 同款（第十包②）：光标紧邻同型 ^/_ 结构时只进框、
     // 不再嵌套——框前 → 进框首，框尾 → 进框尾；框外紧贴同型结构尾 →

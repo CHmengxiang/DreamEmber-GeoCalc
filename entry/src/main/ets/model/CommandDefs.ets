@@ -27,7 +27,9 @@ export interface CommandMeta {
 // 分类对齐截图（相对顺序同 GGB：数学函数/所有指令/3D/GeoGebra/代数/优化
 // 指令/几何/几何变换/函数与微积分/列表/向量与矩阵/图表；3D/优化指令/图表
 // 内核未支持不展示，统计类 GGB 在桌面版单列，这里保留）。'all' 为伪分类
-// =全集，对应 GGB 的「所有指令」
+// =全集，对应 GGB 的「所有指令」。六十九包④（真机反馈⑤）：「GeoGebra」
+// 分类删除——非 GGB 官方语义（官方该类是特有/实验指令），四条成员并进
+// 「所有指令」（category='all' 直接可搜可点，无独立分类页）
 export interface CommandCategory {
   id: string;
   name: string;
@@ -36,7 +38,6 @@ export interface CommandCategory {
 export const COMMAND_CATEGORIES: CommandCategory[] = [
   { id: 'mathfn', name: '数学函数' },
   { id: 'all', name: '所有指令' },
-  { id: 'script', name: 'GeoGebra' },
   { id: 'algebra', name: '代数' },
   { id: 'geometry', name: '几何' },
   { id: 'transform', name: '几何变换' },
@@ -243,16 +244,16 @@ export const COMMANDS: CommandMeta[] = [
 
   // ---- GeoGebra（slider 1885 / startanimation 1908 / stopanimation 1921 /
   // text 2284）----
-  { name: 'Slider', category: 'script', ins: 'Slider(,)', back: 2,
+  { name: 'Slider', category: 'all', ins: 'Slider(,)', back: 2,
     sig: 'Slider( <最小值>, <最大值> [, <步长>] )', desc: '创建滑动条数值',
     keys: 'slider 滑动条 滑块' },
-  { name: 'StartAnimation', category: 'script', ins: 'StartAnimation()', back: 1,
+  { name: 'StartAnimation', category: 'all', ins: 'StartAnimation()', back: 1,
     sig: 'StartAnimation()', desc: '启动滑动条/点动画',
     keys: 'startanimation 启动动画 动画' },
-  { name: 'StopAnimation', category: 'script', ins: 'StopAnimation()', back: 1,
+  { name: 'StopAnimation', category: 'all', ins: 'StopAnimation()', back: 1,
     sig: 'StopAnimation()', desc: '停止动画',
     keys: 'stopanimation 停止动画 动画' },
-  { name: 'Text', category: 'script', ins: 'Text("")', back: 1,
+  { name: 'Text', category: 'all', ins: 'Text("")', back: 1,
     sig: 'Text( "文本" [, 位置] )', desc: '在绘图区显示文本',
     keys: 'text 文本 文字 标注' },
 ];

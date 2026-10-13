@@ -1046,6 +1046,51 @@ export function isTypewriterCh(c: string): boolean {
   return isAlnumCh(c) || c === '_' || isGreekCh(c);
 }
 
+// ---- 六十九包②：命令调用名一体停靠（GGB 函数命令名不可点入/拆开）----
+// 内核命令名集（kernel app.cpp tryCommand 全集 + 表达式无含义的显示模板
+// lim/Matrix/Cases）：raw 中 Name( 形态且名前非字母时，整名只产「名左」
+// 一站——点触/←→ 都不能落名内或名后括号前，防插字符把命令串改坏成
+// "IIntegral(...)/Integral(x,1,6)x"（提交报「未知函数 Integral」）
+export const K_CMD_CALL_NAMES: string[] = [
+  'midpoint', 'point', 'line', 'segment', 'ray', 'vector', 'circle',
+  'perpendicularline', 'perpendicularbisector', 'anglebisector', 'angle',
+  'polygon', 'tangent', 'intersect', 'distance', 'slope', 'length', 'area',
+  'perimeter', 'circumference', 'radius', 'translate', 'rotate', 'reflect',
+  'dilate', 'slider', 'startanimation', 'stopanimation', 'derivative',
+  'nthroot', 'floor', 'ceil', 'integral', 'root', 'extremum', 'text',
+  'sequence', 'element', 'first', 'last', 'sort', 'unique', 'reverse',
+  'mean', 'median', 'min', 'max', 'sum', 'product', 'sd', 'variance',
+  'simplify', 'expand', 'factor', 'lim', 'matrix', 'cases',
+];
+
+// raw 的 start 处是否是「命令调用名」开头（Name( 且名前非字母数字下划线，
+// 与内核命令分发 cmdIsName 同判据；大小写不敏感）。命中返回名长，否则 -1
+export function commandCallNameAt(raw: string, start: number): number {
+  const po = raw.indexOf('(', start);
+  if (po < 0) {
+    return -1;
+  }
+  if (po > start + 16) {
+    return -1;   // 最长命令名 perpendicularline(16)
+  }
+  if (start > 0) {
+    const p = raw.charAt(start - 1);
+    if (isAlnumCh(p) || p === '_') {
+      return -1;
+    }
+  }
+  const name = raw.substring(start, po).toLowerCase();
+  if (name.length === 0) {
+    return -1;
+  }
+  for (const c of name) {
+    if (!isAlnumCh(c) && c !== '_') {
+      return -1;
+    }
+  }
+  return K_CMD_CALL_NAMES.indexOf(name) >= 0 ? po - start : -1;
+}
+
 // ---- 第十包②：上游 editor-base（CursorController / InputController）----
 // ---- 语义的线性移植：光标 = 原文位置 + 框内/框外双态 ----
 
@@ -1162,6 +1207,17 @@ export function mathCaretStops(raw: string): MathCaretStop[] {
       if (a.ch === 'l' && logTemplateComma(raw, a.start) >= 0) {
         push(a.start, false);
         j += 3;
+        continue;
+      }
+      // 六十九包②：命令调用名一体（Derivative(/Integral(/Sequence( …），
+      // GGB 命令名不可点入/拆开——整名只产「名左」一站，名内与 '(' 前均
+      // 不可停靠（←→ 与点触同规），插字符改不坏命令串
+      if (commandCallNameAt(raw, a.start) === a.end - a.start) {
+        push(a.start, false);
+        // 命令组整体名+参一站进内容：名内跳过，'(' 与实参停靠交由后续
+        // 原子常规产站（'(' 原子 start 停靠 = 名后即括号内首槽——保留，
+        // 槽内编辑是合法操作；禁的是名内/名后紧贴 '(' 处）
+        j++;
         continue;
       }
       push(a.start, false);
