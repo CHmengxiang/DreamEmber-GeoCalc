@@ -2006,7 +2006,20 @@ export struct CanvasView {
   // 结构对齐安卓 GGB 第二张截图：顶栏 ← + 「在 {分类} 中搜索」输入框；
   // 默认态分类列表，选中分类或输入关键词后为命令列表（名称+签名+描述）。
   // 点选 → 关面板 → kbKeyInsert/askInsert 插入（键盘保持弹出、焦点不动，
-  // 插入后光标落首参数槽）。纯 @State 驱动，不触焦点/垫高管线
+  // 插入后光标落首参数槽）。纯 @State 驱动，不触焦点/垫高管线。
+  // 六十八包③：最近使用置顶——AppStorage 持久化 CSV（跨会话），插入即
+  // 前插去重、截前 5；分类页与搜索结果按此序提升
+  private commandRecent(): string[] {
+    const csv = AppStorage.get<string>('ui.cmdRecent') ?? '';
+    return csv.length > 0 ? csv.split(',') : [];
+  }
+
+  private commandPushRecent(name: string): void {
+    const cur = this.commandRecent().filter((n: string) => n !== name);
+    cur.unshift(name);
+    AppStorage.setOrCreate('ui.cmdRecent', cur.slice(0, 5).join(','));
+  }
+
   private commandFiltered(): CommandMeta[] {
     const q = this.commandQuery.trim().toLowerCase();
     if (q.length > 0) {
@@ -2017,7 +2030,23 @@ export struct CanvasView {
       });
     }
     if (this.commandCat.length > 0) {
-      return ALL_COMMANDS.filter((c: CommandMeta) => c.category === this.commandCat);
+      const inCat = ALL_COMMANDS.filter((c: CommandMeta) => c.category === this.commandCat);
+      const rec = this.commandRecent();
+      // 最近使用置顶（仅分类页；按 rec 序、其余保持数据序）
+      return inCat.slice().sort((a: CommandMeta, b: CommandMeta) => {
+        const ra = rec.indexOf(a.name);
+        const rb = rec.indexOf(b.name);
+        if (ra >= 0 && rb >= 0) {
+          return ra - rb;
+        }
+        if (ra >= 0) {
+          return -1;
+        }
+        if (rb >= 0) {
+          return 1;
+        }
+        return 0;
+      });
     }
     return [];
   }
@@ -2035,6 +2064,7 @@ export struct CanvasView {
   }
 
   private commandInsert(c: CommandMeta): void {
+    this.commandPushRecent(c.name);
     // 弹窗参数框打开时路由到弹窗字段，否则按活跃上下文分发（与键盘同路）
     if (this.toolAskKind !== '') {
       this.askInsert(c.ins, c.back, '');
@@ -2138,10 +2168,20 @@ export struct CanvasView {
               ListItem() {
                 Row({ space: 12 }) {
                   Column({ space: 3 }) {
-                    Text(c.name)
-                      .fontSize(15)
-                      .fontWeight(FontWeight.Medium)
-                      .fontColor(Theme.text(this.dark))
+                    Row({ space: 6 }) {
+                      Text(c.name)
+                        .fontSize(15)
+                        .fontWeight(FontWeight.Medium)
+                        .fontColor(Theme.text(this.dark))
+                      if (this.commandRecent().indexOf(c.name) >= 0) {
+                        Text('最近')
+                          .fontSize(9)
+                          .fontColor(Theme.accent(this.dark))
+                          .border({ width: 0.5, color: Theme.accent(this.dark) })
+                          .borderRadius(4)
+                          .padding({ left: 4, right: 4, top: 1, bottom: 1 })
+                      }
+                    }
                     Text(c.sig)
                       .fontSize(11)
                       .fontColor(Theme.sub(this.dark))
