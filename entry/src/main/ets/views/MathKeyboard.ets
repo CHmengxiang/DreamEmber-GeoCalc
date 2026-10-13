@@ -90,6 +90,8 @@ export struct MathKeyboard {
   onCaretRight: () => void = () => {};
   // 上游 同款：键盘上的"系统键盘"切换键（⌨），切到系统输入法
   onSwitchSystem: () => void = () => {};
+  // 六十八包②：••• 指令面板入口（安卓 GGB 自带键盘右上角同位）
+  onCommands: () => void = () => {};
   // 页序对齐 上游官方：123 → f(x) → abc → #&¬（第八包真机反馈⑤）
   @State private tab: number = 0;             // 0=123 1=f(x) 2=abc 3=#&¬
   @State private upperCase: boolean = false;  // abc/希腊页大小写（上游 惯例点大写需 shift）
@@ -504,6 +506,22 @@ export struct MathKeyboard {
             })
         }, (name: string) => name)
         Blank()
+        // 六十八包②：••• = 指令面板入口（安卓 GGB 自带键盘同位同款——
+        // 点开全屏指令搜索页，见 CanvasView.commandOverlay）
+        Text('•••')
+          .fontSize(13)
+          .fontColor(this.dark ? '#A8ADB5' : '#555555')
+          .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+          .borderRadius(12)
+          .backgroundColor(this.dark ? '#3E424A' : '#D0D4DE')
+          .stateStyles({
+            pressed: {
+              .backgroundColor(this.dark ? '#4E5866' : '#C2C8D4')
+            }
+          })
+          .onClick(() => {
+            this.onCommands();
+          })
         Text('完成')
           .fontSize(13)
           .fontColor(this.dark ? '#8FB6FF' : '#007DFF')

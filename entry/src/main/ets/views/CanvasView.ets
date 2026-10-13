@@ -144,6 +144,8 @@ import { TablePanel } from './TablePanel';
 import { CasPanel } from './CasPanel';
 import { BottomTabs, TABS, TabDef } from './BottomTabs';
 import { MathKeyboard, MathKbHooks, MATH_KB_HEIGHT, KB_WIDE_MAX_WIDTH } from './MathKeyboard';
+// 六十八包②：指令面板数据源（GGB 式 ••• 全屏搜索页）
+import { CommandMeta, CommandCategory, COMMAND_CATEGORIES, ALL_COMMANDS } from '../model/CommandDefs';
 import { StyleBar } from './StyleBar';
 // 第二十二包②：分隔条/抽屉把手鼠标悬停改变光标（↔/↕）——ArkUI 无组件级
 // 光标属性，用 multimodalInput.pointer.setPointerStyleSync（公开 API）+
@@ -1306,6 +1308,10 @@ export struct CanvasView {
             this.confirmToolAsk();
           },
           onSwitchSystem: (): void => this.toggleToolAskKeyboard(),
+          // 六十八包②：弹窗键盘 ••• 同样开指令面板（插入路由走 askInsert）
+          onCommands: (): void => {
+            this.commandOverlayUp = true;
+          },
           onCaretLeft: (): void => this.askCaretTo(this.toolAskCaretA - 1),
           onCaretRight: (): void => this.askCaretTo(this.toolAskCaretA + 1)
         })
@@ -1744,6 +1750,12 @@ export struct CanvasView {
   // 入框；系统键盘模式由系统自身避让，不垫）。@State 驱动本组件宽/窄屏垫
   // 高（第十七包②起页面级垫高已删，AppStorage 副本仅留作状态广播）
   @State private mathKbVisible: boolean = false;
+  // 六十八包②：指令面板浮层显隐（••• 开、← /选中后关）。仅改浮层，不触
+  // 焦点/垫高管线——mathKbVisible 与 inputFocused 均不动，键盘在面板下原样
+  @State private commandOverlayUp: boolean = false;
+  // 六十八包②：搜索词 + 当前分类（''=分类列表页；非空=该分类命令列表页）
+  @State private commandQuery: string = '';
+  @State private commandCat: string = '';
   // 三十六包：顶层键盘面板下探导航条避让区用（浮层旧锚窗口底，自绘面板
   // 锚页面底，需平移 navGap 才与浮层像素重合；避让目标公式不变）
   @StorageProp('ui.navBottomVp') navBottomVp: number = 0;
@@ -1959,6 +1971,10 @@ export struct CanvasView {
           onSubmit: (): void => this.kbKeySubmit(),
           onHide: (): void => this.kbKeyHide(),
           onSwitchSystem: (): void => this.kbKeySwitch(),
+          // 六十八包②：••• 开指令面板（全屏搜索页浮层，见 commandOverlay）
+          onCommands: (): void => {
+            this.commandOverlayUp = true;
+          },
           onCaretLeft: (): void => this.kbKeyCaret(-1),
           onCaretRight: (): void => this.kbKeyCaret(1)
         })
@@ -1984,6 +2000,191 @@ export struct CanvasView {
       && this.toolAskKind === ''
       && (this.inputFocused || this.sheetKbFocus || this.tableKbFocus
         || this.slideKbFocus);
+  }
+
+  // ---- 六十八包②：GGB 式指令面板（••• 全屏搜索页）----
+  // 结构对齐安卓 GGB 第二张截图：顶栏 ← + 「在 {分类} 中搜索」输入框；
+  // 默认态分类列表，选中分类或输入关键词后为命令列表（名称+签名+描述）。
+  // 点选 → 关面板 → kbKeyInsert/askInsert 插入（键盘保持弹出、焦点不动，
+  // 插入后光标落首参数槽）。纯 @State 驱动，不触焦点/垫高管线
+  private commandFiltered(): CommandMeta[] {
+    const q = this.commandQuery.trim().toLowerCase();
+    if (q.length > 0) {
+      // 搜索：所有指令全域匹配（名称/关键词/分类名），GGB「在 所有指令 中搜索」
+      return ALL_COMMANDS.filter((c: CommandMeta) => {
+        return c.name.toLowerCase().indexOf(q) >= 0
+          || c.keys.indexOf(q) >= 0;
+      });
+    }
+    if (this.commandCat.length > 0) {
+      return ALL_COMMANDS.filter((c: CommandMeta) => c.category === this.commandCat);
+    }
+    return [];
+  }
+
+  private commandCatName(): string {
+    if (this.commandQuery.trim().length > 0) {
+      return '所有指令';
+    }
+    for (const c of COMMAND_CATEGORIES) {
+      if (c.id === this.commandCat) {
+        return c.name;
+      }
+    }
+    return '所有指令';
+  }
+
+  private commandInsert(c: CommandMeta): void {
+    // 弹窗参数框打开时路由到弹窗字段，否则按活跃上下文分发（与键盘同路）
+    if (this.toolAskKind !== '') {
+      this.askInsert(c.ins, c.back, '');
+    } else {
+      this.kbKeyInsert(c.ins, c.back, '');
+    }
+    this.closeCommandOverlay();
+  }
+
+  private closeCommandOverlay(): void {
+    this.commandOverlayUp = false;
+    this.commandQuery = '';
+    this.commandCat = '';
+  }
+
+  @Builder
+  private commandOverlay() {
+    Stack({ alignContent: Alignment.Top }) {
+      // 全屏底（不透光，覆盖画布与键盘；← 或系统返回关闭）
+      Column()
+        .width('100%')
+        .height('100%')
+        .backgroundColor(this.dark ? '#202226' : '#F1F3F7')
+        .onClick(() => {
+          // 吞掉穿透点击，不关闭（GGB 同款：点空白不退）
+        })
+      Column() {
+        // 顶栏：← + 搜索框（占位随上下文分类，GGB「在 所有指令 中搜索」）
+        Row({ space: 10 }) {
+          Text('←')
+            .fontSize(20)
+            .fontColor(Theme.sub(this.dark))
+            .width(40)
+            .height(40)
+            .textAlign(TextAlign.Center)
+            .borderRadius(20)
+            .stateStyles({
+              pressed: {
+                .backgroundColor(this.dark ? '#3E424A' : '#E2E5EC')
+              }
+            })
+            .onClick(() => {
+              // 二级页（分类/搜索）先回分类列表，一级才关面板
+              if (this.commandCat.length > 0 || this.commandQuery.trim().length > 0) {
+                this.commandCat = '';
+                this.commandQuery = '';
+              } else {
+                this.closeCommandOverlay();
+              }
+            })
+          TextInput({ text: this.commandQuery, placeholder: `在 ${this.commandCatName()} 中搜索` })
+            .fontSize(15)
+            .layoutWeight(1)
+            .height(40)
+            .backgroundColor(Theme.inputBg(this.dark))
+            .fontColor(Theme.text(this.dark))
+            .placeholderColor(Theme.sub(this.dark))
+            .padding({ left: 12, right: 12 })
+            .onChange((v: string) => {
+              this.commandQuery = v;
+            })
+        }
+        .width('100%')
+        .padding({ left: 12, right: 14, top: 8, bottom: 8 })
+
+        // 主体：无查询无分类 → 分类列表；否则命令列表
+        if (this.commandQuery.trim().length === 0 && this.commandCat.length === 0) {
+          List() {
+            ForEach(COMMAND_CATEGORIES, (cat: CommandCategory) => {
+              ListItem() {
+                Row() {
+                  Text(cat.name)
+                    .fontSize(16)
+                    .fontColor(Theme.text(this.dark))
+                  Blank()
+                  Text('›')
+                    .fontSize(16)
+                    .fontColor(Theme.sub(this.dark))
+                }
+                .width('100%')
+                .height(52)
+                .padding({ left: 20, right: 16 })
+                .stateStyles({
+                  pressed: {
+                    .backgroundColor(this.dark ? '#2C2F35' : '#E2E5EC')
+                  }
+                })
+                .onClick(() => {
+                  // 「所有指令」即空查询下的全集页（GGB 同名分类同语义）
+                  this.commandCat = cat.id;
+                })
+              }
+            }, (cat: CommandCategory) => cat.id)
+          }
+          .width('100%')
+          .layoutWeight(1)
+          .scrollBar(BarState.Auto)
+        } else {
+          List({ space: 2 }) {
+            ForEach(this.commandFiltered(), (c: CommandMeta) => {
+              ListItem() {
+                Row({ space: 12 }) {
+                  Column({ space: 3 }) {
+                    Text(c.name)
+                      .fontSize(15)
+                      .fontWeight(FontWeight.Medium)
+                      .fontColor(Theme.text(this.dark))
+                    Text(c.sig)
+                      .fontSize(11)
+                      .fontColor(Theme.sub(this.dark))
+                    Text(c.desc)
+                      .fontSize(11)
+                      .fontColor(Theme.sub(this.dark))
+                  }
+                  .alignItems(HorizontalAlign.Start)
+                  .layoutWeight(1)
+                  Text('插入')
+                    .fontSize(12)
+                    .fontColor('#FFFFFF')
+                    .backgroundColor(Theme.accent(this.dark))
+                    .borderRadius(6)
+                    .height(30)
+                    .padding({ left: 12, right: 12 })
+                }
+                .width('100%')
+                .padding({ left: 20, right: 14, top: 10, bottom: 10 })
+                .stateStyles({
+                  pressed: {
+                    .backgroundColor(this.dark ? '#2C2F35' : '#E2E5EC')
+                  }
+                })
+                .onClick(() => this.commandInsert(c))
+              }
+            }, (c: CommandMeta) => c.name)
+          }
+          .width('100%')
+          .layoutWeight(1)
+          .scrollBar(BarState.Auto)
+          .padding({ top: 4 })
+        }
+      }
+      .width('100%')
+      .height('100%')
+    }
+    .width('100%')
+    .height('100%')
+    .transition(TransitionEffect.asymmetric(
+      TransitionEffect.opacity(0).combine(TransitionEffect.translate({ y: 40 })),
+      TransitionEffect.opacity(0).combine(TransitionEffect.translate({ y: 40 }))
+    ).animation({ duration: 200, curve: Curve.EaseOut }))
   }
 
   // 输入行容器几何回报（AlgebraPanel 钉底输入行，宽窄两分支同一容器）：
@@ -3547,6 +3748,12 @@ export struct CanvasView {
       // 二十六包：工具参数弹窗（Stack 最后一个子节点 = 最上层）
       if (this.toolAskKind !== '') {
         this.toolAskDialog()
+      }
+
+      // 六十八包②：指令面板全屏浮层（最上层，盖住键盘与弹窗；••• 开、← 关。
+      // mathKbVisible/inputFocused 均不动——关闭后键盘原样，焦点零扰动）
+      if (this.commandOverlayUp) {
+        this.commandOverlay()
       }
     }
     .width('100%')
