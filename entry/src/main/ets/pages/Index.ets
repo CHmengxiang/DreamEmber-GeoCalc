@@ -1,5 +1,6 @@
 import { BusinessError } from '@kit.BasicServicesKit';
 import { ConfigurationConstant } from '@kit.AbilityKit';
+import { common } from '@kit.AbilityKit';
 import { preferences } from '@kit.ArkData';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { router } from '@kit.ArkUI';
@@ -22,6 +23,9 @@ import { CanvasView } from '../views/CanvasView';
  */
 const DOMAIN: number = 0x0001;
 const TAG: string = 'DreamEmber';
+// 七十包⑤：隐私政策线上地址（与关于页同源）
+const PRIVACY_POLICY_URL: string =
+  'https://gitee.com/CH_mengxiang/DreamEmber-GeoCalc/blob/master/docs/privacy-policy.md';
 
 @Entry
 @Component
@@ -30,6 +34,10 @@ struct Index {
   @State private menuOpen: boolean = false;       // 汉堡菜单抽屉
   @State private settingsOpen: boolean = false;   // 设置底部面板
   @State private isWide: boolean = false;         // 断点：≥640vp
+  // 七十包⑤（华为审核）：首次启动隐私政策告知——底部弹窗，同意后本地
+  // 持久化不再弹出；不同意即退出（华为应用市场「首次启动需明确提示阅读
+  // 隐私政策」审核项，注册登录界面本应用没有、无需处理）
+  @State private privacyOpen: boolean = false;
   // 设置开关（与 CanvasView 共享 AppStorage 键，改动即时同步到内核）
   @StorageLink('opt.showGrid') private setGrid: boolean = true;
   @StorageLink('opt.showAxes') private setAxes: boolean = true;
@@ -98,12 +106,54 @@ struct Index {
       const e = err as BusinessError;
       hilog.error(DOMAIN, TAG, 'native lib load failed: %{public}s', e.message ?? '');
     }
+    this.checkPrivacyConsent();
   }
 
-  // 返回键栈：指令面板 → 菜单 → 设置 → 无浮层走系统默认（退后台）。
-  // 六十八包④（真机反馈⑤）：面板浮层期间系统右滑返回只关面板（键盘原样），
-  // 不再穿透收键盘/退桌面——AppStorage 键作 CanvasView → Index 信号
+  // 七十包⑤（华为审核②）：首次启动隐私告知——持久化无同意记录时弹底部
+  // 面板；「同意并继续」写本地 preferences（dreamember_settings/privacyOk）
+  // 此后永不弹；「不同意」退出应用（审核要求用户有明确拒绝出口）
+  private checkPrivacyConsent(): void {
+    try {
+      const pref = preferences.getPreferencesSync(
+        getContext(this).getApplicationContext(), { name: 'dreamember_settings' });
+      if (pref.getSync('privacyOk', false) === true) {
+        return;
+      }
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'read privacyOk failed: %{public}s', JSON.stringify(err));
+    }
+    this.privacyOpen = true;
+  }
+
+  private acceptPrivacy(): void {
+    this.privacyOpen = false;
+    try {
+      const pref = preferences.getPreferencesSync(
+        getContext(this).getApplicationContext(), { name: 'dreamember_settings' });
+      pref.putSync('privacyOk', true);
+      pref.flush();
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'save privacyOk failed: %{public}s', JSON.stringify(err));
+    }
+  }
+
+  private declinePrivacy(): void {
+    // 拒绝即退出（华为审核惯例：不同意隐私政策无法使用应用）
+    try {
+      (getContext(this) as common.UIAbilityContext).terminateSelf();
+    } catch (err) {
+      hilog.warn(DOMAIN, TAG, 'decline exit failed: %{public}s', JSON.stringify(err));
+    }
+  }
+
+  // 返回键栈：隐私弹窗（不可返回跳过）→ 指令面板 → 菜单 → 设置 → 无浮层走
+  // 系统默认（退后台）。六十八包④（真机反馈⑤）：面板浮层期间系统右滑返回
+  // 只关面板（键盘原样），不再穿透收键盘/退桌面——AppStorage 键作
+  // CanvasView → Index 信号
   onBackPress(): boolean {
+    if (this.privacyOpen) {
+      return true;   // 隐私弹窗必须显式选择，返回键不关闭
+    }
     if (AppStorage.get<boolean>('ui.cmdOverlayUp') === true) {
       AppStorage.setOrCreate('evt.cmdOverlayBack', Date.now());
       return true;
@@ -284,6 +334,83 @@ struct Index {
       .onClick(() => {
         this.applyInputMethod(mode);
       })
+  }
+
+  // 七十包⑤：首次启动隐私政策底部面板（华为审核样式：标题+摘要+双按钮，
+  // 同意持久化、不同意退出；不遮内容层之外的系统区）
+  @Builder
+  private privacySheet() {
+    Column()
+      .width('100%')
+      .height('100%')
+      .backgroundColor('rgba(0,0,0,0.55)')
+      .transition(TransitionEffect.OPACITY.animation({ duration: 180 }))
+
+    Column() {
+      Text('温馨提示')
+        .fontSize(18)
+        .fontWeight(FontWeight.Bold)
+        .fontColor(this.cTitle())
+        .width('100%')
+        .margin({ top: 20 })
+
+      Text('欢迎使用梦烬几何！我们非常重视您的个人信息与隐私保护。在您使用本应用前，请务必阅读并了解《隐私政策》：')
+        .fontSize(13)
+        .fontColor(this.cText())
+        .width('100%')
+        .margin({ top: 12 })
+      Text('《隐私政策》')
+        .fontSize(13)
+        .fontColor(this.cAccent())
+        .width('100%')
+        .margin({ top: 4 })
+        .onClick(() => {
+          try {
+            const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+            ctx.openLink(PRIVACY_POLICY_URL, { appLinkingOnly: false });
+          } catch (err) {
+            hilog.warn(DOMAIN, TAG, 'open privacy url failed: %{public}s', JSON.stringify(err));
+          }
+        })
+      Text('本应用完全离线运行：您的几何文件、计算数据仅保存在本机，我们不会收集、上传任何个人数据。点击「同意并继续」即表示您已阅读并同意上述政策。')
+        .fontSize(13)
+        .fontColor(this.cText())
+        .width('100%')
+        .margin({ top: 8 })
+
+      Row({ space: 12 }) {
+        Text('不同意')
+          .fontSize(15)
+          .fontColor(this.cText())
+          .textAlign(TextAlign.Center)
+          .height(42)
+          .layoutWeight(1)
+          .borderRadius(21)
+          .backgroundColor(this.dark ? '#33363B' : '#E9EBF2')
+          .stateStyles({
+            pressed: {
+              .backgroundColor(this.dark ? '#3E424A' : '#DDE1EA')
+            }
+          })
+          .onClick(() => this.declinePrivacy())
+        Text('同意并继续')
+          .fontSize(15)
+          .fontColor('#FFFFFF')
+          .textAlign(TextAlign.Center)
+          .height(42)
+          .layoutWeight(1)
+          .borderRadius(21)
+          .backgroundColor(this.cAccent())
+          .onClick(() => this.acceptPrivacy())
+      }
+      .width('100%')
+      .margin({ top: 20, bottom: 8 })
+    }
+    .width(this.isWide ? '60%' : '100%')
+    .padding({ left: 20, right: 20, bottom: 28 })
+    .borderRadius({ topLeft: 16, topRight: 16 })
+    .backgroundColor(this.cSurface())
+    .alignItems(HorizontalAlign.Start)
   }
 
   build() {
@@ -522,6 +649,11 @@ struct Index {
           TransitionEffect.translate({ y: 340 }).animation({ duration: 200 }),
           TransitionEffect.translate({ y: 340 }).animation({ duration: 200 })
         ))
+      }
+
+      // ---------- 首次启动隐私政策底部面板（七十包⑤，最上层） ----------
+      if (this.privacyOpen) {
+        this.privacySheet()
       }
     }
     .width('100%')

@@ -126,7 +126,7 @@ function isDigitCh(c: string): boolean {
   return c.length === 1 && DIGITS.indexOf(c) >= 0;
 }
 
-function isAlnumCh(c: string): boolean {
+export function isAlnumCh(c: string): boolean {
   if (c.length !== 1) {
     return false;
   }
@@ -1210,13 +1210,25 @@ export function mathCaretStops(raw: string): MathCaretStop[] {
         continue;
       }
       // 六十九包②：命令调用名一体（Derivative(/Integral(/Sequence( …），
-      // GGB 命令名不可点入/拆开——整名只产「名左」一站，名内与 '(' 前均
-      // 不可停靠（←→ 与点触同规），插字符改不坏命令串
-      if (commandCallNameAt(raw, a.start) === a.end - a.start) {
+      // GGB 命令名不可点入/拆开——整名只产「名左」一站，名内与 '(' 前（名
+      // 尾）均不可停靠（←→ 与点触同规），插字符改不坏命令串。七十包②：
+      // ①原判据 a.end-a.start 只对吞名多字符原子成立，而命令名走普通字符
+      // 解析是逐字母单字符原子 → 分支从未命中、名内站全在（六十九包④「
+      // 禁站」实际只靠 insertAtCaret 吸收兜底）；改判据 commandCallNameAt
+      // 返回值>0 且按返回名长吞原子。②名尾站探针必错位——prefix 以命令名
+      // 结尾缺 '(' 时转换失败落字面渲染（Integral → 斜体逐字 ≈4.5em），
+      // 与显示端 \int 宽天差地别，点触仲裁全乱（真机 Integral 灰块三态落
+      // 点异常根因之一）→ '(' 原子一并跳过不推站，首参槽站由后续原子常规
+      // 推出（槽首 = 名尾 + 1）
+      // 七十包②再防：kids 组原子（√/NthRoot 整体）名首同命中（nthroot 在
+      // 表内）但其停靠走 kids/idx 分支——排除，避免根号内站被吞
+      const cmdLen = a.ch.length === 1 && a.kids === undefined
+        ? commandCallNameAt(raw, a.start) : -1;
+      if (cmdLen > 0) {
         push(a.start, false);
-        // 命令组整体名+参一站进内容：名内跳过，'(' 与实参停靠交由后续
-        // 原子常规产站（'(' 原子 start 停靠 = 名后即括号内首槽——保留，
-        // 槽内编辑是合法操作；禁的是名内/名后紧贴 '(' 处）
+        while (j + 1 < atoms.length && atoms[j + 1].start < a.start + cmdLen + 1) {
+          j++;
+        }
         j++;
         continue;
       }
@@ -2024,6 +2036,7 @@ export struct MathField {
   private rtxKey: string = '\u0000';                 // 已试转换的 raw+深浅色键
   private rtxOk: boolean = false;
   private rtxFs: number = RATEX_FIELD_FS * RATEX_FONT_SCALE;
+  private padYEmit: number = 22;                     // RaTeX 绘制基线顶衬（点触 y 盒换算用）
   private pwCache: Map<number, number> = new Map();  // cp→前缀宽 px（正键）；
   // 六十一包②：光标探针盒记账 cp→[xEm,topEm,botEm]（null=探针未命中，
   // 回退 prefixX 旧路径），raw 变更随 pwCache 一同清
@@ -2326,6 +2339,7 @@ export struct MathField {
     // 使基线落在 baselineY
     const baselineY = Math.max(22, Math.ceil(lay.heightEm * fs) + 3);
     const padY = baselineY - lay.heightEm * fs;
+    this.padYEmit = padY;   // 七十包②：点触探针盒 y 仲裁换算
     const needH = Math.max(30, Math.ceil(baselineY + lay.depthEm * fs) + 3);
     if (Math.abs(needH - this.canvasH) > 0.5) {
       this.canvasH = needH;
@@ -2395,6 +2409,23 @@ export struct MathField {
       }
     }
     let pick = -1;
+    // 七十包②：探针盒 y 仲裁——灰块（Integral 空槽等）点击三态（左低/左/
+    // 中高）x 都落灰块左缘站（槽首）与相邻站并列区间内，旧版倒序取最外框
+    // 外站把「灰块中部」点击落到下一槽（真机②态3 根因）。并列站中优先取
+    // 探针盒覆盖点击 y 的站（GGB CursorAtom 上下文盒同用途）：探针 y 盒是
+    // 该落点的真实上下文（脚本内引擎已缩放/升降）。canvasY 是 Canvas 内
+    // 坐标（含 padY 顶衬），探针盒是 em 相对基线——padY 缓存自 paintRatex
+    const padYCache = this.padYEmit;
+    for (let i = 0; i < stops.length && pick < 0; i++) {
+      if (Math.abs(ds[i] - ds[best]) >= 0.5) {
+        continue;
+      }
+      const pb = this.probeCaret(stops[i].pos);
+      if (pb !== null && canvasY >= padYCache + pb[1] * this.rtxFs - 2
+        && canvasY <= padYCache + pb[2] * this.rtxFs + 2) {
+        pick = i;
+      }
+    }
     // 六十包：y 仲裁随自适应基线走（59 包行高可伸展后固定 16/19 失准；
     // 以基线 22 参照的旧阈 −6/−3 换算成基线相对量）
     const baselineY = Math.max(22, Math.ceil(this.rtxLay !== null

@@ -162,11 +162,24 @@ import window from '@ohos.window';
 //（垫底已退役，避让全靠系统抬升），下方 closeToolAsk 的 OFFSET 恢复保留
 // 作防御性复位
 import { KeyboardAvoidMode } from '@ohos.arkui.UIContext';
-import { canvasDensity, commandCallNameAt, functionOpenBefore, hasIdentBase, isTypewriterCh,
+import { canvasDensity, commandCallNameAt, functionOpenBefore, hasIdentBase, isAlnumCh, isTypewriterCh,
   matchParenBackward, MathCaretStop, mathCaretStops, parseMathAtoms,
   scriptContentRange, scriptRunEndAtCaret, scriptStructureEnd,
   templateUnwrapRange,
   emptyTemplateBksp } from './MathField';
+
+// 七十包②：s[a] === '(' 时的命令调用名首回溯（Integral( 的 a=8 → 返回 0）——
+// 紧贴命令 '(' 的插入吸收判据。名内字符/分隔不命中返回 -1
+function cmdNameStartBefore(s: string, a: number): number {
+  let j = a;
+  while (j > 0 && (isAlnumCh(s.charAt(j - 1)) || s.charAt(j - 1) === '_')) {
+    j--;
+  }
+  if (j >= a) {
+    return -1;
+  }
+  return commandCallNameAt(s, j) === a - j ? j : -1;
+}
 
 @Component
 export struct CanvasView {
@@ -2110,11 +2123,35 @@ export struct CanvasView {
     AppStorage.setOrCreate('ui.cmdOverlayUp', false);
     this.commandQuery = '';
     this.commandCat = '';
+    // 七十包①：搜索框抢焦把代数行 inputFocused 翻掉了——syncKbSpacer 冻结
+    // 只护浮层期间，关面板后第一跑 visible=(inputFocused||…) 判 false =
+    // 「右滑一次键盘收了」（69包③只是把收起延迟到关面板）。恢复焦点到
+    // 代数输入行，onFocus(true) 回写后键盘原样；requestFocus 失败（行隐藏
+    // 等罕见态）由用户点一下输入行唤起兜底
+    if (!this.inputFocused && !this.useSysKeyboard) {
+      setTimeout(() => {
+        try {
+          this.getUIContext().getFocusController()
+            .requestFocus(this.activeInputId());
+        } catch (_e) {
+        }
+      }, 60);
+    }
   }
 
   private openCommandOverlay(): void {
     this.commandOverlayUp = true;
     AppStorage.setOrCreate('ui.cmdOverlayUp', true);
+  }
+
+  // 七十包①：搜索框 IME 抑制空壳（AlgebraPanel.emptyKb 同构）——1px 透明
+  // 行挂 customKeyboard 即压制系统 IME，浮层期间键盘观感恒定
+  @Builder
+  private emptyKbShell() {
+    Row()
+      .width('100%')
+      .height(1)
+      .opacity(0)
   }
 
   @Builder
@@ -2176,6 +2213,11 @@ export struct CanvasView {
             .onChange((v: string) => {
               this.commandQuery = v;
             })
+            // 七十包①（真机复测键盘仍收）：搜索框抢焦会弹系统 IME——窗口
+            // 缩放 + 代数行 customKeyboard 空壳随失焦卸载 =「键盘收起」观感
+            //（系统键盘模式则是 IME 换焦弹跳）。挂同款 1px 空壳抑制 IME：
+            // 浮层期间键盘观感恒定，物理键盘输入搜索框照常工作
+            .customKeyboard(this.emptyKbShell())
         }
         .width('100%')
         .padding({ left: 12, right: 14, top: 8, bottom: 8 })
@@ -2649,14 +2691,18 @@ export struct CanvasView {
     // 插入——点触/←→ 停靠已在 mathCaretStops 禁站，此处兜底程序化设位
     // （caretPosition 旧值重放等）：名内 → 吸到名左；紧贴 '(' → 吸到组内
     // 首参槽。防插字符把命令串改坏（"IIntegral(..."/"Integral(x,1,6)x"
-    // 提交报「未知函数」）
+    // 提交报「未知函数」）。七十包②：右界收紧 a<j+L——名尾（'(' 下标）
+    // 不再误判名内吸到名左（真机 Integral 灰块左缘点击落名尾站时输入失效
+    // 根因）；名尾单独走「紧贴 '('」分支吸进首参槽（GGB 名后键入同款）。
+    // 名左站（a=名首）正常插入不吸收——真机③「Integral 整体左侧键入被吸
+    // 进首参灰块」根因，即旧 L2 判据把名首也命中
     if (a === b && t.length > 0) {
       let na = -1;
       let nl = 0;
-      // 找覆盖 a 的命令调用名：a 落 [start, start+nameLen] 区间即命中
+      // 找覆盖 a 的命令调用名：a 落 (start, start+nameLen) 开区间即命中
       for (let j = Math.max(0, a - 17); j <= a && j < s.length; j++) {
         const L = commandCallNameAt(s, j);
-        if (L > 0 && a > j && a <= j + L) {
+        if (L > 0 && a > j && a < j + L) {
           na = j;
           nl = L;
           break;
@@ -2671,17 +2717,19 @@ export struct CanvasView {
         this.activeCtrl().caretPosition(na);
         return;
       }
-      // 紧贴命令 '(' 右侧（a = 名尾 + 1 恰是 '(' 下标）→ 吸进组内首参槽
-      const L2 = commandCallNameAt(s, a);
-      if (L2 > 0) {
-        const inPos = a + L2 + 1;
-        this.selStart = inPos;
-        this.selEnd = inPos;
-        this.mathCaret = inPos;
-        this.mathCaretScript = this.deriveCaretScript(s, inPos,
-          this.mathCaretScript);
-        this.activeCtrl().caretPosition(inPos);
-        return;
+      // 紧贴命令 '(' 右侧（a = 名尾，s[a] === '('）→ 吸进组内首参槽
+      if (s.charAt(a) === '(' && a > 0) {
+        const ns = cmdNameStartBefore(s, a);
+        if (ns >= 0) {
+          const inPos = a + 1;
+          this.selStart = inPos;
+          this.selEnd = inPos;
+          this.mathCaret = inPos;
+          this.mathCaretScript = this.deriveCaretScript(s, inPos,
+            this.mathCaretScript);
+          this.activeCtrl().caretPosition(inPos);
+          return;
+        }
       }
     }
     // 上游 newScript 同款（第十包②）：光标紧邻同型 ^/_ 结构时只进框、
@@ -3412,7 +3460,19 @@ export struct CanvasView {
         // 把刚进小框的框内态洗掉——③光标跑小框外、④光标恒按大框渲染的
         // 共同根因。框内态只由 applyInsert/caretMove 内部维护，回声一概
         // 忽略；系统键盘模式无公式光标，回写仍照旧。
+        // 七十包⑥（KaihongOS 真机）：自带键盘挂着时物理键盘可输入——内容
+        // 经 onChange 正常更新，但真实选区移动被上面的回声门禁整段丢弃，
+        // 光标不跟随。回声特征 = 报告值与当前光标态相同（caretPosition 刚
+        // 设的位）；不相等的报告即外部真实移动（物理键入/系统级手势），
+        // 接受并置框外态（物理输入无框内语义，GGB 桌面同款）
         if (!this.useSysKeyboard) {
+          if (s === this.mathCaret && e === this.selEnd) {
+            return;
+          }
+          this.selStart = s;
+          this.selEnd = e;
+          this.mathCaret = s;
+          this.mathCaretScript = false;
           return;
         }
         this.selStart = s;
