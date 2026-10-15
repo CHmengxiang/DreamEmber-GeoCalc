@@ -9,6 +9,9 @@ import { bundleManager, common } from '@kit.AbilityKit';
  * 五十五包：整页重构——顶部加圆角应用图标；声明分三段（原创与商标/引擎
  * 出处/开源许可），开发者改实名与 AGC 一致（过华为开放测试审核）；新增
  * 开发者栏；开源仓库与隐私政策链接可点击跳转浏览器（UIAbilityContext
+ * .openLink）。六十六包补：引擎出处段补 RaTeX（MIT）与 KaTeX 字体（OFL）——
+ * 55 包时只有 giac，58 包起 RaTeX/KaTeX 字体随包分发后声明需跟上（MIT
+ * 要求保留版权声明，OFL 要求随字体附带许可文本，OFL.txt 已在 rawfile/fonts）
  * .openLink）。
  */
 const REPO_URL = 'https://gitee.com/CH_mengxiang/DreamEmber-GeoCalc';
@@ -132,7 +135,12 @@ struct About {
               .fontColor(this.cSub())
               .lineHeight(22)
             Text('计算机代数引擎采用开源库 giac'
-              + '（GPL-3.0+，© Bernard Parisse / Institut Fourier）。')
+              + '（GPL-3.0+，© Bernard Parisse / Institut Fourier）。'
+              + '公式排版引擎采用开源库 RaTeX'
+              + '（MIT，github.com/erweixin/RaTeX，随包分发的 libratex_ffi.so）；'
+              + '公式字体采用 KaTeX 字体'
+              + '（SIL Open Font License 1.1，© The KaTeX Authors）。'
+              + '第三方组件完整声明见开源仓库 THIRD-PARTY-NOTICES.md。')
               .fontSize(14)
               .fontColor(this.cSub())
               .lineHeight(22)

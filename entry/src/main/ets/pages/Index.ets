@@ -26,6 +26,10 @@ const TAG: string = 'DreamEmber';
 // 七十包⑤：隐私政策线上地址（与关于页同源）
 const PRIVACY_POLICY_URL: string =
   'https://gitee.com/CH_mengxiang/DreamEmber-GeoCalc/blob/master/docs/privacy-policy.md';
+// 七十一包④：隐私政策版本号（日期式）——政策内容有任何变更时同步改这里，
+// 全量用户下次启动重弹确认弹窗；确认记录（privacyPolicyVersion）存本地
+// preferences，与包内版本一致才免弹
+const PRIVACY_POLICY_VERSION: string = '20261014';
 
 @Entry
 @Component
@@ -112,11 +116,22 @@ struct Index {
   // 七十包⑤（华为审核②）：首次启动隐私告知——持久化无同意记录时弹底部
   // 面板；「同意并继续」写本地 preferences（dreamember_settings/privacyOk）
   // 此后永不弹；「不同意」退出应用（审核要求用户有明确拒绝出口）
+  // 七十一包④：版本化重弹——本地记录「已确认的政策版本号」，与包内
+  // PRIVACY_POLICY_VERSION 不一致（含老版本只有 privacyOk 布尔的存量用户
+  // 首次迁移）即重弹；同意后更新记录版本号
   private checkPrivacyConsent(): void {
     try {
       const pref = preferences.getPreferencesSync(
         getContext(this).getApplicationContext(), { name: 'dreamember_settings' });
-      if (pref.getSync('privacyOk', false) === true) {
+      const confirmed = pref.getSync('privacyPolicyVersion', '') as string;
+      if (confirmed === PRIVACY_POLICY_VERSION) {
+        return;
+      }
+      // 存量迁移：老版本只写过 privacyOk 布尔且政策未变更——视为已确认
+      // 当前版本，补写版本号记录、不弹（新装用户无此键、照常弹）
+      if (confirmed === '' && pref.getSync('privacyOk', false) === true) {
+        pref.putSync('privacyPolicyVersion', PRIVACY_POLICY_VERSION);
+        pref.flush();
         return;
       }
     } catch (err) {
@@ -131,6 +146,7 @@ struct Index {
       const pref = preferences.getPreferencesSync(
         getContext(this).getApplicationContext(), { name: 'dreamember_settings' });
       pref.putSync('privacyOk', true);
+      pref.putSync('privacyPolicyVersion', PRIVACY_POLICY_VERSION);
       pref.flush();
     } catch (err) {
       hilog.warn(DOMAIN, TAG, 'save privacyOk failed: %{public}s', JSON.stringify(err));
@@ -338,6 +354,9 @@ struct Index {
 
   // 七十包⑤：首次启动隐私政策底部面板（华为审核样式：标题+摘要+双按钮，
   // 同意持久化、不同意退出；不遮内容层之外的系统区）
+  // 七十一包①（真机反馈）：面板体原直接挂根 Stack（alignContent Start=
+  // 垂直居中）显示在正中——改「整高容器 + Blank 压底」结构（设置面板同
+  // 款）锚定屏幕底，并挂上滑转场（从底部拉起）
   @Builder
   private privacySheet() {
     Column()
@@ -347,70 +366,80 @@ struct Index {
       .transition(TransitionEffect.OPACITY.animation({ duration: 180 }))
 
     Column() {
-      Text('温馨提示')
-        .fontSize(18)
-        .fontWeight(FontWeight.Bold)
-        .fontColor(this.cTitle())
-        .width('100%')
-        .margin({ top: 20 })
+      Blank()
 
-      Text('欢迎使用梦烬几何！我们非常重视您的个人信息与隐私保护。在您使用本应用前，请务必阅读并了解《隐私政策》：')
-        .fontSize(13)
-        .fontColor(this.cText())
-        .width('100%')
-        .margin({ top: 12 })
-      Text('《隐私政策》')
-        .fontSize(13)
-        .fontColor(this.cAccent())
-        .width('100%')
-        .margin({ top: 4 })
-        .onClick(() => {
-          try {
-            const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-            ctx.openLink(PRIVACY_POLICY_URL, { appLinkingOnly: false });
-          } catch (err) {
-            hilog.warn(DOMAIN, TAG, 'open privacy url failed: %{public}s', JSON.stringify(err));
-          }
-        })
-      Text('本应用完全离线运行：您的几何文件、计算数据仅保存在本机，我们不会收集、上传任何个人数据。点击「同意并继续」即表示您已阅读并同意上述政策。')
-        .fontSize(13)
-        .fontColor(this.cText())
-        .width('100%')
-        .margin({ top: 8 })
+      Column() {
+        Text('温馨提示')
+          .fontSize(18)
+          .fontWeight(FontWeight.Bold)
+          .fontColor(this.cTitle())
+          .width('100%')
+          .margin({ top: 20 })
 
-      Row({ space: 12 }) {
-        Text('不同意')
-          .fontSize(15)
+        Text('欢迎使用梦烬几何！我们非常重视您的个人信息与隐私保护。在您使用本应用前，请务必阅读并了解《隐私政策》：')
+          .fontSize(13)
           .fontColor(this.cText())
-          .textAlign(TextAlign.Center)
-          .height(42)
-          .layoutWeight(1)
-          .borderRadius(21)
-          .backgroundColor(this.dark ? '#33363B' : '#E9EBF2')
-          .stateStyles({
-            pressed: {
-              .backgroundColor(this.dark ? '#3E424A' : '#DDE1EA')
+          .width('100%')
+          .margin({ top: 12 })
+        Text('《隐私政策》')
+          .fontSize(13)
+          .fontColor(this.cAccent())
+          .width('100%')
+          .margin({ top: 4 })
+          .onClick(() => {
+            try {
+              const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+              ctx.openLink(PRIVACY_POLICY_URL, { appLinkingOnly: false });
+            } catch (err) {
+              hilog.warn(DOMAIN, TAG, 'open privacy url failed: %{public}s', JSON.stringify(err));
             }
           })
-          .onClick(() => this.declinePrivacy())
-        Text('同意并继续')
-          .fontSize(15)
-          .fontColor('#FFFFFF')
-          .textAlign(TextAlign.Center)
-          .height(42)
-          .layoutWeight(1)
-          .borderRadius(21)
-          .backgroundColor(this.cAccent())
-          .onClick(() => this.acceptPrivacy())
+        Text('本应用完全离线运行：您的几何文件、计算数据仅保存在本机，我们不会收集、上传任何个人数据。点击「同意并继续」即表示您已阅读并同意上述政策。')
+          .fontSize(13)
+          .fontColor(this.cText())
+          .width('100%')
+          .margin({ top: 8 })
+
+        Row({ space: 12 }) {
+          Text('不同意')
+            .fontSize(15)
+            .fontColor(this.cText())
+            .textAlign(TextAlign.Center)
+            .height(42)
+            .layoutWeight(1)
+            .borderRadius(21)
+            .backgroundColor(this.dark ? '#33363B' : '#E9EBF2')
+            .stateStyles({
+              pressed: {
+                .backgroundColor(this.dark ? '#3E424A' : '#DDE1EA')
+              }
+            })
+            .onClick(() => this.declinePrivacy())
+          Text('同意并继续')
+            .fontSize(15)
+            .fontColor('#FFFFFF')
+            .textAlign(TextAlign.Center)
+            .height(42)
+            .layoutWeight(1)
+            .borderRadius(21)
+            .backgroundColor(this.cAccent())
+            .onClick(() => this.acceptPrivacy())
+        }
+        .width('100%')
+        .margin({ top: 20, bottom: 8 })
       }
-      .width('100%')
-      .margin({ top: 20, bottom: 8 })
+      .width(this.isWide ? '60%' : '100%')
+      .padding({ left: 20, right: 20, bottom: 28 })
+      .borderRadius({ topLeft: 16, topRight: 16 })
+      .backgroundColor(this.cSurface())
+      .alignItems(HorizontalAlign.Start)
+      .transition(TransitionEffect.asymmetric(
+        TransitionEffect.translate({ y: 380 }).animation({ duration: 240, curve: Curve.EaseOut }),
+        TransitionEffect.translate({ y: 380 }).animation({ duration: 200, curve: Curve.EaseOut })
+      ))
     }
-    .width(this.isWide ? '60%' : '100%')
-    .padding({ left: 20, right: 20, bottom: 28 })
-    .borderRadius({ topLeft: 16, topRight: 16 })
-    .backgroundColor(this.cSurface())
-    .alignItems(HorizontalAlign.Start)
+    .width('100%')
+    .height('100%')
   }
 
   build() {

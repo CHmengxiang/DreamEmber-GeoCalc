@@ -254,6 +254,13 @@ export struct CanvasView {
   // 控制器实例传入面板（TextInput controller 与光标定位共用同一对象）
   private createCtrl: TextInputController = new TextInputController();
   private editCtrl: TextInputController = new TextInputController();
+  // 七十一包②（真机反馈）：程序化设位护栏——applyInsert/caretPosition 写
+  // TextInput 参数文本后，其内部光标会被甩到串尾并异步回声
+  // onTextSelectionChange（自带键盘模式值≠当前态，被七十包⑥「非回声即真
+  // 移动」判据当真实移动接受 → 光标跳到 Integral 整体之后）。设位后 180ms
+  // 内的回声忽略，超时先重申设位再放行（防物理键入在窗口期丢失光标态）
+  private caretGuardUntil: number = 0;
+  private caretGuardPos: number = -1;
   private selStart: number = -1;
   private selEnd: number = -1;
   // MathField 光标（第七包）：@State 供公式化显示渲染；编辑焦点态同步 @State
@@ -392,6 +399,20 @@ export struct CanvasView {
   // 焦点所在的输入行控制器（新建行 / 行内修改框）
   private activeCtrl(): TextInputController {
     return this.editingLabel.length > 0 ? this.editCtrl : this.createCtrl;
+  }
+
+  // 七十一包②：程序化设位统一入口——记账护栏窗口（180ms），窗口内
+  // onSelChange 的「内部光标甩尾」回声被忽略；120ms 处重申一次设位
+  //（caretPosition 在 text 参数更新同帧可能被框架忽略，四十六包同款时序）
+  private guardCaret(pos: number): void {
+    this.caretGuardUntil = Date.now() + 180;
+    this.caretGuardPos = pos;
+    setTimeout(() => {
+      if (Date.now() < this.caretGuardUntil
+        && this.mathCaret === this.caretGuardPos && this.inputFocused) {
+        this.activeCtrl().caretPosition(this.caretGuardPos);
+      }
+    }, 120);
   }
 
   // 焦点所在输入行的 id（toggleKeyboard 重新聚焦用）
@@ -1855,11 +1876,9 @@ export struct CanvasView {
   private askKbZeroAt: number = 0;          // 轮询中首次观察到 kbH=0（ms）
   private askKbRetried: boolean = false;    // 强制窗口补清焦标记
   private syncKbSpacer(): void {
-    // 六十九包③（真机反馈①）：指令面板浮层期间冻结键盘管线——浮层搜索框
-    // 抢焦会让代数行 onBlur → inputFocused=false，本函数随即把
-    // mathKbVisible=false 收掉自带键盘（面板底下键盘消失=用户看到的「一滑
-    // 键盘就没了」）。面板开时不写任何键盘状态，焦点变化延迟到面板关闭后
-    // 由既有链路自然消化（面板只插字符/查看，不依赖实时焦点）
+    // 七十一包③：面板浮层期间仍冻结键盘管线——openCommandOverlay 已主动
+    // stopEditing 收键盘（本函数在冻结前已跑完 mathKbVisible=false），浮层
+    // 期间搜索框抢焦的焦点波动不再写入任何键盘状态，防「收了又弹」双动作
     if (this.commandOverlayUp) {
       return;
     }
@@ -2034,13 +2053,13 @@ export struct CanvasView {
   }
 
   private mathKbOverlayUp(): boolean {
-    // 六十九包③：面板浮层期间键盘照常挂载（浮层全屏盖住它）——搜索框
-    // 抢焦翻掉的 inputFocused 不收键盘（syncKbSpacer 同步冻结），关面板
-    // 后焦点态由既有链路自然恢复
+    // 七十一包③：开面板时键盘已主动收起（openCommandOverlay stopEditing，
+    // syncKbSpacer 冻结期间 mathKbVisible 已翻 false）——commandOverlayUp
+    // 不再作挂载条件（旧「浮层盖住键盘」恒挂方案退役，双动作观感根因）
     return this.mathKbVisible && !this.useSysKeyboard
       && this.toolAskKind === ''
       && (this.inputFocused || this.sheetKbFocus || this.tableKbFocus
-        || this.slideKbFocus || this.commandOverlayUp);
+        || this.slideKbFocus);
   }
 
   // ---- 六十八包②：GGB 式指令面板（••• 全屏搜索页）----
@@ -2109,9 +2128,14 @@ export struct CanvasView {
 
   private commandInsert(c: CommandMeta): void {
     this.commandPushRecent(c.name);
-    // 弹窗参数框打开时路由到弹窗字段，否则按活跃上下文分发（与键盘同路）
+    // 七十一包③：开面板时键盘已收、焦点已清——插入目标从「活跃会话」改为
+    // 记忆的浮层前上下文（openCommandOverlay 时 inputFocused 恒真才记忆，
+    // 故主路即代数输入行；面板/表格/滑动条会话开面板后被清，统一还焦点
+    // 代数行，插入落行内光标位——GGB 面板插入同语义）
     if (this.toolAskKind !== '') {
       this.askInsert(c.ins, c.back, '');
+    } else if (this.kbReopenAfterOverlay || this.inputFocused) {
+      this.insertAtCaret(c.ins, c.back, '');
     } else {
       this.kbKeyInsert(c.ins, c.back, '');
     }
@@ -2123,12 +2147,12 @@ export struct CanvasView {
     AppStorage.setOrCreate('ui.cmdOverlayUp', false);
     this.commandQuery = '';
     this.commandCat = '';
-    // 七十包①：搜索框抢焦把代数行 inputFocused 翻掉了——syncKbSpacer 冻结
-    // 只护浮层期间，关面板后第一跑 visible=(inputFocused||…) 判 false =
-    // 「右滑一次键盘收了」（69包③只是把收起延迟到关面板）。恢复焦点到
-    // 代数输入行，onFocus(true) 回写后键盘原样；requestFocus 失败（行隐藏
-    // 等罕见态）由用户点一下输入行唤起兜底
-    if (!this.inputFocused && !this.useSysKeyboard) {
+    // 七十一包③（真机反馈）：开面板时键盘已收（kbReopenAfterOverlay 记忆
+    // 原状态）——关闭时还焦点给代数输入行，键盘一次弹出（不再有「收了再
+    // 弹」双动作）。关面板前键盘本来就收着的（打开前无焦点）则保持收起。
+    // requestFocus 失败（行隐藏等罕见态）由用户点一下输入行唤起兜底
+    if (this.kbReopenAfterOverlay && !this.useSysKeyboard) {
+      this.kbReopenAfterOverlay = false;
       setTimeout(() => {
         try {
           this.getUIContext().getFocusController()
@@ -2140,9 +2164,41 @@ export struct CanvasView {
   }
 
   private openCommandOverlay(): void {
+    // 七十一包③（真机反馈）：开面板键盘直接收起（原「浮层盖住键盘」的
+    // 恒挂方案在搜索框抢焦时必发收起→弹出双动作）——记原状态，stopEditing
+    // 收键盘+清焦点一次到位；关闭时按记忆还焦点重弹。stopEditing 后本函数
+    // 手动落 mathKbVisible（onBlur 异步链路冻结期不跑），键盘一次收下；
+    // sheetKbFocus/tableKbFocus/slideKbFocus 会话同理清标志，关闭时统一
+    // 还焦点代数输入行（GGB 同款：面板只插入/查看，编辑会话已结束）
+    this.kbReopenAfterOverlay = this.mathKbVisible
+      && !this.useSysKeyboard
+      && (this.inputFocused || this.sheetKbFocus || this.tableKbFocus
+        || this.slideKbFocus);
+    if (this.kbReopenAfterOverlay && this.toolAskKind === '') {
+      this.activeCtrl().stopEditing();
+      this.inputFocused = false;
+      this.sheetKbFocus = false;
+      this.tableKbFocus = false;
+      this.slideKbFocus = false;
+      this.mathKbVisible = false;
+      AppStorage.setOrCreate('ui.mathKbVisible', false);
+      this.kbSpacer = 0;
+      AppStorage.setOrCreate('ui.kbSpacer', 0);
+      if (this.slideEditLabel.length > 0) {
+        // 滑动条行内编辑会话收起（false=不回跳滚动位；syncKbSpacer 冻结期
+        // 手动清的 slideKbFocus 不会被其重复处理）
+        this.slideEditLabel = '';
+        this.slideEditErr = '';
+        this.slideEditField = -1;
+      }
+    }
     this.commandOverlayUp = true;
     AppStorage.setOrCreate('ui.cmdOverlayUp', true);
   }
+
+  // 七十一包③：关面板是否还键盘（=开面板前键盘弹着）——closeCommandOverlay
+  // 还焦点用；系统键盘模式浮层搜索框弹 IME 不走此路（与旧版一致）
+  private kbReopenAfterOverlay: boolean = false;
 
   // 七十包①：搜索框 IME 抑制空壳（AlgebraPanel.emptyKb 同构）——1px 透明
   // 行挂 customKeyboard 即压制系统 IME，浮层期间键盘观感恒定
@@ -2608,7 +2664,7 @@ export struct CanvasView {
     this.mathCaret = caret;
     this.mathCaretScript = forceScript
       || this.deriveCaretScript(this.pendingInput, caret, this.mathCaretScript);
-    this.activeCtrl().caretPosition(caret);
+    this.guardCaret(caret);
   }
 
   // 插入/删除后重推光标内外态（上游 currentField 的线性等价）：严格处于
@@ -2684,7 +2740,7 @@ export struct CanvasView {
       this.mathCaret = this.selStart;
       this.mathCaretScript = this.deriveCaretScript(s, this.selStart,
         this.mathCaretScript);
-      this.activeCtrl().caretPosition(this.selStart);
+      this.guardCaret(this.selStart);
       return;
     }
     // 六十九包②：命令调用名（Integral( …）名内/名后紧贴 '(' 处不接收
@@ -2714,7 +2770,7 @@ export struct CanvasView {
         this.mathCaret = na;
         this.mathCaretScript = this.deriveCaretScript(s, na,
           this.mathCaretScript);
-        this.activeCtrl().caretPosition(na);
+        this.guardCaret(na);
         return;
       }
       // 紧贴命令 '(' 右侧（a = 名尾，s[a] === '('）→ 吸进组内首参槽
@@ -2727,7 +2783,7 @@ export struct CanvasView {
           this.mathCaret = inPos;
           this.mathCaretScript = this.deriveCaretScript(s, inPos,
             this.mathCaretScript);
-          this.activeCtrl().caretPosition(inPos);
+          this.guardCaret(inPos);
           return;
         }
       }
@@ -2828,7 +2884,7 @@ export struct CanvasView {
       this.mathCaret = a;
       this.mathCaretScript = this.deriveCaretScript(this.pendingInput, a,
         this.mathCaretScript);
-      this.activeCtrl().caretPosition(a);
+      this.guardCaret(a);
       return;
     }
     if (a === 0) {
@@ -2867,7 +2923,7 @@ export struct CanvasView {
         this.selEnd = head.length;
         this.mathCaret = head.length;
         this.mathCaretScript = false;
-        this.activeCtrl().caretPosition(head.length);
+        this.guardCaret(head.length);
         return;
       }
     }
@@ -2884,7 +2940,7 @@ export struct CanvasView {
       this.mathCaret = et[0];
       this.mathCaretScript = this.deriveCaretScript(this.pendingInput, et[0],
         et.length === 1);
-      this.activeCtrl().caretPosition(et[0]);
+      this.guardCaret(et[0]);
       return;
     }
     if (!this.mathCaretScript) {
@@ -2901,7 +2957,7 @@ export struct CanvasView {
           this.mathCaret = delAt;
           this.mathCaretScript = this.deriveCaretScript(this.pendingInput,
             delAt, true);
-          this.activeCtrl().caretPosition(delAt);
+          this.guardCaret(delAt);
         } else {
           // 空脚本框：仅进框不删（上游 空参 bkspLastFunctionArg 同款——
           // 第十一包⑤：空模板 ⌫ 不再整删公式）
@@ -2909,7 +2965,7 @@ export struct CanvasView {
           this.selEnd = rng[0];
           this.mathCaret = rng[0];
           this.mathCaretScript = true;
-          this.activeCtrl().caretPosition(rng[0]);
+          this.guardCaret(rng[0]);
         }
         return;
       }
@@ -2933,7 +2989,7 @@ export struct CanvasView {
           this.mathCaret = nameStart;
           this.mathCaretScript = false;
         }
-        this.activeCtrl().caretPosition(this.mathCaret);
+        this.guardCaret(this.mathCaret);
         return;
       }
     }
@@ -2952,7 +3008,7 @@ export struct CanvasView {
     this.selStart = a;
     this.selEnd = a;
     this.mathCaret = a;
-    this.activeCtrl().caretPosition(a);
+    this.guardCaret(a);
   }
 
   // 光标移动（数学键盘 ←/→，第十包② 上游 CursorController 线性映射）：
@@ -3005,7 +3061,7 @@ export struct CanvasView {
     this.selEnd = stop.pos;
     this.mathCaret = stop.pos;
     this.mathCaretScript = stop.script;
-    this.activeCtrl().caretPosition(stop.pos);
+    this.guardCaret(stop.pos);
   }
 
   // 四十六包 点触定位光标：MathField 点按反查停靠点回写（与 caretMove 同
@@ -3017,7 +3073,7 @@ export struct CanvasView {
     this.mathCaret = pos;
     this.mathCaretScript = script;
     if (this.inputFocused) {
-      this.activeCtrl().caretPosition(pos);
+      this.guardCaret(pos);
       this.pendingTapCaret = -1;
     } else {
       this.pendingTapCaret = pos;
@@ -3449,7 +3505,7 @@ export struct CanvasView {
             this.selEnd = pos;
             this.mathCaret = pos;
             this.mathCaretScript = script;
-            this.activeCtrl().caretPosition(pos);
+            this.guardCaret(pos);
           }, 30);
         }
         this.syncKbSpacer();
@@ -3465,7 +3521,15 @@ export struct CanvasView {
         // 光标不跟随。回声特征 = 报告值与当前光标态相同（caretPosition 刚
         // 设的位）；不相等的报告即外部真实移动（物理键入/系统级手势），
         // 接受并置框外态（物理输入无框内语义，GGB 桌面同款）
+        // 七十一包②：程序化设位护栏窗口内的报告是「text 参数重写甩尾」
+        // 回声（值≠当前态，被七十包⑥判据当真实移动误收 → 光标跳尾），窗口
+        // 内一概忽略（本轮程序化设位是权威）。窗口过后照七十包⑥：同值回声
+        // 忽略、异值即外部真实移动（物理键入/手势）——物理键入在窗口期靠
+        // onChange 内容照常更新、guardCaret 的 120ms 重申把光标归位
         if (!this.useSysKeyboard) {
+          if (Date.now() < this.caretGuardUntil) {
+            return;
+          }
           if (s === this.mathCaret && e === this.selEnd) {
             return;
           }

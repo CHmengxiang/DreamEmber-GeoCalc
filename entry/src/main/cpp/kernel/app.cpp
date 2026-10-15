@@ -2897,7 +2897,6 @@ GeoFunction *Kernel::resolveFunctionArg(const std::string &arg)
     anon->body = std::move(body);
     return anon.release();
 }
-
 void Kernel::deleteLast()
 {
     if (geos_.empty()) return;
