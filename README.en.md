@@ -5,6 +5,8 @@
 **DreamEmber GeoCalc** is built with pure-native ArkTS plus an NAPI C++ kernel (no Web components in core features). It works entirely offline, requests no permissions and collects no data.
 
 > **v1.0.5 stable released** (tag [v1.0.5](../../releases/tag/v1.0.5)): full-featured construction + algebra calculator, now with professional LaTeX formula typesetting (open-source [RaTeX](https://github.com/erweixin/RaTeX) layout engine + self-developed linear→LaTeX converter, with embedded KaTeX glyph outlines rendered fully offline), three-pane wide-window layout for tablets / 2-in-1 PCs, and window-adaptive formula font size.
+>
+> **v1.0.6 released** (tag [v1.0.6](../../releases/tag/v1.0.6)): new GeoGebra-style command panel (open via ∙∙∙ — browse all built-in commands by category, search, recent-use pinning, one-tap insert); first-launch privacy policy dialog (consent persisted, auto re-prompt on policy updates); KaihongOS physical keyboard cursor tracking; fixed Integral/Derivative template caret placement and caret jumping when typing to the left of Integral.
 
 ## Features
 
