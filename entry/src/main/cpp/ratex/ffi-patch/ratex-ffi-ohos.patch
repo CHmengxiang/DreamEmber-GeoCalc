@@ -1,0 +1,230 @@
+diff --git a/crates/ratex-ffi/Cargo.toml b/crates/ratex-ffi/Cargo.toml
+index 31d9e55..6d0e0fe 100644
+--- a/crates/ratex-ffi/Cargo.toml
++++ b/crates/ratex-ffi/Cargo.toml
+@@ -17,5 +17,11 @@ ratex-parser = { workspace = true }
+ ratex-layout = { workspace = true }
+ serde_json = { workspace = true }
+ 
++# Glyph outline embedding (OHOS host renders glyphs as Path fills — see
++# embed_glyph_outlines in lib.rs). ab_glyph version matched to ratex-font-loader.
++ab_glyph = "0.2"
++ratex-font        = { workspace = true }
++ratex-font-loader = { workspace = true, features = ["embed-fonts"] }
++
+ [target.'cfg(target_os = "android")'.dependencies]
+ jni = { version = "0.21", default-features = false }
+diff --git a/crates/ratex-ffi/src/lib.rs b/crates/ratex-ffi/src/lib.rs
+index 20386e1..d1483a8 100644
+--- a/crates/ratex-ffi/src/lib.rs
++++ b/crates/ratex-ffi/src/lib.rs
+@@ -30,12 +30,17 @@
+ pub mod jni;
+ 
+ use std::cell::RefCell;
++use std::collections::HashMap;
+ use std::ffi::{CStr, CString};
+ use std::os::raw::{c_char, c_int};
+ 
++use ab_glyph::Font as _;
++use ratex_font::FontId;
++use ratex_font_loader::{load_fonts_for_plan_parsed, FontLoadPlan};
+ use ratex_layout::{layout, to_display_list, LayoutOptions};
+ use ratex_parser::parse;
+ use ratex_types::math_style::MathStyle;
++use ratex_types::{DisplayItem, PathCommand};
+ use serde_json::Value;
+ 
+ // Thread-local storage for the last error message.
+@@ -92,9 +97,13 @@ fn do_layout(
+     let options = LayoutOptions::default().with_style(style).with_color(color);
+     let layout_box = layout(&nodes, &options);
+     let display_list = to_display_list(&layout_box);
++    // Glyph outlines are best-effort: failure leaves GlyphPath items untouched
++    // and the host falls back to its registered-font fillText path.
++    let outlines = compute_glyph_outlines(&display_list.items);
+     let value =
+         serde_json::to_value(&display_list).map_err(|e| format!("serialization error: {e}"))?;
+     let mut sanitized = sanitize_json_numbers(value);
++    embed_glyph_outlines(&mut sanitized, &outlines);
+     // Add a protocol version at the top level for forward-compatible decoding.
+     if let Value::Object(ref mut map) = sanitized {
+         map.insert("version".to_string(), Value::Number(1.into()));
+@@ -102,6 +111,177 @@ fn do_layout(
+     serde_json::to_string(&sanitized).map_err(|e| format!("JSON stringify error: {e}"))
+ }
+ 
++// ---------------------------------------------------------------------------
++// Glyph outline embedding
++//
++// Why: on real HarmonyOS devices the Canvas fillText resolution of fonts
++// registered via registerFont proved unreliable (intermittently falls back to
++// system fonts - letters rendered upright instead of KaTeX italic), while the
++// emulator and desktop hosts behave fine. measureText probing cannot detect
++// this either: it does not resolve registered custom fonts at all.
++//
++// Fix: embed TrueType glyph outlines directly in the DisplayList. Each
++// GlyphPath item gains a `commands` field (same schema as Path items) with the
++// outline in em units relative to the item's x/y, y already flipped to the
++// protocol's top-left/baseline coordinate space. Hosts draw them with their
++// existing Path fill logic - no font service involvement. Items without an
++// embedded outline (system fallback fonts such as CJK/emoji) keep using
++// fillText against registered fonts.
++// ---------------------------------------------------------------------------
++fn compute_glyph_outlines(items: &[DisplayItem]) -> HashMap<(String, u32), Vec<PathCommand>> {
++    let mut map: HashMap<(String, u32), Vec<PathCommand>> = HashMap::new();
++    if items.is_empty() {
++        return map;
++    }
++    // Embedded KaTeX fonts only; system fallbacks (CJK/emoji) have no bytes here.
++    let plan = FontLoadPlan::for_display_items_lazy(items);
++    let Ok(fonts) = load_fonts_for_plan_parsed("", &plan) else {
++        return map;
++    };
++    for item in items {
++        let DisplayItem::GlyphPath {
++            font,
++            char_code,
++            scale,
++            ..
++        } = item
++        else {
++            continue;
++        };
++        let Some(font_id) = FontId::parse(font) else {
++            continue;
++        };
++        let Some(parsed) = fonts.get(&font_id) else {
++            continue;
++        };
++        let key = (font.clone(), *char_code);
++        if map.contains_key(&key) {
++            continue;
++        }
++        let Some(ch) = char::from_u32(*char_code) else {
++            continue;
++        };
++        // glyph_id maps unknown codepoints to .notdef (GlyphId(0)) — skip those
++        // so the host falls back to fillText instead of drawing tofu boxes.
++        let glyph_id = parsed.glyph_id(ch);
++        if glyph_id.0 == 0 {
++            continue;
++        }
++        let Some(outline) = parsed.outline(glyph_id) else {
++            continue;
++        };
++        let Some(upem) = parsed.units_per_em() else {
++            continue;
++        };
++        let upem = upem.max(1.0);
++        let s = (*scale as f32 / upem) as f64;
++        // ab_glyph segments carry their own start point and contours are
++        // implicit: a segment whose start differs from the previous end begins
++        // a new contour (emit Close + MoveTo). y is flipped to top-left origin.
++        let mut cmds: Vec<PathCommand> = Vec::with_capacity(outline.curves.len() + 2);
++        let mut open = false;
++        let mut cur = ab_glyph::Point::default();
++        for curve in &outline.curves {
++            match *curve {
++                ab_glyph::OutlineCurve::Line(from, to) => {
++                    if !open || from != cur {
++                        if open {
++                            cmds.push(PathCommand::Close);
++                        }
++                        cmds.push(PathCommand::MoveTo {
++                            x: from.x as f64 * s,
++                            y: -(from.y as f64) * s,
++                        });
++                    }
++                    open = true;
++                    cur = to;
++                    cmds.push(PathCommand::LineTo {
++                        x: to.x as f64 * s,
++                        y: -(to.y as f64) * s,
++                    });
++                }
++                ab_glyph::OutlineCurve::Quad(from, c, to) => {
++                    if !open || from != cur {
++                        if open {
++                            cmds.push(PathCommand::Close);
++                        }
++                        cmds.push(PathCommand::MoveTo {
++                            x: from.x as f64 * s,
++                            y: -(from.y as f64) * s,
++                        });
++                    }
++                    open = true;
++                    cur = to;
++                    cmds.push(PathCommand::QuadTo {
++                        x1: c.x as f64 * s,
++                        y1: -(c.y as f64) * s,
++                        x: to.x as f64 * s,
++                        y: -(to.y as f64) * s,
++                    });
++                }
++                ab_glyph::OutlineCurve::Cubic(from, c1, c2, to) => {
++                    if !open || from != cur {
++                        if open {
++                            cmds.push(PathCommand::Close);
++                        }
++                        cmds.push(PathCommand::MoveTo {
++                            x: from.x as f64 * s,
++                            y: -(from.y as f64) * s,
++                        });
++                    }
++                    open = true;
++                    cur = to;
++                    cmds.push(PathCommand::CubicTo {
++                        x1: c1.x as f64 * s,
++                        y1: -(c1.y as f64) * s,
++                        x2: c2.x as f64 * s,
++                        y2: -(c2.y as f64) * s,
++                        x: to.x as f64 * s,
++                        y: -(to.y as f64) * s,
++                    });
++                }
++            }
++        }
++        if open {
++            cmds.push(PathCommand::Close);
++        }
++        if !cmds.is_empty() {
++            map.insert(key, cmds);
++        }
++    }
++    map
++}
++
++fn embed_glyph_outlines(doc: &mut Value, map: &HashMap<(String, u32), Vec<PathCommand>>) {
++    if map.is_empty() {
++        return;
++    }
++    let Some(items) = doc.get_mut("items").and_then(Value::as_array_mut) else {
++        return;
++    };
++    for item in items.iter_mut() {
++        let is_glyph = item.get("type").and_then(Value::as_str) == Some("GlyphPath");
++        if !is_glyph {
++            continue;
++        }
++        let font = item
++            .get("font")
++            .and_then(Value::as_str)
++            .unwrap_or("Main-Regular")
++            .to_string();
++        let char_code = item.get("char_code").and_then(Value::as_u64).unwrap_or(0) as u32;
++        let Some(cmds) = map.get(&(font, char_code)) else {
++            continue;
++        };
++        let Ok(cmds_json) = serde_json::to_value(cmds) else {
++            continue;
++        };
++        if let Some(obj) = item.as_object_mut() {
++            obj.insert("commands".to_string(), cmds_json);
++        }
++    }
++}
++
+ // ---------------------------------------------------------------------------
+ // Public structs
+ // ---------------------------------------------------------------------------
