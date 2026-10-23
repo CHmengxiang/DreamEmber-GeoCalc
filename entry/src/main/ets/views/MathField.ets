@@ -1060,6 +1060,8 @@ export const K_CMD_CALL_NAMES: string[] = [
   'nthroot', 'floor', 'ceil', 'integral', 'root', 'extremum', 'text',
   'sequence', 'element', 'first', 'last', 'sort', 'unique', 'reverse',
   'mean', 'median', 'min', 'max', 'sum', 'product', 'sd', 'variance',
+  'fitline', 'fitpoly', 'fitexp', 'correlationcoefficient',
+  'transpose', 'determinant', 'invert', 'identity', 'row', 'column',
   'simplify', 'expand', 'factor', 'lim', 'matrix', 'cases',
 ];
 
@@ -1070,8 +1072,8 @@ export function commandCallNameAt(raw: string, start: number): number {
   if (po < 0) {
     return -1;
   }
-  if (po > start + 16) {
-    return -1;   // 最长命令名 perpendicularline(16)
+  if (po > start + 22) {
+    return -1;   // 最长命令名 correlationcoefficient(22，1.0.6.1)
   }
   if (start > 0) {
     const p = raw.charAt(start - 1);

@@ -522,12 +522,16 @@ bool Kernel::inputImpl(const std::string &srcRaw)
             }
             GeoPoint *op = dynamic_cast<GeoPoint *>(old);
             GeoNumeric *on = dynamic_cast<GeoNumeric *>(old);
+            GeoList *ol = dynamic_cast<GeoList *>(old);
             bool freeObj = (op && op->isFree && !op->calc) || (on && on->isFree && !on->calc)
                 || dynamic_cast<GeoFunction *>(old) != nullptr
-                || (dynamic_cast<GeoList *>(old) != nullptr && old->cmdName.empty())
+                || (ol != nullptr && ol->cmdName.empty())
                 // 轮 D：依随表达式数值（B1=A1+1）无依赖者时允许输入行重建
                 //（上游 单元格重输语义；重定义入口本就放行）
-                || (on && on->calc && on->cmdName.empty());
+                || (on && on->calc && on->cmdName.empty())
+                // 1.0.6.1：矩阵依随产物（Transpose/Invert 等）同理放行——
+                // 上游 M={{…}} 重输即重建，Transpose(M) 的依赖者一并级联
+                || (ol != nullptr && ol->calc);
             if (!hasDeps && freeObj) {
                 for (auto it = geos_.begin(); it != geos_.end(); ++it) {
                     if (it->get() == old) { geos_.erase(it); break; }
@@ -690,7 +694,102 @@ bool Kernel::inputImpl(const std::string &srcRaw)
         }
     }
 
-    // 1.5) 列表：{...} 或 L={...}（N6 批次③；元素为不含 x 的数值表达式）
+    // 1.5) 列表：{...} 或 L={...}（N6 批次③；元素为不含 x 的数值表达式）。
+    // 1.0.6.1：{{...},{...}} 嵌套形式按矩阵解析（GGB 矩阵 = 列表的列表，
+    // 行主序扁平进 values，isMatrix/mrows/mcols 落位；行错位即拒）
+    if (!made && !rhs.empty() && rhs.front() == '{' && rhs.back() == '}'
+        && (name.empty() || name.find('(') == std::string::npos)) {
+        const std::string inner = rhs.substr(1, rhs.size() - 2);
+        auto L = std::make_unique<GeoList>();
+        L->src = "{" + inner + "}";
+        // 嵌套判定：非引号区首个 '{' 在末尾之前（{{1,2},{3,4}} vs {1,{2}} 中
+        // 混合形式也按矩阵处理——上游 混合即未定义，我们直接拒绝）
+        {
+            size_t firstBrace = std::string::npos;
+            for (size_t bi = 0; bi < inner.size(); ++bi) {
+                if (inner[bi] == '{') { firstBrace = bi; break; }
+            }
+            if (firstBrace != std::string::npos) {
+                // 矩阵字面量：逐行拆 {..}，行内逐元素求值
+                int rows = 0, cols = -1;
+                bool ok = true;
+                size_t pos = 0;
+                while (pos < inner.size() && ok) {
+                    const size_t rb = inner.find('{', pos);
+                    if (rb == std::string::npos) break;
+                    const size_t re = inner.find('}', rb);
+                    if (re == std::string::npos) {
+                        lastError = "矩阵行缺少右花括号";
+                        ok = false;
+                        break;
+                    }
+                    const std::string row = inner.substr(rb + 1, re - rb - 1);
+                    int cnt = 0;
+                    size_t rs = 0;
+                    for (;;) {
+                        const size_t rc = row.find(',', rs);
+                        const std::string part = row.substr(rs,
+                            rc == std::string::npos ? std::string::npos : rc - rs);
+                        const std::string t = Trim(part);
+                        if (!t.empty()) {
+                            Expr e;
+                            std::string err;
+                            if (!e.parse(t, err)) {
+                                lastError = err.empty() ? "矩阵元素无法解析: " + t : err;
+                                ok = false;
+                            } else if (e.containsX() || e.containsY()) {
+                                lastError = "矩阵元素不能含变量: " + t;
+                                ok = false;
+                            } else {
+                                const double v = e.eval(0.0);
+                                if (!std::isfinite(v)) {
+                                    lastError = "矩阵元素不是有限数: " + t;
+                                    ok = false;
+                                } else {
+                                    L->values.push_back(v);
+                                    ++cnt;
+                                }
+                            }
+                        }
+                        if (rc == std::string::npos || !ok) break;
+                        rs = rc + 1;
+                    }
+                    if (ok) {
+                        if (cols < 0) cols = cnt;
+                        else if (cnt != cols) {
+                            lastError = "矩阵各行元素个数不一致";
+                            ok = false;
+                        }
+                    }
+                    if (!ok) break;
+                    ++rows;
+                    pos = re + 1;
+                }
+                if (!ok) return false;
+                // 行间残余文本（如 "{1,2}x{3,4}"）：只在花括号/逗号/空白之外
+                // 扫描，数字与运算符是行内容的一部分，不在此判
+                {
+                    int depth = 0;
+                    for (size_t ci = 0; ci < inner.size(); ++ci) {
+                        const char c = inner[ci];
+                        if (c == '{') ++depth;
+                        else if (c == '}') --depth;
+                        else if (depth == 0 && c != ',' && !isspace((unsigned char)c)) {
+                            lastError = "矩阵字面量格式：{{a,b},…}";
+                            return false;
+                        }
+                    }
+                }
+                if (rows <= 0 || cols <= 0) { lastError = "矩阵不能为空"; return false; }
+                L->isMatrix = true;
+                L->mrows = rows;
+                L->mcols = cols;
+                made = std::move(L);
+            }
+        }
+    }
+
+    // 1.5b) 平面列表：{...}（元素为不含 x 的数值表达式）
     if (!made && !rhs.empty() && rhs.front() == '{' && rhs.back() == '}'
         && (name.empty() || name.find('(') == std::string::npos)) {
         const std::string inner = rhs.substr(1, rhs.size() - 2);
@@ -928,6 +1027,115 @@ static double ListStat(const std::vector<double> &v, const std::string &kind)
     std::sort(s.begin(), s.end());
     const size_t m = s.size();
     return (m % 2 == 1) ? s[m / 2] : (s[m / 2 - 1] + s[m / 2]) / 2.0;
+}
+
+// 1.0.6.1 线性回归批：正规方程解法（MᵗM·p = Mᵗy，列主元高斯消元）。
+// 上游用 QR 分解（commons-math）；N 数据点 ≤ 万级、阶数 ≤ 8 的场景两者
+// 结果一致且高斯消元实现小、无外部依赖。奇异（数据点重复 x 且阶数≥去重后
+// 点数）返回 false
+static bool SolveNormalEquations(std::vector<std::vector<double>> M,
+                                 std::vector<double> y, std::vector<double> &p)
+{
+    const int n = (int)M.size();
+    const int w = n > 0 ? (int)M[0].size() : 0;
+    if (n == 0 || w == 0) return false;
+    // A = MᵗM（w×w 对称），b = Mᵗy
+    std::vector<std::vector<double>> A(w, std::vector<double>(w, 0.0));
+    std::vector<double> b(w, 0.0);
+    for (int i = 0; i < n; ++i) {
+        for (int j = 0; j < w; ++j) {
+            b[j] += M[i][j] * y[i];
+            for (int k = 0; k < w; ++k) A[j][k] += M[i][j] * M[i][k];
+        }
+    }
+    // 列主元高斯消元
+    for (int col = 0; col < w; ++col) {
+        int piv = col;
+        for (int r = col + 1; r < w; ++r) {
+            if (fabs(A[r][col]) > fabs(A[piv][col])) piv = r;
+        }
+        if (fabs(A[piv][col]) < 1e-12) return false;   // 奇异
+        if (piv != col) {
+            std::swap(A[piv], A[col]);
+            std::swap(b[piv], b[col]);
+        }
+        for (int r = col + 1; r < w; ++r) {
+            const double f = A[r][col] / A[col][col];
+            if (f == 0.0) continue;
+            for (int c2 = col; c2 < w; ++c2) A[r][c2] -= f * A[col][c2];
+            b[r] -= f * b[col];
+        }
+    }
+    p.assign(w, 0.0);
+    for (int r = w - 1; r >= 0; --r) {
+        double s = b[r];
+        for (int c2 = r + 1; c2 < w; ++c2) s -= A[r][c2] * p[c2];
+        p[r] = s / A[r][r];
+        if (!std::isfinite(p[r])) return false;
+    }
+    return true;
+}
+
+// 多项式系数（p[0]=常数项 … p[k]=x^k 项）→ 内核函数源文（"c0 + c1*x + …"）。
+// 系数用 %.17g 全精度（%.6g 会在 x^3 项大系数上损失回归精度）
+static std::string PolyCoeffSrc(const std::vector<double> &p)
+{
+    char b[64];
+    std::string s;
+    bool first = true;
+    for (size_t i = 0; i < p.size(); ++i) {
+        if (fabs(p[i]) < 1e-15) continue;
+        snprintf(b, sizeof(b), "%.17g", p[i]);
+        if (!first) s += (p[i] > 0 ? " + " : " - ");
+        else if (p[i] < 0) s += "-";
+        s += b;
+        if (i > 0) {
+            s += "*x";
+            if (i > 1) s += "^" + std::to_string(i);
+        }
+        first = false;
+    }
+    if (first) s = "0";
+    return s;
+}
+
+// n×n 实矩阵求逆（列主元高斯-约当）。奇异返回 false
+static bool InvertMatrix(std::vector<std::vector<double>> A,
+                         std::vector<std::vector<double>> &inv)
+{
+    const int n = (int)A.size();
+    if (n == 0) return false;
+    for (int i = 0; i < n; ++i) {
+        if ((int)A[i].size() != n) return false;
+    }
+    inv.assign(n, std::vector<double>(n, 0.0));
+    for (int i = 0; i < n; ++i) inv[i][i] = 1.0;
+    for (int col = 0; col < n; ++col) {
+        int piv = col;
+        for (int r = col + 1; r < n; ++r) {
+            if (fabs(A[r][col]) > fabs(A[piv][col])) piv = r;
+        }
+        if (fabs(A[piv][col]) < 1e-12) return false;   // 奇异
+        if (piv != col) {
+            std::swap(A[piv], A[col]);
+            std::swap(inv[piv], inv[col]);
+        }
+        const double d = A[col][col];
+        for (int c2 = 0; c2 < n; ++c2) {
+            A[col][c2] /= d;
+            inv[col][c2] /= d;
+        }
+        for (int r = 0; r < n; ++r) {
+            if (r == col) continue;
+            const double f = A[r][col];
+            if (f == 0.0) continue;
+            for (int c2 = 0; c2 < n; ++c2) {
+                A[r][c2] -= f * A[col][c2];
+                inv[r][c2] -= f * inv[col][c2];
+            }
+        }
+    }
+    return true;
 }
 
 // 内核源文 → giac 求值串：mod(A,B) 翻译为 (A-B*floor(A/B))（欧几里得余，
@@ -2567,6 +2775,454 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         n->inputs = { L };
         n->update();
         made = std::move(n);
+        return true;
+    }
+
+    // ---------- 1.0.6.1 回归批（Fit 族）与矩阵代数 ----------
+    // 输入形态对齐上游：点序列 = 点列表（列表命令走 tryCommand 时实参只有
+    // 列表标签）或两个数值列表（x/y 各一）。内核列表是纯数值（点列表在
+    // 本内核无对应物），点序列按「两个等长数值列表」解释——FitLine({1,2},
+    // {3,5}) 即回归 y on x。官方 .ggb 保存的点列表重放为 Expression
+    // {A1,A2,…}（本内核点无法进列表），这类文件落到「未找到列表」的既有
+    // 报错，不静默错拟
+
+    // FitLine(x 列表, y 列表) → 直线（y on x 最小二乘）。依随两列表重算。
+    // 直线 ax+by=c 与上游 AlgoFitLineY 同式（Sxy/Sxx 消除除法的系数形）
+    if (cmdLower == "fitline" && a.size() == 2) {
+        GeoList *Lx = dynamic_cast<GeoList *>(lookup(a[0]));
+        GeoList *Ly = dynamic_cast<GeoList *>(lookup(a[1]));
+        if (!Lx || !Ly) { lastError = "FitLine 需要（x 列表, y 列表）"; made = nullptr; return true; }
+        if (Lx->isMatrix || Ly->isMatrix) { lastError = "FitLine 需要数值列表（矩阵不可）"; made = nullptr; return true; }
+        auto l = std::make_unique<GeoLine>();
+        l->mode = GeoLine::Mode::Fixed;
+        GeoList *sx = Lx, *sy = Ly;
+        l->calc = [sx, sy](GeoLine *g) {
+            const size_t n = std::min(sx->values.size(), sy->values.size());
+            double sumx = 0, sumy = 0, sumxx = 0, sumxy = 0;
+            for (size_t i = 0; i < n; ++i) {
+                const double x = sx->values[i], y = sy->values[i];
+                sumx += x; sumy += y; sumxx += x * x; sumxy += x * y;
+            }
+            if (n < 2) { g->a = 0; g->b = 1; g->c = 0; return; }
+            const double Sxy = sumxy - sumx * sumy / n;
+            const double Sxx = sumxx - sumx * sumx / n;
+            const double mux = sumx / n, muy = sumy / n;
+            if (fabs(Sxx) < 1e-12) {
+                // x 全同：最小二乘直线退化为竖直线 x = mux（Sxy 同为 0 时
+                // 上游 AlgoFitLineY 判未定义；几何上竖直线是唯一解）
+                g->a = 1;
+                g->b = 0;
+                g->c = mux;
+                g->verticalConst = true;
+                return;
+            }
+            // y - muy = (Sxy/Sxx)(x - mux) → Sxy·x − Sxx·y = Sxy·mux − Sxx·muy
+            g->verticalConst = false;
+            g->a = Sxy;
+            g->b = -Sxx;
+            g->c = Sxy * mux - Sxx * muy;
+        };
+        l->cmdName = "FitLine";
+        l->cmdArgs = { a[0], a[1] };
+        l->inputs = { Lx, Ly };
+        l->update();
+        made = std::move(l);
+        return true;
+    }
+
+    // FitPoly(x 列表, y 列表, 阶数) → 多项式回归函数（1..8 阶；正规方程）。
+    // 依随两列表与阶数对象重算；重算后 src/body 整体重建
+    if (cmdLower == "fitpoly" && (a.size() == 2 || a.size() == 3)) {
+        GeoList *Lx = dynamic_cast<GeoList *>(lookup(a[0]));
+        GeoList *Ly = dynamic_cast<GeoList *>(lookup(a[1]));
+        if (!Lx || !Ly) { lastError = "FitPoly 需要（x 列表, y 列表, 阶数）"; made = nullptr; return true; }
+        if (Lx->isMatrix || Ly->isMatrix) { lastError = "FitPoly 需要数值列表（矩阵不可）"; made = nullptr; return true; }
+        double degv = 1;
+        GeoNumeric *degObj = nullptr;
+        if (a.size() == 3) {
+            degObj = dynamic_cast<GeoNumeric *>(lookup(a[2]));
+            if (!degObj && !numArg(a[2], degv)) {
+                lastError = "阶数须为数或数值对象: " + a[2];
+                made = nullptr;
+                return true;
+            }
+            if (degObj) degv = degObj->value;
+        }
+        const int deg = (int)llround(degv);
+        if (deg < 1 || deg > 8) {
+            lastError = "阶数须为 1..8 的整数: " + (a.size() == 3 ? a[2] : std::string("(缺省)"));
+            made = nullptr;
+            return true;
+        }
+        const int deg0 = deg;
+        auto d = std::make_unique<GeoFunction>();
+        d->color = {0x8B, 0x45, 0x13};
+        GeoList *sx = Lx, *sy = Ly;
+        GeoNumeric *dobj = degObj;
+        // 范数化拟合（x 减均值除标准差，改善消元条件数）；dg=1..8
+        auto fitNorm = [sx, sy](int dg, std::vector<double> &p) -> bool {
+            const size_t n = std::min(sx->values.size(), sy->values.size());
+            if (n < 2 || (int)n < dg + 1) return false;
+            double mx = 0;
+            for (size_t i = 0; i < n; ++i) mx += sx->values[i];
+            mx /= n;
+            double vx = 0;
+            for (size_t i = 0; i < n; ++i) vx += (sx->values[i] - mx) * (sx->values[i] - mx);
+            vx = sqrt(vx / n);
+            if (vx < 1e-12) return false;   // x 全同（竖直线，非函数）
+            std::vector<std::vector<double>> M(n, std::vector<double>(dg + 1));
+            std::vector<double> y(n);
+            for (size_t i = 0; i < n; ++i) {
+                const double t = (sx->values[i] - mx) / vx;
+                double b = 1;
+                for (int j = 0; j <= dg; ++j) { M[i][j] = b; b *= t; }
+                y[i] = sy->values[i];
+            }
+            return SolveNormalEquations(M, y, p);
+        };
+        // 范数化系数 → 原始 x 系数：(t = (x-mx)/vx) 按二项式展开回 x 的幂
+        auto normToRaw = [sx](int dg, const std::vector<double> &pn) {
+            double mx = 0;
+            const size_t n = sx->values.size();
+            for (size_t i = 0; i < n; ++i) mx += sx->values[i];
+            mx /= n;
+            double vx = 0;
+            for (size_t i = 0; i < n; ++i) vx += (sx->values[i] - mx) * (sx->values[i] - mx);
+            vx = sqrt(vx / n);
+            std::vector<double> raw(dg + 1, 0.0);
+            for (int i = 0; i <= dg; ++i) {
+                // t^i = Σ C(i,k) (-mx)^(i-k) x^k / vx^i（t=(x-mx)/vx 按二项式展开）
+                double cm = 1;   // C(i,k)
+                for (int k = 0; k <= i; ++k) {
+                    raw[k] += pn[i] * cm * pow(-mx, i - k) / pow(vx, i);
+                    cm = cm * (i - k) / (k + 1);
+                }
+            }
+            return raw;
+        };
+        std::vector<double> p0;
+        if (!fitNorm(deg0, p0)) {
+            lastError = "FitPoly 求解失败（点数不足 / x 全同 / 奇异）";
+            made = nullptr;
+            return true;
+        }
+        const std::vector<double> raw0 = normToRaw(deg0, p0);
+        d->src = PolyCoeffSrc(raw0);
+        {
+            std::string err;
+            d->body.parse(d->src, err);
+        }
+        // 依随重算走 alt 闭包（Derivative 同款）：求值前比对两列表内容与
+        // 阶数，变了就重解并记忆化（body/src 只承载初始拟合的代数区显示）
+        auto cache = std::make_shared<std::vector<double>>();   // raw 系数（空=无效）
+        auto cacheKey = std::make_shared<std::vector<double>>();
+        d->alt = [sx, sy, dobj, deg0, fitNorm, normToRaw, cache, cacheKey](double x) -> double {
+            const int dg = dobj ? std::max(1, std::min(8, (int)llround(dobj->value))) : deg0;
+            std::vector<double> nk;
+            nk.reserve(sx->values.size() + sy->values.size() + 1);
+            nk.insert(nk.end(), sx->values.begin(), sx->values.end());
+            nk.insert(nk.end(), sy->values.begin(), sy->values.end());
+            nk.push_back((double)dg);
+            if (cache->empty() || *cacheKey != nk) {
+                std::vector<double> p;
+                if (!fitNorm(dg, p)) return NAN;
+                *cache = normToRaw(dg, p);
+                *cacheKey = nk;
+            }
+            double r = 0;   // Horner（cache 内为常数项…x^dg 项）
+            for (auto it = cache->rbegin(); it != cache->rend(); ++it) r = r * x + *it;
+            return r;
+        };
+        d->cmdName = "FitPoly";
+        d->cmdArgs = a;
+        d->inputs = { Lx, Ly };
+        if (degObj) d->inputs.push_back(degObj);
+        d->update();
+        made = std::move(d);
+        return true;
+    }
+
+    // FitExp(x 列表, y 列表) → a·e^(b·x)（ln(y) 线性化最小二乘，上游 同式：
+    // y≤0 的点按首个 y 的符号取绝对值，仍负则失败）
+    if (cmdLower == "fitexp" && a.size() == 2) {
+        GeoList *Lx = dynamic_cast<GeoList *>(lookup(a[0]));
+        GeoList *Ly = dynamic_cast<GeoList *>(lookup(a[1]));
+        if (!Lx || !Ly) { lastError = "FitExp 需要（x 列表, y 列表）"; made = nullptr; return true; }
+        if (Lx->isMatrix || Ly->isMatrix) { lastError = "FitExp 需要数值列表（矩阵不可）"; made = nullptr; return true; }
+        // 先解一次拿 a/b 定 src（失败即拒）
+        double A0 = 0, B0 = 0;
+        {
+            double sx = 0, sy = 0, sxx = 0, sxy = 0;
+            size_t n = 0;
+            const double sign = (!Ly->values.empty() && Ly->values[0] < 0) ? -1.0 : 1.0;
+            for (size_t i = 0; i < Lx->values.size() && i < Ly->values.size(); ++i) {
+                const double yv = Ly->values[i] * sign;
+                if (yv <= 0) break;
+                const double ly = log(yv);
+                sx += Lx->values[i]; sy += ly; sxx += Lx->values[i] * Lx->values[i];
+                sxy += Lx->values[i] * ly;
+                ++n;
+            }
+            if (n < 2 || n != std::min(Lx->values.size(), Ly->values.size())) {
+                lastError = "FitExp 需要至少 2 个 y>0（或同号）的数据点";
+                made = nullptr;
+                return true;
+            }
+            const double den = n * sxx - sx * sx;
+            if (fabs(den) < 1e-12) { lastError = "FitExp 求解失败（x 全同）"; made = nullptr; return true; }
+            B0 = (n * sxy - sx * sy) / den;
+            A0 = (sy - B0 * sx) / n;
+            A0 = exp(A0) * sign;
+        }
+        auto d = std::make_unique<GeoFunction>();
+        d->color = {0x8B, 0x45, 0x13};
+        GeoList *sx = Lx, *sy = Ly;
+        // a/b 双值缓存（shared_ptr 保闭包悬垂安全）：alt 求值前先重解
+        // （内容键比对去抖），两列表任一重算后拟合自动跟随
+        auto ab = std::make_shared<std::pair<double, double>>(A0, B0);
+        auto key = std::make_shared<std::vector<double>>();
+        d->alt = [sx, sy, ab, key](double x) -> double {
+            std::vector<double> nk;
+            nk.reserve(sx->values.size() + sy->values.size());
+            nk.insert(nk.end(), sx->values.begin(), sx->values.end());
+            nk.insert(nk.end(), sy->values.begin(), sy->values.end());
+            if (*key != nk) {
+                size_t n = 0;
+                double s1 = 0, s2 = 0, s3 = 0, s4 = 0;
+                const double sign = (!sy->values.empty() && sy->values[0] < 0) ? -1.0 : 1.0;
+                for (size_t i = 0; i < sx->values.size() && i < sy->values.size(); ++i) {
+                    const double yv = sy->values[i] * sign;
+                    if (yv <= 0) return NAN;
+                    const double ly = log(yv);
+                    s1 += sx->values[i]; s2 += ly; s3 += sx->values[i] * sx->values[i];
+                    s4 += sx->values[i] * ly;
+                    ++n;
+                }
+                if (n >= 2) {
+                    const double den = n * s3 - s1 * s1;
+                    if (fabs(den) >= 1e-12) {
+                        ab->second = (n * s4 - s1 * s2) / den;
+                        ab->first = exp((s2 - ab->second * s1) / n) * sign;
+                    }
+                }
+                *key = std::move(nk);
+            }
+            return ab->first * exp(ab->second * x);
+        };
+        d->src = PolyCoeffSrc({A0}) + "*e^(" + PolyCoeffSrc({B0}) + "*x)";
+        d->cmdName = "FitExp";
+        d->cmdArgs = { a[0], a[1] };
+        d->inputs = { Lx, Ly };
+        d->update();
+        made = std::move(d);
+        return true;
+    }
+
+    // CorrelationCoefficient(x 列表, y 列表) → Pearson 积差相关系数 r
+    if (cmdLower == "correlationcoefficient" && a.size() == 2) {
+        GeoList *Lx = dynamic_cast<GeoList *>(lookup(a[0]));
+        GeoList *Ly = dynamic_cast<GeoList *>(lookup(a[1]));
+        if (!Lx || !Ly) { lastError = "CorrelationCoefficient 需要（x 列表, y 列表）"; made = nullptr; return true; }
+        if (Lx->isMatrix || Ly->isMatrix) { lastError = "需要数值列表（矩阵不可）"; made = nullptr; return true; }
+        auto n = std::make_unique<GeoNumeric>();
+        n->isFree = false;
+        GeoList *sx = Lx, *sy = Ly;
+        n->calc = [sx, sy]() -> double {
+            const size_t cnt = std::min(sx->values.size(), sy->values.size());
+            if (cnt < 2) return NAN;
+            double sumx = 0, sumy = 0, sumxx = 0, sumyy = 0, sumxy = 0;
+            for (size_t i = 0; i < cnt; ++i) {
+                const double x = sx->values[i], y = sy->values[i];
+                sumx += x; sumy += y; sumxx += x * x; sumyy += y * y; sumxy += x * y;
+            }
+            const double dxx = sumxx * cnt - sumx * sumx;
+            const double dyy = sumyy * cnt - sumy * sumy;
+            if (dxx <= 0 || dyy <= 0) return NAN;
+            return (sumxy * cnt - sumx * sumy) / sqrt(dxx * dyy);
+        };
+        n->cmdName = "CorrelationCoefficient";
+        n->cmdArgs = { a[0], a[1] };
+        n->cmd = "CorrelationCoefficient(" + a[0] + ", " + a[1] + ")";
+        n->inputs = { Lx, Ly };
+        n->update();
+        made = std::move(n);
+        return true;
+    }
+
+    // ---------- 1.0.6.1 矩阵代数（矩阵 = 列表的列表 {{…},{…}}，GGB 同构） ----------
+
+    // Transpose(M) → 矩阵（依随源重算）
+    if (cmdLower == "transpose" && a.size() == 1) {
+        GeoList *M = dynamic_cast<GeoList *>(lookup(a[0]));
+        if (!M || !M->isMatrix) { lastError = "Transpose 需要（矩阵）"; made = nullptr; return true; }
+        auto out = std::make_unique<GeoList>();
+        GeoList *src = M;
+        out->calc = [src](GeoList *g) {
+            g->isMatrix = true;
+            g->mrows = src->mcols;
+            g->mcols = src->mrows;
+            g->values.assign(src->values.size(), 0.0);
+            for (int r = 0; r < src->mrows; ++r)
+                for (int c = 0; c < src->mcols; ++c)
+                    g->values[(size_t)c * src->mrows + r] = src->values[(size_t)r * src->mcols + c];
+        };
+        out->cmdName = "Transpose";
+        out->cmdArgs = { a[0] };
+        out->inputs = { M };
+        out->update();
+        made = std::move(out);
+        return true;
+    }
+
+    // Determinant(M) → 数值（整数矩阵取整，上游 GgbMat.hasOnlyIntegers 语义）
+    if (cmdLower == "determinant" && a.size() == 1) {
+        GeoList *M = dynamic_cast<GeoList *>(lookup(a[0]));
+        if (!M || !M->isMatrix || M->mrows != M->mcols) {
+            lastError = "Determinant 需要（方阵）";
+            made = nullptr;
+            return true;
+        }
+        auto n = std::make_unique<GeoNumeric>();
+        n->isFree = false;
+        GeoList *src = M;
+        n->calc = [src]() -> double {
+            const int n = src->mrows;
+            std::vector<std::vector<double>> A(n, std::vector<double>(n));
+            bool allInt = true;
+            for (int r = 0; r < n; ++r) {
+                for (int c = 0; c < n; ++c) {
+                    const double v = src->values[(size_t)r * n + c];
+                    A[r][c] = v;
+                    if (v != floor(v)) allInt = false;
+                }
+            }
+            double det = 1;
+            for (int col = 0; col < n; ++col) {
+                int piv = col;
+                for (int r = col + 1; r < n; ++r) {
+                    if (fabs(A[r][col]) > fabs(A[piv][col])) piv = r;
+                }
+                if (fabs(A[piv][col]) < 1e-300) return 0.0;   // 奇异
+                if (piv != col) { std::swap(A[piv], A[col]); det = -det; }
+                det *= A[col][col];
+                for (int r = col + 1; r < n; ++r) {
+                    const double f = A[r][col] / A[col][col];
+                    if (f == 0.0) continue;
+                    for (int c2 = col; c2 < n; ++c2) A[r][c2] -= f * A[col][c2];
+                }
+            }
+            return allInt ? round(det) : det;
+        };
+        n->cmdName = "Determinant";
+        n->cmdArgs = { a[0] };
+        n->cmd = "Determinant(" + a[0] + ")";
+        n->inputs = { M };
+        n->update();
+        made = std::move(n);
+        return true;
+    }
+
+    // Invert(M) → 矩阵（方阵且非奇异；整数矩阵取整元素，上游 同语义）。
+    // 创建即校验奇异（直接拒绝）；依随重算中源变奇异则产物置 NaN 阵
+    if (cmdLower == "invert" && a.size() == 1) {
+        GeoList *M = dynamic_cast<GeoList *>(lookup(a[0]));
+        if (!M || !M->isMatrix || M->mrows != M->mcols) {
+            lastError = "Invert 需要（方阵）";
+            made = nullptr;
+            return true;
+        }
+        {
+            const int n = M->mrows;
+            std::vector<std::vector<double>> A(n, std::vector<double>(n));
+            for (int r = 0; r < n; ++r)
+                for (int c = 0; c < n; ++c)
+                    A[r][c] = M->values[(size_t)r * n + c];
+            std::vector<std::vector<double>> inv;
+            if (!InvertMatrix(A, inv)) {
+                lastError = "矩阵奇异（行列式为 0），不可求逆";
+                made = nullptr;
+                return true;
+            }
+        }
+        auto out = std::make_unique<GeoList>();
+        GeoList *src = M;
+        out->calc = [src](GeoList *g) {
+            g->isMatrix = true;
+            g->mrows = src->mrows;
+            g->mcols = src->mcols;
+            const int n = src->mrows;
+            std::vector<std::vector<double>> A(n, std::vector<double>(n));
+            for (int r = 0; r < n; ++r)
+                for (int c = 0; c < n; ++c)
+                    A[r][c] = src->values[(size_t)r * n + c];
+            std::vector<std::vector<double>> inv;
+            if (!InvertMatrix(A, inv)) {
+                g->values.assign((size_t)n * n, NAN);   // 奇异：未定义矩阵
+                return;
+            }
+            g->values.assign((size_t)n * n, 0.0);
+            for (int r = 0; r < n; ++r)
+                for (int c = 0; c < n; ++c)
+                    g->values[(size_t)r * n + c] = inv[r][c];
+        };
+        out->cmdName = "Invert";
+        out->cmdArgs = { a[0] };
+        out->inputs = { M };
+        out->update();
+        made = std::move(out);
+        return true;
+    }
+
+    // Identity(n) → n 阶单位矩阵
+    if (cmdLower == "identity" && a.size() == 1) {
+        double nv = 0;
+        if (!numArg(a[0], nv) || nv < 1 || nv > 16 || floor(nv) != nv) {
+            lastError = "Identity 需要 1..16 的整数阶数";
+            made = nullptr;
+            return true;
+        }
+        const int n = (int)nv;
+        auto out = std::make_unique<GeoList>();
+        out->isMatrix = true;
+        out->mrows = n;
+        out->mcols = n;
+        out->values.assign((size_t)n * n, 0.0);
+        for (int i = 0; i < n; ++i) out->values[(size_t)i * n + i] = 1.0;
+        made = std::move(out);
+        return true;
+    }
+
+    // Row(M, r) / Column(M, c) → 列表（1 起）
+    if ((cmdLower == "row" || cmdLower == "column") && a.size() == 2) {
+        GeoList *M = dynamic_cast<GeoList *>(lookup(a[0]));
+        if (!M || !M->isMatrix) { lastError = "Row/Column 需要（矩阵, 序号）"; made = nullptr; return true; }
+        double kv = 0;
+        if (!numArg(a[1], kv)) { lastError = "序号须为数或数值对象: " + a[1]; made = nullptr; return true; }
+        const int k = (int)kv;
+        const bool isRow = cmdLower == "row";
+        const int limit = isRow ? M->mrows : M->mcols;
+        if (k < 1 || k > limit) { lastError = "序号超出范围: " + a[1]; made = nullptr; return true; }
+        auto out = std::make_unique<GeoList>();
+        GeoList *src = M;
+        const int k0 = k;
+        const bool byRow = isRow;
+        out->calc = [src, k0, byRow](GeoList *g) {
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            g->values.clear();
+            if (byRow) {
+                for (int c = 0; c < src->mcols; ++c)
+                    g->values.push_back(src->values[(size_t)(k0 - 1) * src->mcols + c]);
+            } else {
+                for (int r = 0; r < src->mrows; ++r)
+                    g->values.push_back(src->values[(size_t)r * src->mcols + k0 - 1]);
+            }
+        };
+        out->cmdName = isRow ? "Row" : "Column";
+        out->cmdArgs = { a[0], a[1] };
+        out->inputs = { M };
+        out->update();
+        made = std::move(out);
         return true;
     }
 
@@ -6310,6 +6966,8 @@ void Kernel::xmlCommand(const std::string &headTag, const std::string &body, int
 // 样式应用到既有对象（颜色/线宽/点径/显隐）
 void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
 {
+    // 弧度→度换算（setXml 已按 <kernel> 段置 angleRadian；滑条范围/数值落位用）
+    auto deg = [this](double v) { return angleRadian ? v * 180.0 / M_PI : v; };
     size_t oc = inner.find("<objColor");
     if (oc != std::string::npos) {
         const size_t end = inner.find('>', oc);
@@ -6377,29 +7035,64 @@ void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
     }
     GeoNumeric *num = dynamic_cast<GeoNumeric *>(e);
     if (num) {
+        // <value> 先落位（官方文件里 value 在 slider/animation 之前），滑条
+        // 范围/步长吸附要用它。仅布尔对象跳过：其 <value val="true|false">
+        // 经 strtod 得 0 会把已按 1/0 落位的值覆盖坏（数值/滑条/角照常解析）
+        size_t vv = inner.find("<value");
+        if (vv != std::string::npos) {
+            const size_t end = inner.find('>', vv);
+            const std::string t = inner.substr(vv, end == std::string::npos ? end : end - vv);
+            const std::string raw = AttrVal(t, "val");
+            if (raw != "true" && raw != "false") {
+                num->value = deg(AttrNum(t, "val", num->value));
+            }
+        }
         size_t sl = inner.find("<slider");
         if (sl != std::string::npos) {
             const size_t end = inner.find('>', sl);
             const std::string t = inner.substr(sl, end == std::string::npos ? end : end - sl);
             num->isSlider = true;
-            num->smin = AttrNum(t, "min", num->smin);
-            num->smax = AttrNum(t, "max", num->smax);
+            // 上游 min/max 属性存的是数值或对象 label 引用（evaluateToNumeric
+            // 二次解析）；label 引用（非纯数）本版不支持，保留默认范围
+            const std::string sminS = AttrVal(t, "min");
+            const std::string smaxS = AttrVal(t, "max");
+            if (!sminS.empty()) {
+                double v = strtod(sminS.c_str(), nullptr);
+                if (NumA(v) == sminS) num->smin = deg(v);
+            }
+            if (!smaxS.empty()) {
+                double v = strtod(smaxS.c_str(), nullptr);
+                if (NumA(v) == smaxS) num->smax = deg(v);
+            }
             num->sstep = AttrNum(t, "step", num->sstep);
             num->sx = AttrNum(t, "x", num->sx);
             num->sy = AttrNum(t, "y", num->sy);
             if (!(num->smax > num->smin)) num->smax = num->smin + 5.0;
+            // 步长吸附：值对齐到步长网格（上游 slider step 语义）
+            if (num->sstep > 1e-12) {
+                num->value = num->smin
+                    + std::round((num->value - num->smin) / num->sstep) * num->sstep;
+            }
+            num->value = std::max(num->smin, std::min(num->smax, num->value));
         }
-        size_t vv = inner.find("<value");
-        if (vv != std::string::npos) {
-            const size_t end = inner.find('>', vv);
-            const std::string t = inner.substr(vv, end == std::string::npos ? end : end - vv);
-            num->value = AttrNum(t, "val", num->value);
+        // 动画（上游 <animation step speed playing/>）：playing 即刻开跑
+        size_t an = inner.find("<animation");
+        if (an != std::string::npos && num->isSlider) {
+            const size_t end = inner.find('>', an);
+            const std::string t = inner.substr(an, end == std::string::npos ? end : end - an);
+            num->animating = AttrVal(t, "playing") == "true";
+            num->speed = AttrNum(t, "speed", num->speed);
+            if (num->speed <= 0) num->speed = 1.0;
+            num->animDir = 1;
         }
     }
 }
 
-// <element> 重放：已有对象 → 只应用样式；自由点/数值 → 创建；其余（依赖
-// 对象的命令未被支持）计入跳过
+// <element> 重放：已有对象 → 只应用样式；自由点/数值/文本/布尔/角 → 创建；
+// 其余（依赖对象的命令未被支持）计入跳过。
+// 官方 .ggb 的滑动条是 <element type="numeric"><value/><slider min max .../>
+// <animation .../>：数值按自由数值重建后由 xmlApplyStyle 落滑条参数与动画态。
+// angleUnit=radian 的文件（<kernel> 段标记）：数值/角度字面量先乘 180/π 转内部度制
 void Kernel::xmlElement(const std::string &type, const std::string &label,
                         const std::string &inner, int *skipped)
 {
@@ -6408,6 +7101,8 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
         xmlApplyStyle(existing, inner);
         return;
     }
+    // 弧度→度换算（kernel 段 angleUnit=radian 时；GGB 数值/角度存弧度值）
+    auto deg = [this](double v) { return angleRadian ? v * 180.0 / M_PI : v; };
     if (type == "point" && !label.empty()) {
         const size_t c = inner.find("<coords");
         if (c == std::string::npos) { ++*skipped; return; }
@@ -6421,8 +7116,62 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
         if (v == std::string::npos) { ++*skipped; return; }
         const size_t end = inner.find('>', v);
         const std::string t = inner.substr(v, end - v);
-        const double val = AttrNum(t, "val", 0.0);
+        const double val = deg(AttrNum(t, "val", 0.0));
         if (!input(label + "=" + NumA(val))) { ++*skipped; return; }
+    } else if (type == "angle" && !label.empty()) {
+        // 角（上游自由角 <element type="angle"><value val="弧度"/>）：
+        // 值换算成度后建隐藏数值型角（无三点依附，仅代数区/属性可见）
+        const size_t v = inner.find("<value");
+        if (v == std::string::npos) { ++*skipped; return; }
+        const size_t end = inner.find('>', v);
+        const std::string t = inner.substr(v, end - v);
+        const double val = deg(AttrNum(t, "val", 0.0));
+        if (!input(label + "=" + NumA(val))) { ++*skipped; return; }
+    } else if (type == "boolean" && !label.empty()) {
+        // 布尔（上游 <value val="true|false"/>）：按 1/0 数值落位
+        //（内核无布尔类型；代数区显示数值，语义等价）
+        const size_t v = inner.find("<value");
+        if (v == std::string::npos) { ++*skipped; return; }
+        const size_t end = inner.find('>', v);
+        const std::string t = inner.substr(v, end - v);
+        const std::string s = AttrVal(t, "val");
+        if (s != "true" && s != "false") { ++*skipped; return; }
+        if (!input(label + "=" + (s == "true" ? "1" : "0"))) { ++*skipped; return; }
+    } else if (type == "text" && !label.empty()) {
+        // 自由文本（上游 <element type="text"><caption val=".."/> 或表达式
+        // 字符串）→ Text("...") 命令重建，画布可显示
+        std::string content;
+        const size_t cp = inner.find("<caption");
+        if (cp != std::string::npos) {
+            const size_t ce = inner.find('>', cp);
+            content = AttrVal(inner.substr(cp, ce == std::string::npos
+                ? std::string::npos : ce - cp), "val");
+        }
+        if (content.empty()) {
+            // 无 caption：依赖文本（startPoint exp 指向定义）暂不支持重建
+            ++*skipped;
+            return;
+        }
+        // 内容含引号时先翻转义（XML 已反转义，这里只防 Text 语法撞车）
+        std::string lit;
+        for (char ch : content) {
+            if (ch == '"') lit += "'";
+            else lit += ch;
+        }
+        if (!input(label + "=Text(\"" + lit + "\")")) { ++*skipped; return; }
+        // 上游 <startPoint x= y=>（世界坐标落点）：Text 命令默认 (1,1)，
+        // 重建后挪到保存位置
+        const size_t sp = inner.find("<startPoint");
+        if (sp != std::string::npos) {
+            const size_t spe = inner.find('>', sp);
+            const std::string t = inner.substr(sp, spe == std::string::npos
+                ? std::string::npos : spe - sp);
+            GeoText *tx = dynamic_cast<GeoText *>(lookup(label));
+            if (tx && AttrVal(t, "exp").empty()) {
+                tx->x = AttrNum(t, "x", tx->x);
+                tx->y = AttrNum(t, "y", tx->y);
+            }
+        }
     } else {
         ++*skipped;
         return;
@@ -6451,6 +7200,25 @@ bool Kernel::setXml(const std::string &xml, int *skippedOut)
                 view.yZero = AttrNum(tag, "yZero", view.yZero);
                 view.xscale = AttrNum(tag, "scale", view.xscale);
                 view.yscale = AttrNum(tag, "yscale", view.yscale);
+            }
+        }
+    }
+
+    // kernel 段：角度单位（degree/radian）。弧度文件重放前记下标记，数值/
+    // 角度类自由对象在 element 重建时换算成内部度制。无该段 = degree
+    angleRadian = false;
+    {
+        const size_t ks = xml.find("<kernel>");
+        if (ks != std::string::npos) {
+            const size_t ke = xml.find("</kernel>", ks);
+            const std::string seg = xml.substr(ks, ke == std::string::npos
+                ? std::string::npos : ke - ks);
+            const size_t au = seg.find("<angleUnit");
+            if (au != std::string::npos) {
+                const size_t auEnd = seg.find('>', au);
+                const std::string tag = seg.substr(au, auEnd == std::string::npos
+                    ? std::string::npos : auEnd - au);
+                angleRadian = AttrVal(tag, "val") == "radian";
             }
         }
     }

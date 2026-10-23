@@ -242,8 +242,13 @@ class GeoList : public GeoElement {
 public:
     GeoList() : GeoElement(GeoType::List) { visible = false; }
     std::vector<double> values;
+    // 1.0.6.1 矩阵（GGB 的「矩阵 = 列表的列表」，{{1,2},{3,4}} 字面量）：
+    // 行主序扁平存 values，isMatrix 标记 + 维度。Transpose/Invert/Row 等
+    // 矩阵命令与元素寻址按此解释；普通统计/排序命令对矩阵拒绝
+    bool isMatrix = false;
+    int mrows = 0, mcols = 0;
     std::string src;   // 自由列表的原始花括号文本（定义列回填用）
-    std::function<void(GeoList *)> calc;   // 依随列表（Sort/Unique/Reverse 等）重算
+    std::function<void(GeoList *)> calc;   // 依随列表（Sort/Unique/Transpose 等）重算
 
     void update() override { if (calc) calc(this); }
     std::string valueText() const override;

@@ -2,8 +2,11 @@
 // 对照安卓 GGB 自带键盘 ••• → 全屏指令搜索页（搜索框「在 所有指令 中搜索」
 // + 分类列表：数学函数/所有指令/3D/GeoGebra/代数/优化指令/几何/几何变换/
 // 函数与微积分/列表/向量与矩阵/图表）。分类取我们内核真实支持的子集：
-// 内核没有 3D/图表/优化指令与矩阵指令，这些分类首版不展示；Matrix/Cases/lim
-// 只是显示层模板（六十七包转换器），内核输入侧不支持，待内核补齐再放出。
+// 内核没有 3D/图表/优化指令，这些分类首版不展示；Matrix/Cases/lim 只是
+// 显示层模板（六十七包转换器），内核输入侧不支持，待内核补齐再放出。
+// 1.0.6.1：矩阵代数批（{{…}} 字面量 + Transpose/Determinant/Invert/
+// Identity/Row/Column）与回归批（FitLine/FitPoly/FitExp/Correlation-
+// Coefficient）补齐，「向量与矩阵」分类自此有矩阵成员。
 //
 // 每条指令的 arity/实参形态与 kernel/app.cpp tryCommand 分支逐条核对（行号
 // 见 CommandMeta.line 注释约定：录入时的分支锚点），插入串走键盘 onInsert
@@ -241,6 +244,18 @@ export const COMMANDS: CommandMeta[] = [
   { name: 'Variance', category: 'stats', ins: 'Variance()', back: 1,
     sig: 'Variance( <列表> )', desc: '列表的方差',
     keys: 'variance 方差' },
+  { name: 'FitLine', category: 'stats', ins: 'FitLine(,)', back: 2,
+    sig: 'FitLine( <x 列表>, <y 列表> )', desc: '最小二乘回归直线',
+    keys: 'fitline 回归直线 拟合直线 线性回归' },
+  { name: 'FitPoly', category: 'stats', ins: 'FitPoly(,,)', back: 3,
+    sig: 'FitPoly( <x 列表>, <y 列表>, <阶数> )', desc: '多项式回归（1..8 阶）',
+    keys: 'fitpoly 多项式回归 拟合多项式' },
+  { name: 'FitExp', category: 'stats', ins: 'FitExp(,)', back: 2,
+    sig: 'FitExp( <x 列表>, <y 列表> )', desc: '指数回归 a·e^(b·x)',
+    keys: 'fitexp 指数回归 拟合指数' },
+  { name: 'CorrelationCoefficient', category: 'stats', ins: 'CorrelationCoefficient(,)', back: 2,
+    sig: 'CorrelationCoefficient( <x 列表>, <y 列表> )', desc: 'Pearson 相关系数 r',
+    keys: 'correlationcoefficient 相关系数 pmcc 积差相关' },
 
   // ---- GeoGebra（slider 1885 / startanimation 1908 / stopanimation 1921 /
   // text 2284）----
@@ -256,6 +271,27 @@ export const COMMANDS: CommandMeta[] = [
   { name: 'Text', category: 'all', ins: 'Text("")', back: 1,
     sig: 'Text( "文本" [, 位置] )', desc: '在绘图区显示文本',
     keys: 'text 文本 文字 标注' },
+
+  // ---- 向量与矩阵（1.0.6.1：内核矩阵 = 列表的列表 {{…},{…}}，GGB 同构；
+  // transpose/determinant/invert/identity/row/column 批）----
+  { name: 'Transpose', category: 'vector', ins: 'Transpose()', back: 1,
+    sig: 'Transpose( <矩阵> )', desc: '矩阵转置',
+    keys: 'transpose 转置 矩阵' },
+  { name: 'Determinant', category: 'vector', ins: 'Determinant()', back: 1,
+    sig: 'Determinant( <方阵> )', desc: '方阵的行列式',
+    keys: 'determinant 行列式 方阵' },
+  { name: 'Invert', category: 'vector', ins: 'Invert()', back: 1,
+    sig: 'Invert( <方阵> )', desc: '方阵的逆（奇异阵报错）',
+    keys: 'invert 逆矩阵 求逆' },
+  { name: 'Identity', category: 'vector', ins: 'Identity()', back: 1,
+    sig: 'Identity( <阶数> )', desc: 'n 阶单位矩阵',
+    keys: 'identity 单位矩阵 恒等' },
+  { name: 'Row', category: 'vector', ins: 'Row(,)', back: 2,
+    sig: 'Row( <矩阵>, <序号> )', desc: '取矩阵第 n 行（1 起）',
+    keys: 'row 行 取行' },
+  { name: 'Column', category: 'vector', ins: 'Column(,)', back: 2,
+    sig: 'Column( <矩阵>, <序号> )', desc: '取矩阵第 n 列（1 起）',
+    keys: 'column 列 取列' },
 ];
 
 // 面板全量数据：命令 + 数学函数补充，搜索/「所有指令」都查这份

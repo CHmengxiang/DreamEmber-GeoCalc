@@ -62,6 +62,11 @@ public:
     // 深色画布（N3：跟随系统色深；近黑对象反白保证可读性）
     bool darkTheme = false;
 
+    // 角度单位（.ggb <kernel><angleUnit val="degree|radian"> 读侧）：内核内部
+    // 统一度制（Rotate/GeoAngle/动画均为度）。radian 文件重放前把保存的数值
+    // 乘 180/π；本机导出恒写 degree（写侧不落此字段）
+    bool angleRadian = false;
+
     // 输入一条代数式（用户表达式或命令）。返回是否成功创建对象。
     bool input(const std::string &src);
     // 删除末尾对象（含其全部依赖者，级联）

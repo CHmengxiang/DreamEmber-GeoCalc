@@ -333,6 +333,21 @@ static std::string ListBraceText(const std::vector<double> &v, size_t maxShow)
 std::string GeoList::valueText() const
 {
     if (values.empty()) return "{}";
+    if (isMatrix) {
+        // 矩阵按行拆行显示（{{1,2},{3,4}} → 两行花括号串）；GGB 用 LaTeX
+        // 矩阵排版，文本代数区用行串等价呈现
+        std::string s = "{";
+        for (int r = 0; r < mrows; ++r) {
+            if (r > 0) s += ", ";
+            s += "{";
+            for (int c = 0; c < mcols; ++c) {
+                if (c > 0) s += ", ";
+                s += FormatNum(values[(size_t)r * mcols + c]);
+            }
+            s += "}";
+        }
+        return s + "}";
+    }
     return ListBraceText(values, 10);
 }
 

@@ -288,6 +288,8 @@ bool IsCommandCallName(const std::string &n)
         "derivative", "nthroot", "integral", "root", "extremum", "text",
         "sequence", "element", "first", "last", "sort", "unique", "reverse",
         "mean", "median", "sum", "product", "sd", "variance",
+        "fitline", "fitpoly", "fitexp", "correlationcoefficient",
+        "transpose", "determinant", "invert", "identity", "row", "column",
         "simplify", "expand", "factor"
     };
     std::string low;
