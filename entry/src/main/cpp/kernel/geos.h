@@ -250,6 +250,16 @@ public:
     std::string src;   // 自由列表的原始花括号文本（定义列回填用）
     std::function<void(GeoList *)> calc;   // 依随列表（Sort/Unique/Transpose 等）重算
 
+    // 1.0.6.3 图表列表（BarChart/Histogram/LineGraph/ScatterPlot/BoxPlot/
+    // StemPlot 产物）：chart 标记绘制形态（空 = 普通列表，不绘制）。
+    // chartX = 横坐标/组界（bar 两列表形式与 hist 的组界、line/scatter 的
+    // x 坐标；空时 bar 按 1..n 定位）；chartA/chartB = BoxPlot 的中心 y 与
+    // 箱高（StemPlot 复用 chartA 存 adjustment）。box 的 values 存五数概括
+    // {min,Q1,中位数,Q3,max}，stem 的 values 存调整后的排序数据
+    std::string chart;
+    std::vector<double> chartX;
+    double chartA = 0, chartB = 1;
+
     void update() override { if (calc) calc(this); }
     std::string valueText() const override;
     std::string definitionText() const override;

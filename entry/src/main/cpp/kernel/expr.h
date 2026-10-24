@@ -73,6 +73,10 @@ private:
     std::vector<std::string> refs_;
 };
 
+// 命令调用名判定（expr.cpp 内 tryCommand 全集小写表）：表达式解析用它
+// 报命令专用文案；1.0.6.3 起快捷建点 "X(u,v)" 改写也用它排除命令名
+bool IsCommandCallName(const std::string &n);
+
 // ---------- 键盘线性输入的预解析（第七包，上游 模板键的文本形式） ----------
 // 引号串内（Text 文本）一律不动。三条规则：
 //   $A$1 → A1          单元格绝对引用标记（本内核无复制语义，纯去标记）

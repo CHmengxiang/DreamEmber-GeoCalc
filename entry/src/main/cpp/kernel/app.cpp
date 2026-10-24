@@ -1,5 +1,6 @@
 // app.cpp — 内核控制器实现：输入解析、命令分发、构造列表、绘图指令生成
 #include "kernel/app.h"
+#include "kernel/expr.h"
 #include "cas/cas_wrapper.h"
 #include <cmath>
 #include <cctype>
@@ -442,6 +443,113 @@ static bool FillExprVal(const std::string &nm, ExprVal &o,
     return false;
 }
 
+// 1.0.6.3 列表/图表命令：解析 {…} 内部为数值列表（元素为不含 x 的有限
+// 数值表达式）。返回 false 时 err 已填。1.5b 平面列表分支与本 helper 共用
+static bool ParseListValues(const std::string &inner, std::vector<double> &out,
+                            std::string &err)
+{
+    size_t start = 0;
+    for (;;) {
+        const size_t comma = inner.find(',', start);
+        const std::string part = inner.substr(start,
+            comma == std::string::npos ? std::string::npos : comma - start);
+        const std::string t = Trim(part);
+        if (!t.empty()) {
+            Expr e;
+            std::string perr;
+            if (!e.parse(t, perr)) {
+                err = perr.empty() ? "列表元素无法解析: " + t : perr;
+                return false;
+            }
+            if (e.containsX()) {
+                err = "列表元素不能含 x: " + t;
+                return false;
+            }
+            const double v = e.eval(0.0);
+            if (!std::isfinite(v)) {
+                err = "列表元素不是有限数: " + t;
+                return false;
+            }
+            out.push_back(v);
+        }
+        if (comma == std::string::npos) break;
+        start = comma + 1;
+    }
+    return true;
+}
+
+// 1.0.6.3 Flatten 字面量实参：递归展开嵌套 {…}（矩阵 {{a,b},…}、混合嵌套
+// {1,{2,3}} 均可，GGB 语义）为扁平数值列表。顶层按花括号深度感知的逗号
+// 分段，叶子段按数值表达式求值（规则同 ParseListValues）
+static bool ParseFlattenLiteral(const std::string &s, std::vector<double> &out,
+                                std::string &err)
+{
+    if (s.size() < 2 || s.front() != '{' || s.back() != '}') {
+        err = "Flatten 实参须为列表: " + s;
+        return false;
+    }
+    const std::string inner = s.substr(1, s.size() - 2);
+    std::vector<std::string> parts;
+    int depth = 0;
+    size_t start = 0;
+    for (size_t i = 0; i <= inner.size(); ++i) {
+        if (i == inner.size() || inner[i] == ',') {
+            if (depth == 0) {
+                parts.push_back(inner.substr(start, i - start));
+                start = i + 1;
+            }
+        } else if (inner[i] == '{') {
+            ++depth;
+        } else if (inner[i] == '}') {
+            --depth;
+        }
+    }
+    if (depth != 0) { err = "列表字面量格式：{a,b,…}"; return false; }
+    for (const std::string &p : parts) {
+        const std::string t = Trim(p);
+        if (t.empty()) continue;
+        if (t.front() == '{') {
+            if (!ParseFlattenLiteral(t, out, err)) return false;
+            continue;
+        }
+        Expr e;
+        std::string perr;
+        if (!e.parse(t, perr)) {
+            err = perr.empty() ? "列表元素无法解析: " + t : perr;
+            return false;
+        }
+        if (e.containsX()) {
+            err = "列表元素不能含 x: " + t;
+            return false;
+        }
+        const double v = e.eval(0.0);
+        if (!std::isfinite(v)) {
+            err = "列表元素不是有限数: " + t;
+            return false;
+        }
+        out.push_back(v);
+    }
+    if (out.empty()) { err = "列表不能为空"; return false; }
+    return true;
+}
+
+// 1.0.6.3 动态数值实参：表达式树 + 引用名→数值对象表（Take 起止序号、
+// Sequence 端点步长等）。evalNow() 按对象当前值求值——闭包捕获本结构即
+// 获得依随重算；字面量实参树为常数、refs 为空
+struct NumRefExpr {
+    Expr tree;
+    std::vector<std::pair<std::string, GeoNumeric *>> refs;
+    double evalNow() const
+    {
+        return tree.evalResolved(0.0, [this](const std::string &nm) -> double {
+            for (const auto &r : refs) {
+                if (r.first == nm) return r.second->value;
+            }
+            return NAN;
+        });
+    }
+};
+
 // 识别形式："(u,v)" 点 / "A=(u,v)" / 命令 / "f(x)=表达式" / 纯表达式(按函数画)
 bool Kernel::inputImpl(const std::string &srcRaw)
 {
@@ -476,6 +584,8 @@ bool Kernel::inputImpl(const std::string &srcRaw)
             for (char c : head) {
                 if (!isalnum((unsigned char)c)) { headIsName = false; break; }
             }
+            // 命令名不是点标签：Take(5,1) 这类命令误用不该被改写成建点
+            if (headIsName && IsCommandCallName(head)) headIsName = false;
             if (headIsName) {
                 std::string inner = src.substr(po + 1, src.size() - po - 2);
                 size_t cm = inner.find(',');
@@ -821,35 +931,11 @@ bool Kernel::inputImpl(const std::string &srcRaw)
         const std::string inner = rhs.substr(1, rhs.size() - 2);
         auto L = std::make_unique<GeoList>();
         L->src = "{" + inner + "}";
-        bool ok = true;
-        size_t start = 0;
-        for (;;) {
-            const size_t comma = inner.find(',', start);
-            const std::string part = inner.substr(start,
-                comma == std::string::npos ? std::string::npos : comma - start);
-            if (!part.empty()) {
-                Expr e;
-                std::string err;
-                if (!e.parse(part, err)) {
-                    lastError = err.empty() ? "列表元素无法解析: " + part : err;
-                    ok = false;
-                } else if (e.containsX()) {
-                    lastError = "列表元素不能含 x: " + part;
-                    ok = false;
-                } else {
-                    const double v = e.eval(0.0);
-                    if (!std::isfinite(v)) {
-                        lastError = "列表元素不是有限数: " + part;
-                        ok = false;
-                    } else {
-                        L->values.push_back(v);
-                    }
-                }
-            }
-            if (comma == std::string::npos || !ok) break;
-            start = comma + 1;
+        std::string lerr;
+        if (!ParseListValues(inner, L->values, lerr)) {
+            lastError = lerr;
+            return false;
         }
-        if (!ok) return false;
         if (L->values.empty()) { lastError = "列表不能为空"; return false; }
         made = std::move(L);
     }
@@ -1524,6 +1610,52 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         if (!e.parse(s, err) || e.containsX()) return false;
         out = e.eval(0.0);
         return std::isfinite(out);
+    };
+
+    // ---------- 1.0.6.3 列表/图表命令共用实参解析 ----------
+    // 字面量列表临时对象（命令实参允许 {1,2,3} 直接书写；不入构造列表，
+    // 含字面量实参的产物为静态——闭包不得捕获这些指针）
+    std::vector<std::unique_ptr<GeoList>> litLists;
+    // 实参取列表：'{' 开头按字面量解析进 litLists，否则按标签查表（矩阵拒）
+    auto listArg = [&](const std::string &s, bool &lit) -> GeoList * {
+        lit = false;
+        if (!s.empty() && s.front() == '{') {
+            if (s.back() != '}') { lastError = "列表字面量格式：{a,b,…}"; return nullptr; }
+            lit = true;
+            auto t = std::make_unique<GeoList>();
+            std::string err;
+            if (!ParseListValues(s.substr(1, s.size() - 2), t->values, err)) {
+                lastError = err.empty() ? "列表字面量无法解析: " + s : err;
+                return nullptr;
+            }
+            litLists.push_back(std::move(t));
+            return litLists.back().get();
+        }
+        GeoList *L = dynamic_cast<GeoList *>(lookup(s));
+        if (!L) { lastError = "未找到列表 " + s; return nullptr; }
+        if (L->isMatrix) { lastError = "需要数值列表（矩阵不可）"; return nullptr; }
+        return L;
+    };
+    // 数值实参 → NumRefExpr（可含数值对象引用，进 deps 去重收集）。
+    // 解析失败/含未知引用返回 false（lastError 不动，由调用方给文案）
+    auto numRefArg = [&](const std::string &s, NumRefExpr &out,
+                         std::vector<GeoNumeric *> &deps) -> bool {
+        Expr e;
+        std::string err;
+        if (!e.parse(s, err, "", true)) return false;
+        if (e.containsX() || e.containsY()) return false;
+        for (const std::string &rn : e.refs()) {
+            GeoNumeric *dn = dynamic_cast<GeoNumeric *>(lookup(rn));
+            if (!dn) return false;
+            bool seen = false;
+            for (GeoNumeric *d : deps) {
+                if (d == dn) { seen = true; break; }
+            }
+            if (!seen) deps.push_back(dn);
+            out.refs.push_back({ rn, dn });
+        }
+        out.tree = e;
+        return std::isfinite(out.evalNow());
     };
 
     if (cmdLower == "midpoint" && a.size() == 2) {
@@ -2713,29 +2845,89 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
     if (cmdLower == "sequence" && (a.size() == 4 || a.size() == 5)) {
         Expr seq;
         std::string err;
-        if (!seq.parse(a[0], err, a[1])) {
+        // 1.0.6.3 refs 模式：表达式可引用其他数值对象（滑动条等，GGB 语义
+        // Sequence(k*a,k,1,5)），未知符号在下方校验给专用文案
+        if (!seq.parse(a[0], err, a[1], true)) {
             lastError = err.empty() ? "序列表达式无法解析: " + a[0] : err;
             made = nullptr;
             return true;
         }
-        double from = 0, to = 0, step = 1;
-        if (!numArg(a[2], from) || !numArg(a[3], to)) {
+        if (seq.containsY()) {
+            lastError = "序列表达式不能含 y";
+            made = nullptr;
+            return true;
+        }
+        // 1.0.6.3 动态化：起止/步长可为数值对象引用（含引用表达式如 n+1），
+        // 端点变化经 calc 闭包重新烘焙；全字面量时保持原静态行为
+        NumRefExpr bFrom, bTo, bStep;
+        std::vector<GeoNumeric *> ndeps;
+        const bool hasStep = a.size() == 5;
+        if (!numRefArg(a[2], bFrom, ndeps)) {
             lastError = "序列起止须为数或数值对象";
             made = nullptr;
             return true;
         }
-        if (a.size() == 5 && !numArg(a[4], step)) {
+        if (!numRefArg(a[3], bTo, ndeps)) {
+            lastError = "序列起止须为数或数值对象";
+            made = nullptr;
+            return true;
+        }
+        if (hasStep && !numRefArg(a[4], bStep, ndeps)) {
             lastError = "序列步长须为数或数值对象";
             made = nullptr;
             return true;
         }
-        if (step == 0) { lastError = "序列步长不能为 0"; made = nullptr; return true; }
+        // 字面量步长为 0 维持既有报错；引用形式的 0 允许创建（置空列表，
+        // 对象改值后重算恢复）
+        if (hasStep && bStep.refs.empty() && bStep.evalNow() == 0.0) {
+            lastError = "序列步长不能为 0";
+            made = nullptr;
+            return true;
+        }
+        // 表达式其余引用（循环变量以外）须为数值对象，进 deps 依随重算
+        std::vector<std::pair<std::string, GeoNumeric *>> extra;
+        for (const std::string &rn : seq.refs()) {
+            GeoNumeric *dn = dynamic_cast<GeoNumeric *>(lookup(rn));
+            if (!dn) {
+                lastError = "序列表达式含未知对象 " + rn;
+                made = nullptr;
+                return true;
+            }
+            extra.push_back({ rn, dn });
+            bool seen = false;
+            for (GeoNumeric *d : ndeps) {
+                if (d == dn) { seen = true; break; }
+            }
+            if (!seen) ndeps.push_back(dn);
+        }
+        auto bake = [seq, bFrom, bTo, bStep, hasStep, extra](GeoList *g) {
+            const double from = bFrom.evalNow();
+            const double to = bTo.evalNow();
+            const double step = hasStep ? bStep.evalNow() : 1.0;
+            g->values.clear();
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            // 步长失效（引用对象被改成 0/非有限）：置空列表而非死循环
+            if (!std::isfinite(from) || !std::isfinite(to)
+                || !std::isfinite(step) || step == 0) return;
+            for (double v = from; step > 0 ? v <= to + 1e-9 : v >= to - 1e-9; v += step) {
+                g->values.push_back(seq.evalResolved(v,
+                    [&](const std::string &nm2) -> double {
+                        for (const auto &pr : extra) {
+                            if (pr.first == nm2) return pr.second->value;
+                        }
+                        return NAN;
+                    }));
+                if (g->values.size() >= 10000) break;   // 防失控
+            }
+        };
         auto L = std::make_unique<GeoList>();
         L->cmdName = "Sequence";
         L->cmdArgs = a;
-        for (double v = from; step > 0 ? v <= to + 1e-9 : v >= to - 1e-9; v += step) {
-            L->values.push_back(seq.eval(v, v));
-            if (L->values.size() >= 10000) break;   // 防失控
+        bake(L.get());
+        if (!ndeps.empty()) {
+            L->calc = bake;
+            for (GeoNumeric *d : ndeps) L->inputs.push_back(d);
         }
         made = std::move(L);
         return true;
@@ -2861,6 +3053,622 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         n->inputs = { L };
         n->update();
         made = std::move(n);
+        return true;
+    }
+
+    // ---------- 1.0.6.3 列表指令补齐与图表指令 ----------
+    // 实参列表支持标签或 {…} 字面量（字面量产物为静态，不挂重算闭包——
+    // 临时字面量对象不入构造列表，闭包捕获会悬垂）；数值实参可含数值对象
+    // 引用（进 deps 依随重算）。全标签形式挂 calc 闭包 + inputs
+    auto finishList = [&](std::unique_ptr<GeoList> &out,
+                          const std::function<void(GeoList *)> &bake, bool anyLit,
+                          std::vector<GeoElement *> inputs) {
+        bake(out.get());
+        if (!anyLit && !inputs.empty()) {
+            out->calc = bake;
+            out->inputs = std::move(inputs);
+        }
+        made = std::move(out);
+    };
+
+    // Take(L, m[, n]) / Drop(L, m[, n])：1 起下标取段/去段（含端点）。
+    // 两参形式：Take 取 m..末尾，Drop 去前 m 个。序号钳位进 [1, size]
+    if ((cmdLower == "take" || cmdLower == "drop") && (a.size() == 2 || a.size() == 3)) {
+        bool lit = false;
+        GeoList *L = listArg(a[0], lit);
+        if (!L) { made = nullptr; return true; }
+        NumRefExpr bm, bn;
+        std::vector<GeoNumeric *> ndeps;
+        const char *nm = cmdLower == "take" ? "Take" : "Drop";
+        if (!numRefArg(a[1], bm, ndeps)) {
+            lastError = std::string(nm) + " 序号须为数或数值对象";
+            made = nullptr; return true;
+        }
+        const bool hasEnd = a.size() == 3;
+        if (hasEnd && !numRefArg(a[2], bn, ndeps)) {
+            lastError = std::string(nm) + " 序号须为数或数值对象";
+            made = nullptr; return true;
+        }
+        auto out = std::make_unique<GeoList>();
+        out->cmdName = nm;
+        out->cmdArgs = a;
+        GeoList *src = L;
+        const bool isTake = cmdLower == "take";
+        auto bake = [src, bm, bn, hasEnd, isTake](GeoList *g) {
+            g->values.clear();
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            const double mv = bm.evalNow();
+            const double nv = hasEnd ? bn.evalNow() : 0.0;
+            if (!std::isfinite(mv) || !std::isfinite(nv)) return;
+            const long long sz = (long long)src->values.size();
+            auto cl = [sz](double v) -> long long {
+                long long i = (long long)llround(v);
+                return i < 1 ? 1 : (i > sz ? sz : i);
+            };
+            if (isTake) {
+                const long long lo = cl(mv);
+                const long long hi = hasEnd ? cl(nv) : sz;
+                for (long long i = lo; i <= hi; ++i) {
+                    g->values.push_back(src->values[(size_t)(i - 1)]);
+                }
+            } else if (hasEnd) {
+                const long long lo = cl(mv), hi = cl(nv);
+                for (long long i = 1; i <= sz; ++i) {
+                    if (i < lo || i > hi) g->values.push_back(src->values[(size_t)(i - 1)]);
+                }
+            } else {
+                long long m = (long long)llround(mv);
+                m = m < 0 ? 0 : (m > sz ? sz : m);
+                for (long long i = m + 1; i <= sz; ++i) {
+                    g->values.push_back(src->values[(size_t)(i - 1)]);
+                }
+            }
+        };
+        std::vector<GeoElement *> inputs;
+        for (GeoNumeric *d : ndeps) inputs.push_back(d);
+        inputs.push_back(L);
+        finishList(out, bake, lit, std::move(inputs));
+        return true;
+    }
+
+    // Insert(obj, L, pos)（GGB 官方参数序：Insert(x², {1,2,3,4,5}, 3)）：
+    // obj 为数或列表（整体插入），pos 为 1 起插入位（钳位 [1, size+1]）。
+    // obj 在前解析为数，解析不了按列表
+    if (cmdLower == "insert" && a.size() == 3) {
+        bool lit = false, litObj = false;
+        GeoList *L = listArg(a[1], lit);
+        if (!L) { made = nullptr; return true; }
+        NumRefExpr bo, bp;
+        std::vector<GeoNumeric *> ndeps;
+        const bool objIsList = !numRefArg(a[0], bo, ndeps);
+        GeoList *obj = nullptr;
+        if (objIsList) {
+            obj = listArg(a[0], litObj);
+            if (!obj) { made = nullptr; return true; }
+        }
+        if (!numRefArg(a[2], bp, ndeps)) {
+            lastError = "Insert 插入位置须为数或数值对象";
+            made = nullptr; return true;
+        }
+        auto out = std::make_unique<GeoList>();
+        out->cmdName = "Insert";
+        out->cmdArgs = a;
+        GeoList *src = L, *ins = obj;
+        const bool asList = objIsList;
+        auto bake = [src, ins, asList, bo, bp](GeoList *g) {
+            g->values.clear();
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            const double posv = bp.evalNow();
+            if (!std::isfinite(posv)) return;
+            const long long sz = (long long)src->values.size();
+            long long pos = (long long)llround(posv);
+            if (pos < 1) pos = 1;
+            if (pos > sz + 1) pos = sz + 1;
+            for (long long i = 0; i < pos - 1; ++i) {
+                g->values.push_back(src->values[(size_t)i]);
+            }
+            if (asList) {
+                g->values.insert(g->values.end(), ins->values.begin(), ins->values.end());
+            } else {
+                g->values.push_back(bo.evalNow());
+            }
+            for (long long i = pos - 1; i < sz; ++i) {
+                g->values.push_back(src->values[(size_t)i]);
+            }
+        };
+        std::vector<GeoElement *> inputs;
+        for (GeoNumeric *d : ndeps) inputs.push_back(d);
+        inputs.push_back(L);
+        if (asList) inputs.push_back(obj);
+        finishList(out, bake, lit || litObj, std::move(inputs));
+        return true;
+    }
+
+    // Remove(L1, L2)：从 L1 去掉 L2 中出现的元素（值相等）；L2 也可为单数
+    if (cmdLower == "remove" && a.size() == 2) {
+        bool lit = false, litObj = false;
+        GeoList *L = listArg(a[0], lit);
+        if (!L) { made = nullptr; return true; }
+        NumRefExpr bv;
+        std::vector<GeoNumeric *> ndeps;
+        const bool valForm = numRefArg(a[1], bv, ndeps);
+        GeoList *rm = nullptr;
+        if (!valForm) {
+            rm = listArg(a[1], litObj);
+            if (!rm) { made = nullptr; return true; }
+        }
+        auto out = std::make_unique<GeoList>();
+        out->cmdName = "Remove";
+        out->cmdArgs = a;
+        GeoList *src = L;
+        auto bake = [src, rm, valForm, bv](GeoList *g) {
+            g->values.clear();
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            if (valForm) {
+                const double v = bv.evalNow();
+                if (std::isfinite(v)) {
+                    for (double x : src->values) {
+                        if (x != v) g->values.push_back(x);
+                    }
+                } else {
+                    g->values = src->values;
+                }
+            } else {
+                for (double x : src->values) {
+                    bool hit = false;
+                    for (double y : rm->values) {
+                        if (y == x) { hit = true; break; }
+                    }
+                    if (!hit) g->values.push_back(x);
+                }
+            }
+        };
+        std::vector<GeoElement *> inputs;
+        for (GeoNumeric *d : ndeps) inputs.push_back(d);
+        inputs.push_back(L);
+        if (!valForm) inputs.push_back(rm);
+        finishList(out, bake, lit || litObj, std::move(inputs));
+        return true;
+    }
+
+    // Join(L1, L2, …)：顺次拼接（≥2 个列表）
+    if (cmdLower == "join" && a.size() >= 2) {
+        std::vector<GeoList *> srcs;
+        bool anyLit = false;
+        for (const std::string &s : a) {
+            bool lit = false;
+            GeoList *L = listArg(s, lit);
+            if (!L) { made = nullptr; return true; }
+            if (lit) anyLit = true;
+            srcs.push_back(L);
+        }
+        auto out = std::make_unique<GeoList>();
+        out->cmdName = "Join";
+        out->cmdArgs = a;
+        auto bake = [srcs](GeoList *g) {
+            g->values.clear();
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            for (GeoList *s : srcs) {
+                g->values.insert(g->values.end(), s->values.begin(), s->values.end());
+            }
+        };
+        std::vector<GeoElement *> inputs(srcs.begin(), srcs.end());
+        finishList(out, bake, anyLit, std::move(inputs));
+        return true;
+    }
+
+    // Flatten(L)：矩阵/嵌套列表展开为行主序扁平列表。唯一允许矩阵/嵌套
+    // 字面量实参的列表命令（listArg 拒矩阵，这里手解；字面量递归展开为
+    // 静态产物，标签形式依随源列表）
+    if (cmdLower == "flatten" && a.size() == 1) {
+        auto out = std::make_unique<GeoList>();
+        bool lit = false;
+        GeoList *L = nullptr;
+        if (!a[0].empty() && a[0].front() == '{') {
+            std::string ferr;
+            if (!ParseFlattenLiteral(a[0], out->values, ferr)) {
+                lastError = ferr.empty() ? "Flatten 实参无法解析: " + a[0] : ferr;
+                made = nullptr;
+                return true;
+            }
+            lit = true;
+        } else {
+            L = dynamic_cast<GeoList *>(lookup(a[0]));
+            if (!L) { lastError = "未找到列表 " + a[0]; made = nullptr; return true; }
+        }
+        out->cmdName = "Flatten";
+        out->cmdArgs = a;
+        GeoList *src = L;
+        auto bake = [src](GeoList *g) {
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            if (src) g->values = src->values;   // 字面量分支：值已在解析时填好
+        };
+        std::vector<GeoElement *> fin;
+        if (L) fin.push_back(L);
+        finishList(out, bake, lit, std::move(fin));
+        return true;
+    }
+
+    // Zip(表达式, 变量1, 列表1[, 变量2, 列表2…])：并行迭代（长度取最小），
+    // 变量按名进表达式（refs 求值）；表达式其余引用须为数值对象
+    if (cmdLower == "zip" && a.size() >= 3 && a.size() % 2 == 1) {
+        Expr body;
+        std::string err;
+        if (!body.parse(a[0], err, "", true)) {
+            lastError = err.empty() ? "Zip 表达式无法解析: " + a[0] : err;
+            made = nullptr;
+            return true;
+        }
+        if (body.containsX() || body.containsY()) {
+            lastError = "Zip 表达式不能含 x/y";
+            made = nullptr;
+            return true;
+        }
+        const size_t np = (a.size() - 1) / 2;
+        std::vector<std::string> vars;
+        std::vector<GeoList *> srcs;
+        bool anyLit = false;
+        for (size_t i = 0; i < np; ++i) {
+            vars.push_back(a[1 + 2 * i]);
+            bool lit = false;
+            GeoList *L = listArg(a[2 + 2 * i], lit);
+            if (!L) { made = nullptr; return true; }
+            if (lit) anyLit = true;
+            srcs.push_back(L);
+        }
+        std::vector<std::pair<std::string, GeoNumeric *>> extra;
+        for (const std::string &rn : body.refs()) {
+            bool isVar = false;
+            for (const std::string &v : vars) {
+                if (v == rn) { isVar = true; break; }
+            }
+            if (isVar) continue;
+            GeoNumeric *dn = dynamic_cast<GeoNumeric *>(lookup(rn));
+            if (!dn) { lastError = "Zip 表达式含未知对象 " + rn; made = nullptr; return true; }
+            extra.push_back({ rn, dn });
+        }
+        auto out = std::make_unique<GeoList>();
+        out->cmdName = "Zip";
+        out->cmdArgs = a;
+        auto bake = [body, vars, srcs, extra](GeoList *g) {
+            g->values.clear();
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            size_t n = srcs.empty() ? 0 : srcs[0]->values.size();
+            for (GeoList *s : srcs) n = std::min(n, s->values.size());
+            for (size_t i = 0; i < n; ++i) {
+                g->values.push_back(body.evalResolved(0.0,
+                    [&](const std::string &nm2) -> double {
+                        for (size_t p = 0; p < vars.size(); ++p) {
+                            if (vars[p] == nm2) return srcs[p]->values[i];
+                        }
+                        for (const auto &pr : extra) {
+                            if (pr.first == nm2) return pr.second->value;
+                        }
+                        return NAN;
+                    }));
+            }
+        };
+        std::vector<GeoElement *> inputs(srcs.begin(), srcs.end());
+        for (const auto &pr : extra) inputs.push_back(pr.second);
+        finishList(out, bake, anyLit, std::move(inputs));
+        return true;
+    }
+
+    // Frequency(L)：与 Unique(L) 同序（首现序）的各值出现次数
+    if (cmdLower == "frequency" && a.size() == 1) {
+        bool lit = false;
+        GeoList *L = listArg(a[0], lit);
+        if (!L) { made = nullptr; return true; }
+        auto out = std::make_unique<GeoList>();
+        out->cmdName = "Frequency";
+        out->cmdArgs = a;
+        GeoList *src = L;
+        auto bake = [src](GeoList *g) {
+            g->values.clear();
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            std::vector<double> uniq;
+            for (double x : src->values) {
+                bool seen = false;
+                for (double y : uniq) {
+                    if (y == x) { seen = true; break; }
+                }
+                if (!seen) uniq.push_back(x);
+            }
+            for (double u : uniq) {
+                long long c = 0;
+                for (double x : src->values) {
+                    if (x == u) ++c;
+                }
+                g->values.push_back((double)c);
+            }
+        };
+        finishList(out, bake, lit, { L });
+        return true;
+    }
+
+    // 图表通用：可见（画布绘制）、默认蓝（同多边形）、依随源列表重算。
+    // 收尾同 finishList（字面量实参 → 静态）
+    auto finishChart = [&](std::unique_ptr<GeoList> &out,
+                           const std::function<void(GeoList *)> &bake, bool anyLit,
+                           std::vector<GeoElement *> inputs) {
+        out->visible = true;
+        out->color = {0x2C, 0x6B, 0xD4};
+        finishList(out, bake, anyLit, std::move(inputs));
+    };
+
+    // BarChart(数据) / BarChart(横坐标, 高度[, 条宽])：单列表形式按 1..n
+    // 定位；条宽缺省 0.8（chartB 存）
+    if (cmdLower == "barchart" && (a.size() == 1 || a.size() == 2 || a.size() == 3)) {
+        bool lit = false;
+        GeoList *Lx = listArg(a[0], lit);
+        if (!Lx) { made = nullptr; return true; }
+        bool anyLit = lit;
+        GeoList *Lh = nullptr;
+        if (a.size() >= 2) {
+            bool lit2 = false;
+            Lh = listArg(a[1], lit2);
+            if (!Lh) { made = nullptr; return true; }
+            anyLit = anyLit || lit2;
+        }
+        NumRefExpr bw;
+        std::vector<GeoNumeric *> ndeps;
+        const bool hasW = a.size() == 3;
+        if (hasW) {
+            if (!numRefArg(a[2], bw, ndeps) || !(bw.evalNow() > 0)) {
+                lastError = "BarChart 条宽须为正数";
+                made = nullptr;
+                return true;
+            }
+        }
+        auto out = std::make_unique<GeoList>();
+        out->chart = "bar";
+        out->chartB = 0.8;
+        out->cmdName = "BarChart";
+        out->cmdArgs = a;
+        GeoList *xs = Lx, *hs = Lh ? Lh : Lx;
+        const bool twoLists = Lh != nullptr;
+        auto bake = [xs, hs, twoLists, bw, hasW](GeoList *g) {
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            if (hasW) {
+                const double w = bw.evalNow();
+                g->chartB = (std::isfinite(w) && w > 0) ? w : 0.8;
+            }
+            if (twoLists) {
+                const size_t n = std::min(xs->values.size(), hs->values.size());
+                g->chartX.assign(xs->values.begin(), xs->values.begin() + (long)n);
+                g->values.assign(hs->values.begin(), hs->values.begin() + (long)n);
+            } else {
+                g->chartX.clear();
+                g->values = xs->values;
+            }
+        };
+        std::vector<GeoElement *> inputs;
+        for (GeoNumeric *d : ndeps) inputs.push_back(d);
+        inputs.push_back(Lx);
+        if (twoLists) inputs.push_back(Lh);
+        finishChart(out, bake, anyLit, std::move(inputs));
+        return true;
+    }
+
+    // Histogram(数据, 组数) / Histogram(组界, 数据)：前者等宽自动分组
+    //（第二参可解析为数即此形式）；后者按组界 [b_i, b_{i+1}) 计数（末组
+    // 含右端点），界外数据忽略
+    if (cmdLower == "histogram" && a.size() == 2) {
+        NumRefExpr bn;
+        std::vector<GeoNumeric *> ndeps;
+        const bool binsForm = numRefArg(a[1], bn, ndeps);
+        bool lit = false, litD = false;
+        GeoList *Lb = nullptr, *Ld = nullptr;
+        if (binsForm) {
+            const double nraw = bn.evalNow();
+            const double nr = std::isfinite(nraw) ? llround(nraw) : 0;
+            if (nr < 1 || nr > 1000) {
+                lastError = "Histogram 组数须为 1..1000 的整数";
+                made = nullptr;
+                return true;
+            }
+            Ld = listArg(a[0], lit);
+            if (!Ld) { made = nullptr; return true; }
+        } else {
+            Lb = listArg(a[0], lit);
+            if (!Lb) { made = nullptr; return true; }
+            Ld = listArg(a[1], litD);
+            if (!Ld) { made = nullptr; return true; }
+            for (size_t k = 0; k + 1 < Lb->values.size(); ++k) {
+                if (Lb->values[k + 1] < Lb->values[k]) {
+                    lastError = "Histogram 组界须升序";
+                    made = nullptr;
+                    return true;
+                }
+            }
+            if (Lb->values.size() < 2) {
+                lastError = "Histogram 组界至少两个";
+                made = nullptr;
+                return true;
+            }
+        }
+        auto out = std::make_unique<GeoList>();
+        out->chart = "hist";
+        out->cmdName = "Histogram";
+        out->cmdArgs = a;
+        GeoList *sb = Lb, *sd = Ld;
+        auto bake = [sb, sd, bn, binsForm](GeoList *g) {
+            g->values.clear();
+            g->chartX.clear();
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            const auto &d = sd->values;
+            if (d.empty()) return;
+            if (binsForm) {
+                const double nraw = bn.evalNow();
+                if (!std::isfinite(nraw)) return;
+                long long n = (long long)llround(nraw);
+                if (n < 1 || n > 1000) return;
+                double mn = d[0], mx = d[0];
+                for (double v : d) {
+                    mn = std::min(mn, v);
+                    mx = std::max(mx, v);
+                }
+                double w = (mx - mn) / (double)n;
+                if (w < 1e-12) { mn -= 0.5; mx += 0.5; w = (mx - mn) / (double)n; }
+                for (long long k = 0; k <= n; ++k) g->chartX.push_back(mn + w * (double)k);
+                g->values.assign((size_t)n, 0.0);
+                for (double v : d) {
+                    long long b2 = (long long)floor((v - mn) / w);
+                    if (b2 < 0) b2 = 0;
+                    if (b2 >= n) b2 = n - 1;
+                    g->values[(size_t)b2] += 1.0;
+                }
+            } else {
+                const auto &b = sb->values;
+                if (b.size() < 2) return;
+                g->chartX = b;
+                g->values.assign(b.size() - 1, 0.0);
+                for (double v : d) {
+                    for (size_t k = 0; k + 1 < b.size(); ++k) {
+                        const bool last = k + 2 == b.size();
+                        if (v >= b[k] && (last ? v <= b[k + 1] : v < b[k + 1])) {
+                            g->values[k] += 1.0;
+                            break;
+                        }
+                    }
+                }
+            }
+        };
+        std::vector<GeoElement *> inputs;
+        for (GeoNumeric *d : ndeps) inputs.push_back(d);
+        inputs.push_back(Ld);
+        if (Lb) inputs.push_back(Lb);
+        finishChart(out, bake, lit || litD, std::move(inputs));
+        return true;
+    }
+
+    // LineGraph / ScatterPlot(x 列表, y 列表)：折线 / 散点（长度取最小）
+    if ((cmdLower == "linegraph" || cmdLower == "scatterplot") && a.size() == 2) {
+        bool lit1 = false, lit2 = false;
+        GeoList *Lx = listArg(a[0], lit1);
+        if (!Lx) { made = nullptr; return true; }
+        GeoList *Ly = listArg(a[1], lit2);
+        if (!Ly) { made = nullptr; return true; }
+        auto out = std::make_unique<GeoList>();
+        out->chart = cmdLower == "linegraph" ? "line" : "scatter";
+        out->cmdName = cmdLower == "linegraph" ? "LineGraph" : "ScatterPlot";
+        out->cmdArgs = a;
+        auto bake = [Lx, Ly](GeoList *g) {
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            const size_t n = std::min(Lx->values.size(), Ly->values.size());
+            g->chartX.assign(Lx->values.begin(), Lx->values.begin() + (long)n);
+            g->values.assign(Ly->values.begin(), Ly->values.begin() + (long)n);
+        };
+        finishChart(out, bake, lit1 || lit2, { Lx, Ly });
+        return true;
+    }
+
+    // BoxPlot(y 中心[, 箱高], 数据)：五数概括（线性插值分位数），values 存
+    // {min, Q1, 中位数, Q3, max}，chartA/chartB 存中心 y 与箱高（缺省 1）
+    if (cmdLower == "boxplot" && (a.size() == 2 || a.size() == 3)) {
+        NumRefExpr bo, bs;
+        std::vector<GeoNumeric *> ndeps;
+        if (!numRefArg(a[0], bo, ndeps) || !std::isfinite(bo.evalNow())) {
+            lastError = "BoxPlot 第一参数须为数（箱中心 y）";
+            made = nullptr;
+            return true;
+        }
+        const bool hasScale = a.size() == 3;
+        if (hasScale && (!numRefArg(a[1], bs, ndeps) || !(bs.evalNow() > 0))) {
+            lastError = "BoxPlot 箱高须为正数";
+            made = nullptr;
+            return true;
+        }
+        bool lit = false;
+        GeoList *L = listArg(a[hasScale ? 2 : 1], lit);
+        if (!L) { made = nullptr; return true; }
+        auto out = std::make_unique<GeoList>();
+        out->chart = "box";
+        out->chartB = 1.0;
+        out->cmdName = "BoxPlot";
+        out->cmdArgs = a;
+        GeoList *src = L;
+        auto bake = [src, bo, bs, hasScale](GeoList *g) {
+            g->values.clear();
+            g->chartX.clear();
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            g->chartA = bo.evalNow();
+            g->chartB = 1.0;
+            if (hasScale) {
+                const double s = bs.evalNow();
+                g->chartB = (std::isfinite(s) && s > 0) ? s : 1.0;
+            }
+            if (src->values.empty()) return;
+            std::vector<double> s2(src->values);
+            std::sort(s2.begin(), s2.end());
+            auto quant = [&s2](double p) -> double {
+                const double pos = p * (double)(s2.size() - 1);
+                const size_t lo = (size_t)floor(pos);
+                const size_t hi = (size_t)ceil(pos);
+                const double t = pos - (double)lo;
+                return s2[lo] * (1.0 - t) + s2[hi] * t;
+            };
+            g->values = { s2.front(), quant(0.25), quant(0.5), quant(0.75), s2.back() };
+        };
+        std::vector<GeoElement *> inputs;
+        for (GeoNumeric *d : ndeps) inputs.push_back(d);
+        inputs.push_back(L);
+        finishChart(out, bake, lit, std::move(inputs));
+        return true;
+    }
+
+    // StemPlot(数据[, adjustment])：茎叶图（文本形态，画布左上固定区绘制）。
+    // adjustment d 把数据 ×10^d 取整对齐（小数数据 d>0、过大数据 d<0），
+    // values 存调整后的排序数据
+    if (cmdLower == "stemplot" && (a.size() == 1 || a.size() == 2)) {
+        NumRefExpr badj;
+        std::vector<GeoNumeric *> ndeps;
+        const bool hasAdj = a.size() == 2;
+        if (hasAdj && !numRefArg(a[1], badj, ndeps)) {
+            lastError = "StemPlot 调整位数须为数";
+            made = nullptr;
+            return true;
+        }
+        bool lit = false;
+        GeoList *L = listArg(a[0], lit);
+        if (!L) { made = nullptr; return true; }
+        auto out = std::make_unique<GeoList>();
+        out->chart = "stem";
+        out->cmdName = "StemPlot";
+        out->cmdArgs = a;
+        GeoList *src = L;
+        auto bake = [src, badj, hasAdj](GeoList *g) {
+            g->chartX.clear();
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            double adj = 0;
+            if (hasAdj) {
+                const double a2 = badj.evalNow();
+                adj = std::isfinite(a2) ? (double)llround(a2) : 0.0;
+            }
+            if (adj > 30) adj = 30;
+            if (adj < -30) adj = -30;
+            g->chartA = adj;
+            const double mul = pow(10.0, adj);
+            g->values.clear();
+            for (double v : src->values) g->values.push_back(v * mul);
+            std::sort(g->values.begin(), g->values.end());
+        };
+        std::vector<GeoElement *> inputs;
+        for (GeoNumeric *d : ndeps) inputs.push_back(d);
+        inputs.push_back(L);
+        finishChart(out, bake, lit, std::move(inputs));
         return true;
     }
 
@@ -5935,6 +6743,179 @@ static void AppendDashSegs(const std::vector<float> &pts, double on, double off,
     }
 }
 
+// 1.0.6.3 图表列表绘制。bar/hist = 半透明填充 + 黑描边矩形；line = 折线；
+// scatter = 实心点；box = 箱体填充 + 触须/端帽/中位线；stem = 茎叶文本
+//（画布左上固定区，逐行 Text）。普通列表（chart 空）不绘制——走 render
+// 的 GeoType::List 分支判空
+void Kernel::appendChartPlot(const GeoList &L, std::vector<DrawCmd> &out,
+                             const std::string &selHalo) const
+{
+    (void)selHalo;
+    const std::string objC = ObjectColor(L.color, darkTheme);
+    const std::string fillC = RgbaFromHex(objC, 0.45);
+    const std::string lineC = ObjectColor(GeoColor{0, 0, 0}, darkTheme);
+
+    if (L.chart == "bar" || L.chart == "hist") {
+        for (size_t i = 0; i < L.values.size(); ++i) {
+            double x0, x1;
+            if (L.chart == "hist") {
+                if (i + 1 >= L.chartX.size()) break;
+                x0 = L.chartX[i];
+                x1 = L.chartX[i + 1];
+            } else {
+                const double xc = i < L.chartX.size() ? L.chartX[i] : (double)(i + 1);
+                const double w = L.chartB > 0 ? L.chartB : 0.8;
+                x0 = xc - w / 2;
+                x1 = xc + w / 2;
+            }
+            const double h = L.values[i];
+            if (!std::isfinite(h)) continue;
+            const double y0 = std::min(0.0, h), y1 = std::max(0.0, h);
+            std::vector<float> poly = {
+                (float)view.px(x0), (float)view.py(y0),
+                (float)view.px(x1), (float)view.py(y0),
+                (float)view.px(x1), (float)view.py(y1),
+                (float)view.px(x0), (float)view.py(y1),
+            };
+            DrawCmd fill;
+            fill.op = DrawOp::FillPoly;
+            fill.color = fillC;
+            fill.pts = poly;
+            out.push_back(fill);
+            DrawCmd st;
+            st.op = DrawOp::Polyline;
+            st.color = lineC;
+            st.lineWidth = 1.6f;
+            st.pts = poly;
+            st.pts.push_back(poly[0]);
+            st.pts.push_back(poly[1]);
+            out.push_back(st);
+        }
+        return;
+    }
+
+    if (L.chart == "line") {
+        const size_t n = std::min(L.values.size(), L.chartX.size());
+        if (n >= 2) {
+            DrawCmd d;
+            d.op = DrawOp::Polyline;
+            d.color = objC;
+            d.lineWidth = L.lineThickness / 3.0f;
+            for (size_t i = 0; i < n; ++i) {
+                d.pts.push_back((float)view.px(L.chartX[i]));
+                d.pts.push_back((float)view.py(L.values[i]));
+            }
+            out.push_back(d);
+        } else if (n == 1) {
+            DrawCmd d;
+            d.op = DrawOp::FillCircle;
+            d.color = objC;
+            d.pts = { (float)view.px(L.chartX[0]), (float)view.py(L.values[0]),
+                      (float)(3.0 * view.uiScale) };
+            out.push_back(d);
+        }
+        return;
+    }
+
+    if (L.chart == "scatter") {
+        const size_t n = std::min(L.values.size(), L.chartX.size());
+        for (size_t i = 0; i < n; ++i) {
+            if (!std::isfinite(L.chartX[i]) || !std::isfinite(L.values[i])) continue;
+            DrawCmd d;
+            d.op = DrawOp::FillCircle;
+            d.color = objC;
+            d.pts = { (float)view.px(L.chartX[i]), (float)view.py(L.values[i]),
+                      (float)(3.0 * view.uiScale) };
+            out.push_back(d);
+        }
+        return;
+    }
+
+    if (L.chart == "box") {
+        if (L.values.size() < 5) return;
+        const double mn = L.values[0], q1 = L.values[1], md = L.values[2];
+        const double q3 = L.values[3], mx = L.values[4];
+        const double yC = L.chartA;
+        const double h = L.chartB > 0 ? L.chartB : 1.0;
+        const double y0 = yC - h / 2, y1 = yC + h / 2;
+        std::vector<float> poly = {
+            (float)view.px(q1), (float)view.py(y0),
+            (float)view.px(q3), (float)view.py(y0),
+            (float)view.px(q3), (float)view.py(y1),
+            (float)view.px(q1), (float)view.py(y1),
+        };
+        DrawCmd fill;
+        fill.op = DrawOp::FillPoly;
+        fill.color = fillC;
+        fill.pts = poly;
+        out.push_back(fill);
+        DrawCmd st;
+        st.op = DrawOp::Polyline;
+        st.color = lineC;
+        st.lineWidth = 1.6f;
+        st.pts = poly;
+        st.pts.push_back(poly[0]);
+        st.pts.push_back(poly[1]);
+        out.push_back(st);
+        // 触须 + 端帽 + 中位线
+        auto seg = [&](double ax, double ay, double bx, double by, float lw,
+                       const std::string &c) {
+            DrawCmd s;
+            s.op = DrawOp::Segment;
+            s.color = c;
+            s.lineWidth = lw;
+            s.pts = { (float)view.px(ax), (float)view.py(ay),
+                      (float)view.px(bx), (float)view.py(by) };
+            out.push_back(s);
+        };
+        seg(mn, yC, q1, yC, 1.6f, lineC);
+        seg(q3, yC, mx, yC, 1.6f, lineC);
+        seg(mn, y0, mn, y1, 1.6f, lineC);
+        seg(mx, y0, mx, y1, 1.6f, lineC);
+        seg(md, y0, md, y1, 2.4f, objC);
+        return;
+    }
+
+    if (L.chart == "stem") {
+        // 茎 = trunc(v/10)，叶 = v − 10·茎（负值叶带符号显示）；values 已排序，
+        // 同茎自然聚组
+        std::vector<std::pair<long long, std::vector<long long>>> groups;
+        for (double v : L.values) {
+            if (!std::isfinite(v)) continue;
+            const long long iv = (long long)llround(v);
+            const long long st2 = (long long)trunc((double)iv / 10.0);
+            const long long lf = iv - st2 * 10;
+            if (!groups.empty() && groups.back().first == st2) {
+                groups.back().second.push_back(lf);
+            } else {
+                groups.push_back({ st2, { lf } });
+            }
+        }
+        // 画布左上固定区绘制：y 从 115·us 起（菜单/撤销按钮组占据 ~0..100vp，
+        // 50vp 起画会被 ☰ 按钮盖住——真机验证后下移）
+        const float tx = 40.0f * view.uiScale, ty = 115.0f * view.uiScale;
+        const float lh = 18.0f * view.uiScale;
+        float y = ty;
+        for (const auto &gp : groups) {
+            // 茎叶分隔用全形竖线：帧协议按 '|' 分字段，ASCII 管道会切碎
+            // Text 指令行（真机首测：画布不显示）
+            std::string s = std::to_string(gp.first) + " │ ";
+            for (size_t i = 0; i < gp.second.size(); ++i) {
+                if (i) s += " ";
+                s += std::to_string(gp.second[i]);
+            }
+            DrawCmd d;
+            d.op = DrawOp::Text;
+            d.color = objC;
+            d.pts = { tx, y };
+            d.text = s;
+            out.push_back(d);
+            y += lh;
+        }
+        return;
+    }
+}
+
 // N6 批次⑤：不等式区域。填充 = 对象色低透明度（默认 0.10，选中行滑杆可调，
 // fillAlpha 为不透明度：0 → 不画填充完全消失，1 → 对象色实底）；边界 strict(< >)
 // 虚线、含等号实线；竖直半平面（x>3 类）整幅矩形 + 竖直边界。
@@ -6799,7 +7780,10 @@ void Kernel::render(std::vector<DrawCmd> &out)
             break;
         }
         case GeoType::List: {
-            // 数值列表不绘制（上游 同语义）
+            // 普通数值列表不绘制（上游 同语义）；1.0.6.3 图表列表走
+            // appendChartPlot（bar/hist/line/scatter/box/stem）
+            GeoList *cl = static_cast<GeoList *>(g.get());
+            if (!cl->chart.empty()) appendChartPlot(*cl, out, selHalo);
             break;
         }
         case GeoType::Text: {

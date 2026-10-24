@@ -341,6 +341,18 @@ static std::string ListBraceText(const std::vector<double> &v, size_t maxShow)
 
 std::string GeoList::valueText() const
 {
+    // 1.0.6.3 图表列表：值列给形态摘要（数据本体画在画布上，行列出条数）
+    if (!chart.empty()) {
+        const size_t n = chart == "box" ? 5 : values.size();
+        const char *cn = chart == "bar"     ? "柱状图"
+                       : chart == "hist"    ? "直方图"
+                       : chart == "line"    ? "折线图"
+                       : chart == "scatter" ? "散点图"
+                       : chart == "box"     ? "箱线图"
+                                            : "茎叶图";
+        return std::string(cn) + "（" + std::to_string(n)
+             + (chart == "hist" ? " 组）" : chart == "box" ? " 数概括）" : " 条）");
+    }
     if (values.empty()) return "{}";
     if (isMatrix) {
         // 矩阵按行拆行显示（{{1,2},{3,4}} → 两行花括号串）；GGB 用 LaTeX

@@ -50,6 +50,17 @@ export struct AlgebraRowView {
     return Number.isFinite(n) ? `${n}` : '';
   }
 
+  // 值列是否含 CJK（图表摘要/中文文本对象等）：RaTeX 公式渲染会丢 CJK，
+  // 这类值走纯 Text（U+2E80 起为 CJK 部首区，涵盖汉字与中文标点）
+  private hasCjk(s: string): boolean {
+    for (let i = 0; i < s.length; i++) {
+      if (s.charCodeAt(i) >= 0x2E80) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   private commitRename(): void {
     if (!this.editing) {
       return;
@@ -153,6 +164,16 @@ export struct AlgebraRowView {
         }
         .layoutWeight(1)
         .margin({ left: 4, right: 4 })
+      } else if (this.hasCjk(this.entry.value)) {
+        // 1.0.6.3 图表列表值列是中文摘要（柱状图（3 条））：RaTeX/公式渲染
+        // 会丢 CJK 字符，含中文的值走纯文本（同样可点开修改框）
+        Text(this.entry.value)
+          .fontSize(13)
+          .fontColor(Theme.sub(this.dark))
+          .maxLines(1)
+          .onClick(() => this.onEdit(this.entry.label, this.entry.definition))
+        Blank()
+          .layoutWeight(1)
       } else {
         // 十三轮：修改框只由值文本本体触发（原 layoutWeight 拉通整行，
         // 点行其余位置也弹修改框）；空白区点按落回整行 = 仅选中。

@@ -272,11 +272,14 @@ bool FnArity(const std::string &n, int &lo, int &hi)
     return false;
 }
 
+} // namespace
+
 // 命令调用名判定（六十九包②）：tryCommand 全集的小写名。表达式解析遇
 // Name( 命中此表时不再报「未知函数」，改报命令语义的专用文案（命令不可
 // 嵌入表达式/作为对象引用参与运算）——「Integral(x,1,6)x 在 Integral 右边
 // 插字符」类编辑破坏的报错从误导的「未知函数」改为可理解提示。
-// 大小写不敏感（与命令分发 ToLower 同规）
+// 大小写不敏感（与命令分发 ToLower 同规）。1.0.6.3 起导出（expr.h），
+// 快捷建点 "X(u,v)" 改写用同一张表排除命令名
 bool IsCommandCallName(const std::string &n)
 {
     static const char *kCmds[] = {
@@ -290,7 +293,10 @@ bool IsCommandCallName(const std::string &n)
         "mean", "median", "sum", "product", "sd", "variance",
         "fitline", "fitpoly", "fitexp", "correlationcoefficient",
         "transpose", "determinant", "det", "invert", "identity", "row", "column",
-        "simplify", "expand", "factor"
+        "simplify", "expand", "factor",
+        "take", "drop", "insert", "remove", "zip", "flatten", "join",
+        "frequency", "barchart", "histogram", "linegraph", "scatterplot",
+        "boxplot", "stemplot"
     };
     std::string low;
     low.reserve(n.size());
@@ -302,6 +308,8 @@ bool IsCommandCallName(const std::string &n)
     }
     return false;
 }
+
+namespace {
 
 long long GcdLL(long long a, long long b)
 {

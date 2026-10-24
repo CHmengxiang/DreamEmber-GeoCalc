@@ -277,6 +277,9 @@ private:
     static Geometry CircleGeom(const GeoCircle &c, const EuclidianView &v);
     void appendFunctionPlot(const GeoFunction &f, std::vector<DrawCmd> &out,
                             bool sel = false) const;
+    // 1.0.6.3 图表列表绘制（bar/hist/line/scatter/box/stem；普通列表不画）
+    void appendChartPlot(const GeoList &L, std::vector<DrawCmd> &out,
+                         const std::string &selHalo) const;
     // N6 批次⑤：不等式区域（填充 + 虚线/实线边界，含竖直半平面）
     void appendInequalityPlot(const GeoFunction &f, std::vector<DrawCmd> &out) const;
     void appendGrid(std::vector<DrawCmd> &out) const;
