@@ -179,6 +179,9 @@ public:
     explicit GeoNumeric(GeoType t) : GeoElement(t) { visible = false; }
     double value = 0;
     bool isFree = true;
+    // 1.0.6.4 布尔对象：定义式顶层为比较/逻辑（a>2、b∧c）的依随数值，
+    // 值列显示 true/false（内部仍 1/0 存储，参与运算同数值）
+    bool boolLike = false;
     std::function<double()> calc;   // 依随数值的重算闭包（级联删除保证不悬垂）
     std::string cmd;                // 依随时记录的命令原文（"Distance(A, B)"）
 
@@ -197,7 +200,10 @@ public:
     {
         if (calc) value = calc();
     }
-    std::string valueText() const override { return FormatNum(value); }
+    std::string valueText() const override
+    {
+        return boolLike ? (value != 0.0 ? "true" : "false") : FormatNum(value);
+    }
     std::string definitionText() const override
     {
         if (!cmdName.empty()) return cmdDefText();

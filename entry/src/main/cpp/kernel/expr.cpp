@@ -10,13 +10,14 @@
 namespace dreamember {
 
 struct Expr::Node {
-    enum class Kind { Num, Var, YVar, Param, Ref, Bin, Call };
+    enum class Kind { Num, Var, YVar, Param, Ref, Bin, Call, If };
     Kind kind = Kind::Num;
     double num = 0.0;
     char op = 0;
     std::string name;   // Var/YVar/Param 无用；Ref=对象标签；Call=函数名
     std::unique_ptr<Node> l, r;
-    std::vector<std::unique_ptr<Node>> args;   // Call 的实参表（1~2 参）
+    std::vector<std::unique_ptr<Node>> args;   // Call 的实参表（1~2 参）；
+                                               // If：args[0]=条件 args[1]=则 args[2]=否则（可缺）
 };
 
 namespace {
@@ -294,6 +295,10 @@ bool IsCommandCallName(const std::string &n)
         "fitline", "fitpoly", "fitexp", "correlationcoefficient",
         "transpose", "determinant", "det", "invert", "identity", "row", "column",
         "simplify", "expand", "factor",
+        "inversenormal", "binomialdist", "inversebinomial", "poisson",
+        "inversepoisson", "fitsin", "fitlogistic", "fitgrowth",
+        "if"   // 表达式级 If(条件,则,否则)：防快捷建点改写劫持（If(2>1,3)）
+,
         "take", "drop", "insert", "remove", "zip", "flatten", "join",
         "frequency", "barchart", "histogram", "linegraph", "scatterplot",
         "boxplot", "stemplot"
@@ -396,9 +401,19 @@ double EvalNode(const Expr::Node *n, double x, double y, double param,
         }
         return CallFnN(n->name, v, argc);
     }
+    case Expr::Node::Kind::If: {
+        // If(条件, 则[, 否则])（1.0.6.4 条件层）：条件真（非零有限）取则，
+        // 假/非有限取否则；两参形式假时 NaN（画函数即断点洞）
+        const double c = EvalNode(n->args[0].get(), x, y, param, resolve);
+        if (std::isfinite(c) && c != 0.0) {
+            return EvalNode(n->args[1].get(), x, y, param, resolve);
+        }
+        return n->args.size() > 2
+            ? EvalNode(n->args[2].get(), x, y, param, resolve) : NAN;
+    }
     case Expr::Node::Kind::Bin: {
         double a = EvalNode(n->l.get(), x, y, param, resolve);
-        // 后缀一元算符（! % °）：r 为空，先于二元求值分支处理
+        // 后缀一元算符（! % °）与逻辑非（~，r 为空）：先于二元求值分支处理
         switch (n->op) {
         case '!': {   // 阶乘：仅非负整数（≤170 防溢出）
             const long long v = llround(a);
@@ -411,6 +426,8 @@ double EvalNode(const Expr::Node *n, double x, double y, double param,
             return a / 100.0;
         case (char)0xB0:   // 度 → 弧度
             return a * kPi / 180.0;
+        case '~':   // ¬ 逻辑非（单目）：非零有限为真
+            return (std::isfinite(a) && a == 0.0) ? 1.0 : 0.0;
         default:
             break;
         }
@@ -421,6 +438,17 @@ double EvalNode(const Expr::Node *n, double x, double y, double param,
         case '*': return a * b;
         case '/': return a / b;
         case '^': return pow(a, b);
+        // 1.0.6.4 比较/逻辑层：结果 1/0（NaN 比较恒假，与 C++ 同规）
+        case '<': return a < b ? 1.0 : 0.0;
+        case 'L': return a <= b ? 1.0 : 0.0;   // <= / ≤
+        case '>': return a > b ? 1.0 : 0.0;
+        case 'G': return a >= b ? 1.0 : 0.0;   // >= / ≥
+        case '=': return a == b ? 1.0 : 0.0;   // ==
+        case 'N': return a != b ? 1.0 : 0.0;   // != / ≠
+        case '&': return (std::isfinite(a) && a != 0.0
+                          && std::isfinite(b) && b != 0.0) ? 1.0 : 0.0;
+        case '|': return (std::isfinite(a) && a != 0.0)
+                      || (std::isfinite(b) && b != 0.0) ? 1.0 : 0.0;
         }
         break;
     }
@@ -429,11 +457,12 @@ double EvalNode(const Expr::Node *n, double x, double y, double param,
 }
 
 struct Tok {
-    enum class K { Num, Name, Op, End };
+    enum class K { Num, Name, Op, Cmp, End };
     K k = K::End;
     double num = 0.0;
     std::string name;
     char op = 0;
+    int cmp = 0;   // K::Cmp：1=< 2=<= 3=> 4=>= 5=== 6=!= 7=∧ 8=∨ 9=¬
 };
 
 bool Tokenize(const std::string &s, std::vector<Tok> &out, std::string &err)
@@ -502,6 +531,71 @@ bool Tokenize(const std::string &s, std::vector<Tok> &out, std::string &err)
             continue;
         }
         // , ! % 为后缀/分隔算符（逗号用于多参函数 log(b,x) 等；!'% 为后缀）
+        // 1.0.6.4 比较/逻辑层：< <= > >= == != && & || 与 Unicode ≤ ≥ ≠ ∧ ∨ ¬
+        //（键盘 #&¬ 页同款字符；单 '&' 同 ∧、'||' 同 ∨；单 '|' 仍不识别——
+        // 绝对值走 abs() 模板；'!' 后跟 '=' 是不等号，单独是阶乘后缀）
+        {
+            auto cmpTok = [&out](int c) {
+                Tok t;
+                t.k = Tok::K::Cmp;
+                t.cmp = c;
+                out.push_back(std::move(t));
+            };
+            if (c == '<') {
+                if (i + 1 < s.size() && s[i + 1] == '=') { cmpTok(2); i += 2; }
+                else { cmpTok(1); ++i; }
+                continue;
+            }
+            if (c == '>') {
+                if (i + 1 < s.size() && s[i + 1] == '=') { cmpTok(4); i += 2; }
+                else { cmpTok(3); ++i; }
+                continue;
+            }
+            if (c == '=') {
+                if (i + 1 < s.size() && s[i + 1] == '=') { cmpTok(5); i += 2; }
+                else {
+                    // 裸 '='：赋值分割后不应出现在表达式里
+                    err = "表达式里不能有单个 =（相等用 ==）";
+                    return false;
+                }
+                continue;
+            }
+            if (c == '!') {
+                if (i + 1 < s.size() && s[i + 1] == '=') { cmpTok(6); i += 2; continue; }
+                // 阶乘后缀走下方单字符 fallback
+            }
+            if (c == '&') {
+                if (i + 1 < s.size() && s[i + 1] == '&') { cmpTok(7); i += 2; }
+                else { cmpTok(7); ++i; }   // 键盘 & 键插单字符，同 ∧
+                continue;
+            }
+            if (c == '|') {
+                if (i + 1 < s.size() && s[i + 1] == '|') { cmpTok(8); i += 2; continue; }
+                err = "无法识别的字符 |（或用 ||）";
+                return false;
+            }
+            // Unicode 双/三字节算符
+            if ((unsigned char)c == 0xE2 && i + 2 < s.size()
+                && (unsigned char)s[i + 1] == 0x89) {
+                const unsigned char tl = (unsigned char)s[i + 2];
+                if (tl == 0xA4) { cmpTok(2); i += 3; continue; }   // ≤
+                if (tl == 0xA5) { cmpTok(4); i += 3; continue; }   // ≥
+                if (tl == 0xA0) { cmpTok(6); i += 3; continue; }   // ≠
+            }
+            if ((unsigned char)c == 0xE2 && i + 2 < s.size()
+                && (unsigned char)s[i + 1] == 0x88
+                && ((unsigned char)s[i + 2] == 0xA7 || (unsigned char)s[i + 2] == 0xA8)) {
+                cmpTok((unsigned char)s[i + 2] == 0xA7 ? 7 : 8);   // ∧ ∨
+                i += 3;
+                continue;
+            }
+            if ((unsigned char)c == 0xC2 && i + 1 < s.size()
+                && (unsigned char)s[i + 1] == 0xAC) {
+                cmpTok(9);   // ¬
+                i += 2;
+                continue;
+            }
+        }
         if (strchr("+-*/^(),!%", c) != nullptr) {
             Tok t;
             t.k = Tok::K::Op;
@@ -600,6 +694,19 @@ private:
         n->r = std::move(r);
         return n;
     }
+    // 比较/逻辑节点复用 Bin：op 映射 1..9 → < L > G = N & | ~（'~'=¬ 单目）
+    std::unique_ptr<Expr::Node> mkCmp(int c, std::unique_ptr<Expr::Node> l, std::unique_ptr<Expr::Node> r)
+    {
+        static const char kOps[] = { 0, '<', 'L', '>', 'G', '=', 'N', '&', '|', '~' };
+        return mkBin(kOps[c], std::move(l), std::move(r));
+    }
+    std::unique_ptr<Expr::Node> mkIf(std::vector<std::unique_ptr<Expr::Node>> args)
+    {
+        auto n = std::make_unique<Expr::Node>();
+        n->kind = Expr::Node::Kind::If;
+        n->args = std::move(args);
+        return n;
+    }
     std::unique_ptr<Expr::Node> mkCall(const std::string &name, std::vector<std::unique_ptr<Expr::Node>> args)
     {
         auto n = std::make_unique<Expr::Node>();
@@ -609,7 +716,38 @@ private:
         return n;
     }
 
-    std::unique_ptr<Expr::Node> parseExpr()   // + -
+    // 逻辑层（最低优先级）：a>1∧a<3 = (a>1)∧(a<3)——∧∨ 低于比较，
+    // 若并入比较链会左结合成 ((a>1)∧a)<3，语义错（1.0.6.4 测试轮修复）
+    std::unique_ptr<Expr::Node> parseExpr()
+    {
+        auto l = parseCmp();
+        if (!l) return nullptr;
+        while (peek().k == Tok::K::Cmp && (peek().cmp == 7 || peek().cmp == 8)) {
+            const int c = peek().cmp;
+            ++pos_;
+            auto r = parseCmp();
+            if (!r) return nullptr;
+            l = mkCmp(c, std::move(l), std::move(r));
+        }
+        return l;
+    }
+
+    // 比较层（1.0.6.4）：a<b、a==b 等链式左结合，两侧为算术子式
+    std::unique_ptr<Expr::Node> parseCmp()
+    {
+        auto l = parseArith();
+        if (!l) return nullptr;
+        while (peek().k == Tok::K::Cmp && peek().cmp <= 6) {   // 7=∧ 8=∨ 归逻辑层，9=¬ 是前缀
+            const int c = peek().cmp;
+            ++pos_;
+            auto r = parseArith();
+            if (!r) return nullptr;
+            l = mkCmp(c, std::move(l), std::move(r));
+        }
+        return l;
+    }
+
+    std::unique_ptr<Expr::Node> parseArith()   // + -
     {
         auto l = parseTerm();
         if (!l) return nullptr;
@@ -647,6 +785,13 @@ private:
 
     std::unique_ptr<Expr::Node> parseUnary()
     {
+        // ¬ 逻辑非前缀（1.0.6.4）
+        if (peek().k == Tok::K::Cmp && peek().cmp == 9) {
+            ++pos_;
+            auto r = parseUnary();
+            if (!r) return nullptr;
+            return mkCmp(9, std::move(r), nullptr);
+        }
         if (peek().k == Tok::K::Op && (peek().op == '-' || peek().op == '+')) {
             char op = peek().op;
             ++pos_;
@@ -702,6 +847,31 @@ private:
             ++pos_;
             if (peek().k == Tok::K::Op && peek().op == '(') {
                 ++pos_;
+                // If(条件, 则[, 否则])（1.0.6.4 条件层）：表达式级三元，置于
+                // 函数名判定之前——If 不是 CallFnN 函数，条件/分支可为任意
+                // 子式（含比较/引用/参数 x，f(x)=If(x>0,x,-x) 分段函数即此）
+                if (name.size() == 2 && tolower((unsigned char)name[0]) == 'i'
+                    && tolower((unsigned char)name[1]) == 'f') {
+                    std::vector<std::unique_ptr<Expr::Node>> iargs;
+                    auto cond = parseExpr();
+                    if (!cond) return nullptr;
+                    iargs.push_back(std::move(cond));
+                    while (peek().k == Tok::K::Op && peek().op == ',') {
+                        ++pos_;
+                        auto br = parseExpr();
+                        if (!br) return nullptr;
+                        iargs.push_back(std::move(br));
+                    }
+                    if (!eatOp(')')) {
+                        err = "If 缺少右括号";
+                        return nullptr;
+                    }
+                    if (iargs.size() < 2 || iargs.size() > 3) {
+                        err = "If 需要两或三个参数 If(条件, 则[, 否则])";
+                        return nullptr;
+                    }
+                    return mkIf(std::move(iargs));
+                }
                 // 实参表：逗号分隔（N6 多参函数；单参仍是常见形）
                 std::vector<std::unique_ptr<Expr::Node>> args;
                 auto first = parseExpr();
@@ -1071,6 +1241,18 @@ bool Expr::linearCoef(double &k, double &m) const
     k = 0.0;
     m = 0.0;
     return LinearCoefNode(root_.get(), k, m);
+}
+
+// 顶层比较/逻辑（< L > G = N & | ~）→ 布尔对象（1.0.6.4）
+bool Expr::isBoolLike() const
+{
+    if (!root_ || root_->kind != Node::Kind::Bin) return false;
+    switch (root_->op) {
+    case '<': case 'L': case '>': case 'G':
+    case '=': case 'N': case '&': case '|': case '~':
+        return true;
+    }
+    return false;
 }
 
 } // namespace dreamember

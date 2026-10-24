@@ -8,6 +8,7 @@
 #include <cstring>
 #include <functional>
 #include <algorithm>
+#include <array>
 #include <limits>
 
 namespace dreamember {
@@ -603,7 +604,8 @@ bool Kernel::inputImpl(const std::string &srcRaw)
     }
 
     // 拆 "name=..."（批次⑤：'=' 前是 < > ! = 的属于比较符，不参与赋值分割，
-    // 否则 "y<=2x" 会被拆成 lhs="y<" 的伪赋值）
+    // 否则 "y<=2x" 会被拆成 lhs="y<" 的伪赋值；1.0.6.4：'==' 的第一个等号
+    // 也不拆——否则 "x==3" 拆出 rhs="=3"）
     std::string name, rhs;
     size_t eq = std::string::npos;
     for (size_t i = 0; i < src.size(); ++i) {
@@ -612,6 +614,7 @@ bool Kernel::inputImpl(const std::string &srcRaw)
             const char p = src[i - 1];
             if (p == '<' || p == '>' || p == '!' || p == '=') continue;
         }
+        if (i + 1 < src.size() && src[i + 1] == '=') continue;   // "==" 首等号
         eq = i;
         break;
     }
@@ -742,6 +745,18 @@ bool Kernel::inputImpl(const std::string &srcRaw)
             opLen = cEq ? 2 : 1;
             ++i;
         }
+        }
+        // 1.0.6.4：不等式分支只接管「顶层就是比较且含 x/y」的区域式
+        //（y<x^2、x>3、x^2+y^2<9）。其余整体可解析的（布尔对象式
+        // b=(2>1)&&(3>2)、If(...) 分段函数、无 x/y 的 b=a>2）放行给后方
+        // 函数/数值路径——按首个比较符硬切会切碎 If 与复合布尔式
+        if (cpos != std::string::npos) {
+            Expr whole;
+            std::string werr;
+            if (whole.parse(rhs, werr, std::string(), true)
+                && (!whole.isBoolLike() || (!whole.containsX() && !whole.containsY()))) {
+                cpos = std::string::npos;
+            }
         }
         if (cpos != std::string::npos) {
             auto flip = [](int o) { return o == 1 ? 3 : o == 2 ? 4 : o == 3 ? 1 : 2; };
@@ -940,21 +955,24 @@ bool Kernel::inputImpl(const std::string &srcRaw)
         made = std::move(L);
     }
 
-    // 2) 点： "(u,v)" 或 "A=(u,v)"
+    // 2) 点： "(u,v)" 或 "A=(u,v)"。无逗号/解析不完整时放行后续分支——
+    // 1.0.6.4 布尔式可整体带括号（(2>1)&&(3>2)），不是点
     if (!made && !rhs.empty() && rhs.front() == '(' && rhs.back() == ')') {
         std::string inner = rhs.substr(1, rhs.size() - 2);
         size_t comma = inner.find(',');
-        if (comma == std::string::npos) { lastError = "点需要 (x, y) 形式"; return false; }
-        std::string sx = inner.substr(0, comma), sy = inner.substr(comma + 1);
-        std::string e1, e2;
-        Expr ex, ey;
-        if (!ex.parse(sx, e1) || !ey.parse(sy, e2)) { lastError = "坐标无法解析"; return false; }
-        if (ex.containsX() || ey.containsX()) { lastError = "点坐标不能含 x"; return false; }
-        auto p = std::make_unique<GeoPoint>();
-        p->x = ex.eval(0.0);
-        p->y = ey.eval(0.0);
-        if (!std::isfinite(p->x) || !std::isfinite(p->y)) { lastError = "坐标不是有限数"; return false; }
-        made = std::move(p);
+        if (comma != std::string::npos) {
+            std::string sx = inner.substr(0, comma), sy = inner.substr(comma + 1);
+            std::string e1, e2;
+            Expr ex, ey;
+            if (ex.parse(sx, e1) && ey.parse(sy, e2) && sy.find(',') == std::string::npos) {
+                if (ex.containsX() || ey.containsX()) { lastError = "点坐标不能含 x"; return false; }
+                auto p = std::make_unique<GeoPoint>();
+                p->x = ex.eval(0.0);
+                p->y = ey.eval(0.0);
+                if (!std::isfinite(p->x) || !std::isfinite(p->y)) { lastError = "坐标不是有限数"; return false; }
+                made = std::move(p);
+            }
+        }
     }
 
     // 3) 函数：y=expr / f(x)=expr / 纯表达式（按函数画）
@@ -1070,6 +1088,8 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                         made = std::move(out);
                     } else if (!unresolvable) {
                     auto n = std::make_unique<GeoNumeric>();
+                    // 1.0.6.4 布尔对象：定义式顶层为比较/逻辑 → 值列 true/false
+                    n->boolLike = t.isBoolLike();
                     if (deps.empty()) {
                         n->value = t.eval(0.0);
                     } else {
@@ -1162,6 +1182,129 @@ static double Simpson(const GeoFunction *f, double a, double b, int n)
         s += (i % 2 == 0 ? 2.0 : 4.0) * y;
     }
     return s * h / 3.0;
+}
+
+// ---------- 1.0.6.4 概率分布（GGB 5.4 语义） ----------
+// Normal(μ,σ,x)=P(X≤x)（4 参带 true/false 切 PDF）、InverseNormal=分位数；
+// BinomialDist/Poisson 带累积布尔；InverseBinomial/InversePoisson=最小 k。
+
+// 标准正态 CDF Φ(z) = ½·erfc(−z/√2)（erfc 为 C++11 <cmath> 标准函数）
+static double NormCdfStd(double z)
+{
+    return 0.5 * erfc(-z / 1.41421356237309504880);
+}
+
+static double NormPdf(double mu, double sd, double x)
+{
+    if (!(sd > 0)) return NAN;
+    const double z = (x - mu) / sd;
+    return exp(-0.5 * z * z) / (sd * 2.50662827463100050242);
+}
+
+static double NormCdf(double mu, double sd, double x)
+{
+    if (!(sd > 0)) return NAN;
+    return NormCdfStd((x - mu) / sd);
+}
+
+// 正态分位数（Acklam 逼近 + 一次 Halley 精化，全 double 精度）
+static double NormQuantileStd(double p)
+{
+    if (!(p > 0.0 && p < 1.0)) return NAN;
+    static const double a[] = { -3.969683028665376e+01, 2.209460984245205e+02,
+        -2.759285104469687e+02, 1.383577518672690e+02, -3.066479806614716e+01,
+        2.506628277459239e+00 };
+    static const double b[] = { -5.447609879822406e+01, 1.615858368580409e+02,
+        -1.556989798598866e+02, 6.680131188771972e+01, -1.328068155288572e+01 };
+    static const double c[] = { -7.784894002430293e-03, -3.223964580411365e-01,
+        -2.400758277161838e+00, -2.549732539343734e+00, 4.374664141464968e+00,
+        2.938163982698783e+00 };
+    static const double d[] = { 7.784695709041462e-03, 3.224671290700398e-01,
+        2.445134137142996e+00, 3.754408661907416e+00 };
+    const double pl = 0.02425;
+    double q, r;
+    if (p < pl) {
+        q = sqrt(-2.0 * log(p));
+        return (((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
+             / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0);
+    }
+    if (p > 1.0 - pl) {
+        q = sqrt(-2.0 * log(1.0 - p));
+        return -(((((c[0] * q + c[1]) * q + c[2]) * q + c[3]) * q + c[4]) * q + c[5])
+                / ((((d[0] * q + d[1]) * q + d[2]) * q + d[3]) * q + 1.0);
+    }
+    q = p - 0.5;
+    r = q * q;
+    return (((((a[0] * r + a[1]) * r + a[2]) * r + a[3]) * r + a[4]) * r + a[5]) * q
+         / (((((b[0] * r + b[1]) * r + b[2]) * r + b[3]) * r + b[4]) * r + 1.0);
+}
+
+static double NormQuantile(double mu, double sd, double p)
+{
+    if (!(sd > 0) || !(p >= 0.0 && p <= 1.0)) return NAN;
+    if (p == 0.0) return -HUGE_VAL;
+    if (p == 1.0) return HUGE_VAL;
+    double x = mu + sd * NormQuantileStd(p);
+    // Halley 精化两步（erfc 高精度）
+    for (int it = 0; it < 2; ++it) {
+        const double z = (x - mu) / sd;
+        const double e = NormCdfStd(z) - p;
+        const double u = e * 2.50662827463100050242 * exp(0.5 * z * z);
+        x -= sd * u / (1.0 + z * u / 2.0);
+    }
+    return x;
+}
+
+// ln C(n,k)（lgamma 路径，大 n 不溢出）
+static double LChoose(double n, double k)
+{
+    return lgamma(n + 1.0) - lgamma(k + 1.0) - lgamma(n - k + 1.0);
+}
+
+static double BinomPoint(double n, double p, double k)
+{
+    if (k < 0 || k > n) return 0.0;
+    if (p <= 0.0) return k == 0 ? 1.0 : 0.0;
+    if (p >= 1.0) return k == n ? 1.0 : 0.0;
+    return exp(LChoose(n, k) + k * log(p) + (n - k) * log1p(-p));
+}
+
+static double BinomCdf(double n, double p, double k)
+{
+    if (k < 0) return 0.0;
+    if (k >= n) return 1.0;
+    if (p <= 0.0) return 1.0;
+    if (p >= 1.0) return 0.0;
+    const long long kk = (long long)floor(k);
+    // 数值稳定：k < n/2 从 0 累加，否则从顶端累减
+    if (kk <= (long long)(n / 2)) {
+        double acc = 0.0;
+        for (long long i = 0; i <= kk; ++i) acc += BinomPoint(n, p, (double)i);
+        return std::min(1.0, acc);
+    }
+    double acc = 0.0;
+    for (long long i = kk + 1; i <= (long long)n; ++i) acc += BinomPoint(n, p, (double)i);
+    return std::max(0.0, 1.0 - acc);
+}
+
+static double PoisPoint(double lam, double k)
+{
+    if (k < 0 || lam < 0) return 0.0;
+    if (lam == 0.0) return k == 0 ? 1.0 : 0.0;
+    return exp(-lam + k * log(lam) - lgamma(k + 1.0));
+}
+
+static double PoisCdf(double lam, double k)
+{
+    if (k < 0) return 0.0;
+    if (lam == 0.0) return 1.0;
+    const long long kk = (long long)floor(k);
+    double acc = 0.0;
+    for (long long i = 0; i <= kk; ++i) {
+        acc += PoisPoint(lam, (double)i);
+        if (acc >= 1.0) return 1.0;   // 大 λ 截断
+    }
+    return std::min(1.0, acc);
 }
 
 // 列表统计（上游 语义）：mean / median / min / max / sum / product /
@@ -3923,6 +4066,291 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         return true;
     }
 
+    // FitGrowth(x 列表, y 列表) → a·b^x（对数线性：ln y = ln a + x·ln b，
+    // 需同号 y；拟合口径与 FitExp 同款，内容键去抖重解）
+    if (cmdLower == "fitgrowth" && a.size() == 2) {
+        GeoList *Lx = dynamic_cast<GeoList *>(lookup(a[0]));
+        GeoList *Ly = dynamic_cast<GeoList *>(lookup(a[1]));
+        if (!Lx || !Ly) { lastError = "FitGrowth 需要（x 列表, y 列表）"; made = nullptr; return true; }
+        if (Lx->isMatrix || Ly->isMatrix) { lastError = "FitGrowth 需要数值列表（矩阵不可）"; made = nullptr; return true; }
+        double A0 = 0, B0 = 0;
+        {
+            double s1 = 0, s2 = 0, s3 = 0, s4 = 0;
+            size_t n = 0;
+            const double sign = (!Ly->values.empty() && Ly->values[0] < 0) ? -1.0 : 1.0;
+            for (size_t i = 0; i < Lx->values.size() && i < Ly->values.size(); ++i) {
+                const double yv = Ly->values[i] * sign;
+                if (yv <= 0) break;
+                const double ly = log(yv);
+                s1 += Lx->values[i]; s2 += ly; s3 += Lx->values[i] * Lx->values[i];
+                s4 += Lx->values[i] * ly;
+                ++n;
+            }
+            if (n < 2 || n != std::min(Lx->values.size(), Ly->values.size())) {
+                lastError = "FitGrowth 需要至少 2 个 y>0（或同号）的数据点";
+                made = nullptr;
+                return true;
+            }
+            const double den = n * s3 - s1 * s1;
+            if (fabs(den) < 1e-12) { lastError = "FitGrowth 求解失败（x 全同）"; made = nullptr; return true; }
+            B0 = (n * s4 - s1 * s2) / den;
+            A0 = exp((s2 - B0 * s1) / n) * sign;
+        }
+        auto d = std::make_unique<GeoFunction>();
+        d->color = {0x8B, 0x45, 0x13};
+        GeoList *sx = Lx, *sy = Ly;
+        auto ab = std::make_shared<std::pair<double, double>>(A0, B0);
+        auto key = std::make_shared<std::vector<double>>();
+        GeoFunction *self = d.get();
+        d->alt = [sx, sy, ab, key, self](double x) -> double {
+            std::vector<double> nk;
+            nk.reserve(sx->values.size() + sy->values.size());
+            nk.insert(nk.end(), sx->values.begin(), sx->values.end());
+            nk.insert(nk.end(), sy->values.begin(), sy->values.end());
+            if (*key != nk) {
+                size_t n = 0;
+                double s1 = 0, s2 = 0, s3 = 0, s4 = 0;
+                const double sign = (!sy->values.empty() && sy->values[0] < 0) ? -1.0 : 1.0;
+                for (size_t i = 0; i < sx->values.size() && i < sy->values.size(); ++i) {
+                    const double yv = sy->values[i] * sign;
+                    if (yv <= 0) return NAN;
+                    const double ly = log(yv);
+                    s1 += sx->values[i]; s2 += ly; s3 += sx->values[i] * sx->values[i];
+                    s4 += sx->values[i] * ly;
+                    ++n;
+                }
+                if (n >= 2) {
+                    const double den = n * s3 - s1 * s1;
+                    if (fabs(den) >= 1e-12) {
+                        ab->second = (n * s4 - s1 * s2) / den;
+                        ab->first = exp((s2 - ab->second * s1) / n) * sign;
+                        self->src = PolyCoeffSrc({ab->first}) + "*"
+                                  + PolyCoeffSrc({exp(ab->second)}) + "^x";
+                    }
+                }
+                *key = std::move(nk);
+            }
+            return ab->first * exp(ab->second * x);
+        };
+        d->src = PolyCoeffSrc({A0}) + "*" + PolyCoeffSrc({exp(B0)}) + "^x";
+        d->cmdName = "FitGrowth";
+        d->cmdArgs = { a[0], a[1] };
+        d->inputs = { Lx, Ly };
+        d->update();
+        made = std::move(d);
+        return true;
+    }
+
+    // FitSin(x 列表, y 列表) → a + b·sin(c·x + d)（均采样假设下 DFT 主频定 c，
+    // 固定 c 线性最小二乘解 [a, b·cos d, b·sin d]；内容键去抖重解）
+    if (cmdLower == "fitsin" && a.size() == 2) {
+        GeoList *Lx = dynamic_cast<GeoList *>(lookup(a[0]));
+        GeoList *Ly = dynamic_cast<GeoList *>(lookup(a[1]));
+        if (!Lx || !Ly) { lastError = "FitSin 需要（x 列表, y 列表）"; made = nullptr; return true; }
+        if (Lx->isMatrix || Ly->isMatrix) { lastError = "FitSin 需要数值列表（矩阵不可）"; made = nullptr; return true; }
+        if (std::min(Lx->values.size(), Ly->values.size()) < 4) {
+            lastError = "FitSin 需要至少 4 个数据点";
+            made = nullptr;
+            return true;
+        }
+        auto fit = [](GeoList *sx, GeoList *sy, double &A, double &B,
+                      double &C, double &D) -> bool {
+            const size_t n = std::min(sx->values.size(), sy->values.size());
+            if (n < 4 || n > 8192) return false;
+            double x0 = sx->values[0], x1 = sx->values[0];
+            for (size_t i = 0; i < n; ++i) {
+                x0 = std::min(x0, sx->values[i]);
+                x1 = std::max(x1, sx->values[i]);
+            }
+            const double dx = (x1 - x0) / (double)(n - 1);
+            if (!(dx > 1e-12)) return false;   // x 全同/乱序采样
+            double my = 0;
+            for (size_t i = 0; i < n; ++i) my += sy->values[i];
+            my /= (double)n;
+            // DFT 主频（k=1..n/2）：幅值最大者 → c = 2πk/(n·Δx)
+            const double kPi2 = 6.28318530717958647692;
+            double bestAmp = -1.0;
+            long long bestK = 1;
+            for (long long k = 1; k <= (long long)(n / 2); ++k) {
+                double re = 0, im = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    const double ph = -kPi2 * (double)k * (double)i / (double)n;
+                    const double v = sy->values[i] - my;
+                    re += v * cos(ph);
+                    im += v * sin(ph);
+                }
+                const double amp = re * re + im * im;
+                if (amp > bestAmp) { bestAmp = amp; bestK = k; }
+            }
+            const double c = kPi2 * (double)bestK / ((double)n * dx);
+            // 固定 c：y = a + B1·sin(cx) + B2·cos(cx) 线性最小二乘
+            std::vector<std::vector<double>> M(n, std::vector<double>(3));
+            std::vector<double> y(n);
+            for (size_t i = 0; i < n; ++i) {
+                M[i][0] = 1.0;
+                M[i][1] = sin(c * sx->values[i]);
+                M[i][2] = cos(c * sx->values[i]);
+                y[i] = sy->values[i];
+            }
+            std::vector<double> p;
+            if (!SolveNormalEquations(M, y, p)) return false;
+            A = p[0];
+            B = hypot(p[1], p[2]);
+            D = atan2(p[2], p[1]);
+            C = c;
+            return true;
+        };
+        double A0 = 0, B0 = 0, C0 = 0, D0 = 0;
+        if (!fit(Lx, Ly, A0, B0, C0, D0)) {
+            lastError = "FitSin 求解失败（点数不足 / x 全同 / 点数超上限）";
+            made = nullptr;
+            return true;
+        }
+        auto d = std::make_unique<GeoFunction>();
+        d->color = {0x8B, 0x45, 0x13};
+        GeoList *sx = Lx, *sy = Ly;
+        auto abcd = std::make_shared<std::array<double, 4>>(std::array<double, 4>{A0, B0, C0, D0});
+        auto key = std::make_shared<std::vector<double>>();
+        GeoFunction *self = d.get();
+        d->alt = [sx, sy, abcd, key, self, fit](double x) -> double {
+            std::vector<double> nk;
+            nk.reserve(sx->values.size() + sy->values.size());
+            nk.insert(nk.end(), sx->values.begin(), sx->values.end());
+            nk.insert(nk.end(), sy->values.begin(), sy->values.end());
+            if (*key != nk) {
+                double A, B, C, D;
+                if (fit(sx, sy, A, B, C, D)) {
+                    (*abcd)[0] = A; (*abcd)[1] = B; (*abcd)[2] = C; (*abcd)[3] = D;
+                    self->src = PolyCoeffSrc({A}) + "+" + PolyCoeffSrc({B}) + "*sin("
+                              + PolyCoeffSrc({C}) + "*x+" + PolyCoeffSrc({D}) + ")";
+                }
+                *key = std::move(nk);
+            }
+            const auto &v = *abcd;
+            return v[0] + v[1] * sin(v[2] * x + v[3]);
+        };
+        d->src = PolyCoeffSrc({A0}) + "+" + PolyCoeffSrc({B0}) + "*sin("
+               + PolyCoeffSrc({C0}) + "*x+" + PolyCoeffSrc({D0}) + ")";
+        d->cmdName = "FitSin";
+        d->cmdArgs = { a[0], a[1] };
+        d->inputs = { Lx, Ly };
+        d->update();
+        made = std::move(d);
+        return true;
+    }
+
+    // FitLogistic(x 列表, y 列表) → a/(1 + b·e^(−k·x))（GGB 同形；y>0。
+    // 固定 k 时 z=1/y 对 [1, e^(−kx)] 线性回归，k 在对数域黄金分割，
+    // 以 y 空间 SSE 排序；内容键去抖重解）
+    if (cmdLower == "fitlogistic" && a.size() == 2) {
+        GeoList *Lx = dynamic_cast<GeoList *>(lookup(a[0]));
+        GeoList *Ly = dynamic_cast<GeoList *>(lookup(a[1]));
+        if (!Lx || !Ly) { lastError = "FitLogistic 需要（x 列表, y 列表）"; made = nullptr; return true; }
+        if (Lx->isMatrix || Ly->isMatrix) { lastError = "FitLogistic 需要数值列表（矩阵不可）"; made = nullptr; return true; }
+        if (std::min(Lx->values.size(), Ly->values.size()) < 3) {
+            lastError = "FitLogistic 需要至少 3 个 y>0 的数据点";
+            made = nullptr;
+            return true;
+        }
+        for (size_t i = 0; i < Ly->values.size(); ++i) {
+            if (Ly->values[i] <= 0) {
+                lastError = "FitLogistic 需要 y>0 的数据点";
+                made = nullptr;
+                return true;
+            }
+        }
+        auto fit = [](GeoList *sx, GeoList *sy, double &A, double &B,
+                      double &K) -> bool {
+            const size_t n = std::min(sx->values.size(), sy->values.size());
+            if (n < 3) return false;
+            // SSE(k)：z=1/y 线性回归（α=1/a、β=b/a）后回 y 空间算残差
+            auto sseAt = [&](double k, double &aOut, double &bOut) -> double {
+                std::vector<std::vector<double>> M(n, std::vector<double>(2));
+                std::vector<double> z(n);
+                for (size_t i = 0; i < n; ++i) {
+                    M[i][0] = 1.0;
+                    M[i][1] = exp(-k * sx->values[i]);
+                    z[i] = 1.0 / sy->values[i];
+                }
+                std::vector<double> p;
+                if (!SolveNormalEquations(M, z, p)) return HUGE_VAL;
+                const double a = 1.0 / p[0];
+                const double b = p[1] / p[0];
+                if (!std::isfinite(a) || !std::isfinite(b) || a == 0.0) return HUGE_VAL;
+                double sse = 0;
+                for (size_t i = 0; i < n; ++i) {
+                    const double f = a / (1.0 + b * exp(-k * sx->values[i]));
+                    const double dv = f - sy->values[i];
+                    sse += dv * dv;
+                }
+                aOut = a;
+                bOut = b;
+                return sse;
+            };
+            // 黄金分割极小化 ln k ∈ [ln 1e-6, ln 1e4]
+            double lo = log(1e-6), hi = log(1e4);
+            const double gr = 0.6180339887498949;
+            double c2 = hi - gr * (hi - lo), d2 = lo + gr * (hi - lo);
+            double a1 = 0, b1 = 0, a2 = 0, b2 = 0;
+            double fc = sseAt(exp(c2), a1, b1), fd = sseAt(exp(d2), a2, b2);
+            for (int it = 0; it < 80 && hi - lo > 1e-9; ++it) {
+                if (fc < fd) {
+                    hi = d2; d2 = c2; fd = fc;
+                    c2 = hi - gr * (hi - lo);
+                    fc = sseAt(exp(c2), a1, b1);
+                } else {
+                    lo = c2; c2 = d2; fc = fd;
+                    d2 = lo + gr * (hi - lo);
+                    fd = sseAt(exp(d2), a2, b2);
+                }
+            }
+            const double k = exp(0.5 * (lo + hi));
+            double aOut, bOut;
+            if (sseAt(k, aOut, bOut) >= HUGE_VAL) return false;
+            A = aOut;
+            B = bOut;
+            K = k;
+            return std::isfinite(A) && std::isfinite(B) && std::isfinite(K);
+        };
+        double A0 = 0, B0 = 0, K0 = 0;
+        if (!fit(Lx, Ly, A0, B0, K0)) {
+            lastError = "FitLogistic 求解失败（数据不适合 Logistic 形）";
+            made = nullptr;
+            return true;
+        }
+        auto d = std::make_unique<GeoFunction>();
+        d->color = {0x8B, 0x45, 0x13};
+        GeoList *sx = Lx, *sy = Ly;
+        auto abk = std::make_shared<std::array<double, 3>>(std::array<double, 3>{A0, B0, K0});
+        auto key = std::make_shared<std::vector<double>>();
+        GeoFunction *self = d.get();
+        d->alt = [sx, sy, abk, key, self, fit](double x) -> double {
+            std::vector<double> nk;
+            nk.reserve(sx->values.size() + sy->values.size());
+            nk.insert(nk.end(), sx->values.begin(), sx->values.end());
+            nk.insert(nk.end(), sy->values.begin(), sy->values.end());
+            if (*key != nk) {
+                double A, B, K;
+                if (fit(sx, sy, A, B, K)) {
+                    (*abk)[0] = A; (*abk)[1] = B; (*abk)[2] = K;
+                    self->src = PolyCoeffSrc({A}) + "/(1+" + PolyCoeffSrc({B})
+                              + "*e^(-" + PolyCoeffSrc({K}) + "*x))";
+                }
+                *key = std::move(nk);
+            }
+            const auto &v = *abk;
+            return v[0] / (1.0 + v[1] * exp(-v[2] * x));
+        };
+        d->src = PolyCoeffSrc({A0}) + "/(1+" + PolyCoeffSrc({B0})
+               + "*e^(-" + PolyCoeffSrc({K0}) + "*x))";
+        d->cmdName = "FitLogistic";
+        d->cmdArgs = { a[0], a[1] };
+        d->inputs = { Lx, Ly };
+        d->update();
+        made = std::move(d);
+        return true;
+    }
+
     // CorrelationCoefficient(x 列表, y 列表) → Pearson 积差相关系数 r
     if (cmdLower == "correlationcoefficient" && a.size() == 2) {
         GeoList *Lx = dynamic_cast<GeoList *>(lookup(a[0]));
@@ -3949,6 +4377,298 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         n->cmdArgs = { a[0], a[1] };
         n->cmd = "CorrelationCoefficient(" + a[0] + ", " + a[1] + ")";
         n->inputs = { Lx, Ly };
+        n->update();
+        made = std::move(n);
+        return true;
+    }
+
+    // ---------- 1.0.6.4 概率分布（GGB 5.4 语义；参数可依随数值对象） ----------
+    // 布尔实参：字面 true/false（GGB 同款，大小写不敏感）或数值对象（≠0=真）
+
+    // Normal(μ, σ, x) → P(X≤x)；Normal(μ, σ, x, true|false) → CDF/PDF；
+    // Normal(μ, σ, u, v) → P(u≤X≤v)
+    if (cmdLower == "normal" && (a.size() == 3 || a.size() == 4)) {
+        NumRefExpr bm, bs, bx, bv;
+        std::vector<GeoNumeric *> ndeps;
+        auto badArg = [&]() {
+            lastError = "Normal 参数须为数或数值对象";
+            made = nullptr;
+        };
+        if (!numRefArg(a[0], bm, ndeps) || !numRefArg(a[1], bs, ndeps)) { badArg(); return true; }
+        bool cum = true, interval = false;
+        if (a.size() == 4) {
+            std::string low;
+            for (char ch : a[3]) low += (char)tolower((unsigned char)ch);
+            if (low == "true" || low == "false") {
+                cum = low == "true";
+                if (!numRefArg(a[2], bx, ndeps)) { badArg(); return true; }
+            } else {
+                interval = true;
+                if (!numRefArg(a[2], bx, ndeps) || !numRefArg(a[3], bv, ndeps)) { badArg(); return true; }
+            }
+        } else {
+            if (!numRefArg(a[2], bx, ndeps)) { badArg(); return true; }
+        }
+        if (bs.refs.empty() && !(bs.evalNow() > 0)) {
+            lastError = "Normal 标准差须为正数";
+            made = nullptr;
+            return true;
+        }
+        auto n = std::make_unique<GeoNumeric>();
+        n->isFree = false;
+        n->cmdName = "Normal";
+        n->cmdArgs = a;
+        n->calc = [bm, bs, bx, bv, cum, interval]() -> double {
+            const double mu = bm.evalNow(), sd = bs.evalNow();
+            if (!std::isfinite(mu) || !(sd > 0)) return NAN;
+            const double x = bx.evalNow();
+            if (!std::isfinite(x)) return NAN;
+            if (interval) {
+                const double v = bv.evalNow();
+                if (!std::isfinite(v)) return NAN;
+                return NormCdf(mu, sd, std::max(x, v)) - NormCdf(mu, sd, std::min(x, v));
+            }
+            return cum ? NormCdf(mu, sd, x) : NormPdf(mu, sd, x);
+        };
+        for (GeoNumeric *d : ndeps) n->inputs.push_back(d);
+        n->update();
+        made = std::move(n);
+        return true;
+    }
+
+    // InverseNormal(μ, σ, p) → 分位数 x：P(X≤x)=p
+    if (cmdLower == "inversenormal" && a.size() == 3) {
+        NumRefExpr bm, bs, bp;
+        std::vector<GeoNumeric *> ndeps;
+        if (!numRefArg(a[0], bm, ndeps) || !numRefArg(a[1], bs, ndeps)
+            || !numRefArg(a[2], bp, ndeps)) {
+            lastError = "InverseNormal 参数须为数或数值对象";
+            made = nullptr;
+            return true;
+        }
+        if (bs.refs.empty() && !(bs.evalNow() > 0)) {
+            lastError = "InverseNormal 标准差须为正数";
+            made = nullptr;
+            return true;
+        }
+        if (bp.refs.empty() && !(bp.evalNow() >= 0.0 && bp.evalNow() <= 1.0)) {
+            lastError = "InverseNormal 概率须在 0..1";
+            made = nullptr;
+            return true;
+        }
+        auto n = std::make_unique<GeoNumeric>();
+        n->isFree = false;
+        n->cmdName = "InverseNormal";
+        n->cmdArgs = a;
+        n->calc = [bm, bs, bp]() -> double {
+            const double mu = bm.evalNow(), sd = bs.evalNow(), p = bp.evalNow();
+            if (!std::isfinite(mu) || !(sd > 0) || !(p >= 0.0 && p <= 1.0)) return NAN;
+            return NormQuantile(mu, sd, p);
+        };
+        for (GeoNumeric *d : ndeps) n->inputs.push_back(d);
+        n->update();
+        made = std::move(n);
+        return true;
+    }
+
+    // BinomialDist(n, p, k[, 累积 true|false]) → P(X=k) / P(X≤k)
+    if (cmdLower == "binomialdist" && (a.size() == 3 || a.size() == 4)) {
+        NumRefExpr bn, bp, bk;
+        std::vector<GeoNumeric *> ndeps;
+        if (!numRefArg(a[0], bn, ndeps) || !numRefArg(a[1], bp, ndeps)
+            || !numRefArg(a[2], bk, ndeps)) {
+            lastError = "BinomialDist 参数须为数或数值对象";
+            made = nullptr;
+            return true;
+        }
+        bool cum = false;
+        GeoNumeric *cumObj = nullptr;
+        if (a.size() == 4) {
+            std::string low;
+            for (char ch : a[3]) low += (char)tolower((unsigned char)ch);
+            if (low == "true" || low == "false") {
+                cum = low == "true";
+            } else {
+                cumObj = dynamic_cast<GeoNumeric *>(lookup(a[3]));
+                if (!cumObj) {
+                    lastError = "BinomialDist 第四参数须为 true/false 或布尔对象";
+                    made = nullptr;
+                    return true;
+                }
+                ndeps.push_back(cumObj);
+            }
+        }
+        const double n0 = bn.evalNow(), p0 = bp.evalNow(), k0 = bk.evalNow();
+        if (bn.refs.empty() && !(n0 >= 0 && n0 == floor(n0) && n0 <= 100000)) {
+            lastError = "BinomialDist 试验次数须为 0..100000 的整数";
+            made = nullptr;
+            return true;
+        }
+        if (bp.refs.empty() && !(p0 >= 0.0 && p0 <= 1.0)) {
+            lastError = "BinomialDist 成功概率须在 0..1";
+            made = nullptr;
+            return true;
+        }
+        if (bk.refs.empty() && !(k0 >= 0 && k0 == floor(k0))) {
+            lastError = "BinomialDist 取值须为非负整数";
+            made = nullptr;
+            return true;
+        }
+        auto n = std::make_unique<GeoNumeric>();
+        n->isFree = false;
+        n->cmdName = "BinomialDist";
+        n->cmdArgs = a;
+        n->calc = [bn, bp, bk, cum, cumObj]() -> double {
+            const double nn = bn.evalNow(), pp = bp.evalNow(), kk = bk.evalNow();
+            if (!(nn >= 0 && nn == floor(nn) && nn <= 100000)) return NAN;
+            if (!(pp >= 0.0 && pp <= 1.0)) return NAN;
+            if (!(kk >= 0 && kk == floor(kk))) return NAN;
+            const bool cu = cumObj ? cumObj->value != 0.0 : cum;
+            return cu ? BinomCdf(nn, pp, kk) : BinomPoint(nn, pp, kk);
+        };
+        for (GeoNumeric *d : ndeps) n->inputs.push_back(d);
+        n->update();
+        made = std::move(n);
+        return true;
+    }
+
+    // InverseBinomial(n, p, P) → 最小 k 使 P(X≤k) ≥ P
+    if (cmdLower == "inversebinomial" && a.size() == 3) {
+        NumRefExpr bn, bp, bpp;
+        std::vector<GeoNumeric *> ndeps;
+        if (!numRefArg(a[0], bn, ndeps) || !numRefArg(a[1], bp, ndeps)
+            || !numRefArg(a[2], bpp, ndeps)) {
+            lastError = "InverseBinomial 参数须为数或数值对象";
+            made = nullptr;
+            return true;
+        }
+        const double n0 = bn.evalNow(), p0 = bp.evalNow(), q0 = bpp.evalNow();
+        if (bn.refs.empty() && !(n0 >= 0 && n0 == floor(n0) && n0 <= 100000)) {
+            lastError = "InverseBinomial 试验次数须为 0..100000 的整数";
+            made = nullptr;
+            return true;
+        }
+        if (bp.refs.empty() && !(p0 >= 0.0 && p0 <= 1.0)) {
+            lastError = "InverseBinomial 成功概率须在 0..1";
+            made = nullptr;
+            return true;
+        }
+        if (bpp.refs.empty() && !(q0 >= 0.0 && q0 <= 1.0)) {
+            lastError = "InverseBinomial 概率须在 0..1";
+            made = nullptr;
+            return true;
+        }
+        auto n = std::make_unique<GeoNumeric>();
+        n->isFree = false;
+        n->cmdName = "InverseBinomial";
+        n->cmdArgs = a;
+        n->calc = [bn, bp, bpp]() -> double {
+            const double nn = bn.evalNow(), pp = bp.evalNow(), q = bpp.evalNow();
+            if (!(nn >= 0 && nn == floor(nn) && nn <= 100000)) return NAN;
+            if (!(pp >= 0.0 && pp <= 1.0) || !(q >= 0.0 && q <= 1.0)) return NAN;
+            if (q <= 0.0) return 0.0;
+            double acc = 0.0;
+            for (long long k = 0; k <= (long long)nn; ++k) {
+                acc += BinomPoint(nn, pp, (double)k);
+                if (acc >= q) return (double)k;
+            }
+            return NAN;   // P=1 且累积和因舍入未达：视为无解
+        };
+        for (GeoNumeric *d : ndeps) n->inputs.push_back(d);
+        n->update();
+        made = std::move(n);
+        return true;
+    }
+
+    // Poisson(λ, k[, 累积 true|false]) → P(X=k) / P(X≤k)
+    if (cmdLower == "poisson" && (a.size() == 2 || a.size() == 3)) {
+        NumRefExpr bl, bk;
+        std::vector<GeoNumeric *> ndeps;
+        if (!numRefArg(a[0], bl, ndeps) || !numRefArg(a[1], bk, ndeps)) {
+            lastError = "Poisson 参数须为数或数值对象";
+            made = nullptr;
+            return true;
+        }
+        bool cum = false;
+        GeoNumeric *cumObj = nullptr;
+        if (a.size() == 3) {
+            std::string low;
+            for (char ch : a[2]) low += (char)tolower((unsigned char)ch);
+            if (low == "true" || low == "false") {
+                cum = low == "true";
+            } else {
+                cumObj = dynamic_cast<GeoNumeric *>(lookup(a[2]));
+                if (!cumObj) {
+                    lastError = "Poisson 第三参数须为 true/false 或布尔对象";
+                    made = nullptr;
+                    return true;
+                }
+                ndeps.push_back(cumObj);
+            }
+        }
+        const double l0 = bl.evalNow(), k0 = bk.evalNow();
+        if (bl.refs.empty() && !(l0 >= 0 && l0 <= 1e8)) {
+            lastError = "Poisson λ 须为 0..1e8 的非负数";
+            made = nullptr;
+            return true;
+        }
+        if (bk.refs.empty() && !(k0 >= 0 && k0 == floor(k0) && k0 <= 1e8)) {
+            lastError = "Poisson 取值须为非负整数";
+            made = nullptr;
+            return true;
+        }
+        auto n = std::make_unique<GeoNumeric>();
+        n->isFree = false;
+        n->cmdName = "Poisson";
+        n->cmdArgs = a;
+        n->calc = [bl, bk, cum, cumObj]() -> double {
+            const double lam = bl.evalNow(), kk = bk.evalNow();
+            if (!(lam >= 0 && lam <= 1e8)) return NAN;
+            if (!(kk >= 0 && kk == floor(kk))) return NAN;
+            const bool cu = cumObj ? cumObj->value != 0.0 : cum;
+            return cu ? PoisCdf(lam, kk) : PoisPoint(lam, kk);
+        };
+        for (GeoNumeric *d : ndeps) n->inputs.push_back(d);
+        n->update();
+        made = std::move(n);
+        return true;
+    }
+
+    // InversePoisson(λ, P) → 最小 k 使 P(X≤k) ≥ P
+    if (cmdLower == "inversepoisson" && a.size() == 2) {
+        NumRefExpr bl, bpp;
+        std::vector<GeoNumeric *> ndeps;
+        if (!numRefArg(a[0], bl, ndeps) || !numRefArg(a[1], bpp, ndeps)) {
+            lastError = "InversePoisson 参数须为数或数值对象";
+            made = nullptr;
+            return true;
+        }
+        if (bl.refs.empty() && !(bl.evalNow() >= 0 && bl.evalNow() <= 1e8)) {
+            lastError = "InversePoisson λ 须为 0..1e8 的非负数";
+            made = nullptr;
+            return true;
+        }
+        if (bpp.refs.empty() && !(bpp.evalNow() >= 0.0 && bpp.evalNow() <= 1.0)) {
+            lastError = "InversePoisson 概率须在 0..1";
+            made = nullptr;
+            return true;
+        }
+        auto n = std::make_unique<GeoNumeric>();
+        n->isFree = false;
+        n->cmdName = "InversePoisson";
+        n->cmdArgs = a;
+        n->calc = [bl, bpp]() -> double {
+            const double lam = bl.evalNow(), q = bpp.evalNow();
+            if (!(lam >= 0 && lam <= 1e8) || !(q >= 0.0 && q <= 1.0)) return NAN;
+            if (q <= 0.0) return 0.0;
+            double acc = 0.0;
+            for (long long k = 0; k <= 10000000; ++k) {
+                acc += PoisPoint(lam, (double)k);
+                if (acc >= q) return (double)k;
+            }
+            return NAN;
+        };
+        for (GeoNumeric *d : ndeps) n->inputs.push_back(d);
         n->update();
         made = std::move(n);
         return true;
@@ -7950,9 +8670,9 @@ std::string Kernel::getXml() const
                             + ", " + NumA(n->sstep) + ")") + "\"/>\n";
             } else if (!n->cmdName.empty()) {
                 AppendCommandXml(o, *n);   // Distance 等
-            } else if (n->calc && !n->cmd.empty()) {
-                // 轮 D：依随表达式数值（B1=A1+1）按表达式重放，refs 模式重建
-                // 依赖（必须先于下方 Distance 兜底，防双依赖时被误判）
+            } else if (n->cmdName.empty() && !n->cmd.empty()) {
+                // 依随表达式数值（B1=A1+1）/常量式/布尔对象（1.0.6.4）按
+                // 原表达式重放——布尔值列是 true/false 文本，按值重放不可解析
                 o += "<expression label=\"" + XmlEsc(n->label) + "\" exp=\""
                    + XmlEsc(n->label + "=" + n->cmd) + "\"/>\n";
             } else if (n->calc && n->inputs.size() == 2) {

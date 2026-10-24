@@ -58,6 +58,8 @@ public:
     const std::vector<std::string> &refs() const { return refs_; }
     // 表达式是否为一次式 k*x+m（常数式 k=0 也算）；成功填 k/m
     bool linearCoef(double &k, double &m) const;
+    // 顶层是否为比较/逻辑节点（1.0.6.4 布尔对象标记：代数区显示 true/false）
+    bool isBoolLike() const;
     // 同上，仅判定（不含常数式的歧义时也返回 true，k=0 表示水平线）
     bool linearCoef() const
     {

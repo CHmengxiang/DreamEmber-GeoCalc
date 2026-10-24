@@ -3341,14 +3341,42 @@ export struct CanvasView {
 
   // 行内滑动条拖动：内核吸附/钳位 + 级联重算，画布刷新，行值节流同步。
   // 撤销打点：mode 0=拖动开始 3=点按滑轨（值未写入内核），整段拖动一步
+  // 七十五包测试轮：拖动中（mode 1）合并到 ~16ms 一次——慢机（模拟器 GC
+  // 停顿可达秒级）上指针事件洪峰逐事件做内核+画布重算会积压主线程触发
+  // ANR；只保留最新值，拖动结束（mode 2）立即落值同步
+  private pendingSlider: string | null = null;   // "label|v"
+  private sliderFlushQueued: boolean = false;
+
   private onSliderChange(label: string, v: number, mode: number): void {
     if (mode === 0 || mode === 3) {
       dreamemberKernel.kernelPushUndo();
     }
+    if (mode === 1) {
+      this.pendingSlider = label + '|' + v.toString();
+      if (!this.sliderFlushQueued) {
+        this.sliderFlushQueued = true;
+        setTimeout(() => this.flushSliderDrag(), 16);
+      }
+      return;
+    }
     dreamemberKernel.kernelSetSlider(label, v);
     this.refresh();
+    this.lastAlgebraMs = Date.now();
+    this.syncAlgebra(dreamemberKernel.kernelAlgebra());
+  }
+
+  private flushSliderDrag(): void {
+    this.sliderFlushQueued = false;
+    const p = this.pendingSlider;
+    if (p === null) {
+      return;
+    }
+    this.pendingSlider = null;
+    const bar = p.indexOf('|');
+    dreamemberKernel.kernelSetSlider(p.slice(0, bar), Number(p.slice(bar + 1)));
+    this.refresh();
     const now = Date.now();
-    if (mode === 2 || mode === 3 || now - this.lastAlgebraMs > 80) {
+    if (now - this.lastAlgebraMs > 80) {
       this.lastAlgebraMs = now;
       this.syncAlgebra(dreamemberKernel.kernelAlgebra());
     }
