@@ -289,7 +289,7 @@ bool IsCommandCallName(const std::string &n)
         "sequence", "element", "first", "last", "sort", "unique", "reverse",
         "mean", "median", "sum", "product", "sd", "variance",
         "fitline", "fitpoly", "fitexp", "correlationcoefficient",
-        "transpose", "determinant", "invert", "identity", "row", "column",
+        "transpose", "determinant", "det", "invert", "identity", "row", "column",
         "simplify", "expand", "factor"
     };
     std::string low;
@@ -842,6 +842,181 @@ double Expr::evalResolved(double x,
     // param 复用 x 槽位：refs 模式表达式不含 Var 节点（调用侧 containsX/Y 把关），
     // param 命名节点直接取 x 求值
     return EvalNode(root_.get(), x, 0.0, x, &resolve);
+}
+
+// ---------- 矩阵算术求值（1.0.6.2） ----------
+
+bool MatSameDims(const ExprVal &a, const ExprVal &b)
+{
+    return a.rows == b.rows && a.cols == b.cols;
+}
+
+// (r×k)·(k×c) 行主序矩阵乘
+bool MatMulVal(const ExprVal &a, const ExprVal &b, ExprVal &o)
+{
+    if (a.cols != b.rows) return false;
+    o.isMat = true;
+    o.rows = a.rows;
+    o.cols = b.cols;
+    o.vals.assign((size_t)a.rows * b.cols, 0.0);
+    for (int i = 0; i < a.rows; ++i) {
+        for (int k = 0; k < a.cols; ++k) {
+            const double piv = a.vals[(size_t)i * a.cols + k];
+            if (piv == 0.0) continue;
+            for (int j = 0; j < b.cols; ++j)
+                o.vals[(size_t)i * b.cols + j] += piv * b.vals[(size_t)k * b.cols + j];
+        }
+    }
+    return true;
+}
+
+// 标量 × 矩阵（数乘，两侧同形）
+void MatScaleVal(const ExprVal &m, double s, ExprVal &o)
+{
+    o.isMat = true;
+    o.rows = m.rows;
+    o.cols = m.cols;
+    o.vals.resize(m.vals.size());
+    for (size_t i = 0; i < m.vals.size(); ++i) o.vals[i] = m.vals[i] * s;
+}
+
+// 依 ValResolve 的树求值。矩阵组合之外的算符/函数返回 false（报错文案
+// 由调用方统一给）；一元负沿用解析器的 0-X 树形判定。
+bool EvalNodeVal(const Expr::Node *n, const ValResolve *resolve, ExprVal &out)
+{
+    switch (n->kind) {
+    case Expr::Node::Kind::Num:
+        out.isMat = false;
+        out.num = n->num;
+        return true;
+    case Expr::Node::Kind::Var:
+    case Expr::Node::Kind::YVar:
+    case Expr::Node::Kind::Param:
+        // 矩阵算术只用于不含 x/y 的赋值式（调用侧 containsX/Y 把关）；防御 NaN
+        out.isMat = false;
+        out.num = NAN;
+        return true;
+    case Expr::Node::Kind::Ref:
+        return resolve != nullptr && (*resolve)(n->name, out);
+    case Expr::Node::Kind::Call: {
+        ExprVal a[2];
+        int argc = 0;
+        for (auto &arg : n->args) {
+            if (argc < 2 && !EvalNodeVal(arg.get(), resolve, a[argc])) return false;
+            ++argc;
+        }
+        double v[2] = { 0, 0 };
+        for (int i = 0; i < argc && i < 2; ++i) {
+            if (a[i].isMat) return false;   // 函数不接受矩阵实参
+            v[i] = a[i].num;
+        }
+        out.isMat = false;
+        out.num = CallFnN(n->name, v, argc);
+        return true;
+    }
+    case Expr::Node::Kind::Bin: {
+        ExprVal a;
+        if (!EvalNodeVal(n->l.get(), resolve, a)) return false;
+        // 后缀一元（! % °）：r 为空，矩阵一律不支持
+        if (n->op == '!' || n->op == '%' || n->op == (char)0xB0) {
+            if (a.isMat) return false;
+            out.isMat = false;
+            if (n->op == '!') {
+                const long long v = llround(a.num);
+                if (std::fabs(a.num - (double)v) > 1e-9 || v < 0 || v > 170) {
+                    out.num = NAN;
+                    return true;
+                }
+                double fact = 1.0;
+                for (long long i2 = 2; i2 <= v; ++i2) fact *= (double)i2;
+                out.num = fact;
+            } else if (n->op == '%') {
+                out.num = a.num / 100.0;
+            } else {
+                out.num = a.num * kPi / 180.0;
+            }
+            return true;
+        }
+        if (!n->r) return false;
+        ExprVal b;
+        if (!EvalNodeVal(n->r.get(), resolve, b)) return false;
+        out.isMat = false;
+        out.num = NAN;
+        if (!a.isMat && !b.isMat) {
+            switch (n->op) {
+            case '+': out.num = a.num + b.num; return true;
+            case '-': out.num = a.num - b.num; return true;
+            case '*': out.num = a.num * b.num; return true;
+            case '/': out.num = a.num / b.num; return true;
+            case '^': out.num = pow(a.num, b.num); return true;
+            }
+            return false;
+        }
+        // 一元负（解析器将 -X 建为 0-X）：矩阵取逐元素负
+        if (n->op == '-' && n->l->kind == Expr::Node::Kind::Num && n->l->num == 0.0) {
+            const ExprVal &m = a.isMat ? a : b;
+            MatScaleVal(m, -1.0, out);
+            return true;
+        }
+        if (a.isMat && b.isMat) {
+            // 同型矩阵 + -；矩阵×矩阵走内维校验的乘
+            if (n->op == '*') return MatMulVal(a, b, out);
+            if ((n->op != '+' && n->op != '-') || !MatSameDims(a, b)) return false;
+            out.isMat = true;
+            out.rows = a.rows;
+            out.cols = a.cols;
+            out.vals.resize(a.vals.size());
+            for (size_t i = 0; i < a.vals.size(); ++i)
+                out.vals[i] = n->op == '+' ? a.vals[i] + b.vals[i]
+                                           : a.vals[i] - b.vals[i];
+            return true;
+        }
+        // 混合标量/矩阵：数乘（两侧）、矩阵÷标量、方阵非负整数次幂
+        const ExprVal &m = a.isMat ? a : b;
+        const double s = a.isMat ? b.num : a.num;
+        if (n->op == '*') {
+            MatScaleVal(m, s, out);
+            return true;
+        }
+        if (n->op == '/' && a.isMat) {
+            MatScaleVal(m, 1.0 / s, out);
+            return true;
+        }
+        if (n->op == '^' && a.isMat) {
+            const long long e = llround(s);
+            if (m.rows != m.cols || fabs(s - (double)e) > 1e-9 || e < 0 || e > 64)
+                return false;
+            if (e == 0) {
+                out.isMat = true;
+                out.rows = m.rows;
+                out.cols = m.cols;
+                out.vals.assign((size_t)m.rows * m.cols, 0.0);
+                for (int i = 0; i < m.rows; ++i)
+                    out.vals[(size_t)i * m.cols + i] = 1.0;
+                return true;
+            }
+            ExprVal acc = m;
+            for (long long q = 1; q < e; ++q) {
+                ExprVal nxt;
+                if (!MatMulVal(acc, m, nxt)) return false;
+                acc = std::move(nxt);
+            }
+            out = std::move(acc);
+            return true;
+        }
+        return false;
+    }
+    }
+    return false;
+}
+
+bool Expr::evalVal(const ValResolve &resolve, ExprVal &out) const
+{
+    if (!root_) return false;
+    ExprVal v;
+    if (!EvalNodeVal(root_.get(), &resolve, v)) return false;
+    out = std::move(v);
+    return true;
 }
 
 // 递归判定子树是否为一次式 k*x+m；常数式 k=0 也算。

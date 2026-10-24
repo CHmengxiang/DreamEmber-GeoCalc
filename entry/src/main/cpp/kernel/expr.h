@@ -9,6 +9,18 @@
 
 namespace dreamember {
 
+// ---------- 矩阵算术求值（1.0.6.2） ----------
+// 标量或矩阵的一次性求值结果：name=expr 赋值分支在引用含矩阵对象时经
+// evalVal 定型（Expr 本体是 double 求值器，矩阵不走它）。矩阵行主序存
+// vals，与内核 GeoList::values 同布局。
+struct ExprVal {
+    bool isMat = false;
+    double num = 0.0;
+    std::vector<double> vals;
+    int rows = 0, cols = 0;
+};
+using ValResolve = std::function<bool(const std::string &, ExprVal &)>;
+
 // 支持 + - * / ^、一元正负、隐式乘法（2x、2sin(x)、(1+x)(2-x)）、
 // 常用一元函数与常量 pi/π/e。NaN/Inf 由 double 运算自然产生，
 // 供绘图断点（渐近线/间断）检测使用。
@@ -33,6 +45,11 @@ public:
     // 带 Ref 求值：resolve(名字) 返回对象当前值；解析失败/无 resolver 时 Ref=NaN
     double evalResolved(double x,
                         const std::function<double(const std::string &)> &resolve) const;
+    // 矩阵算术求值：resolve 按名回填标量/矩阵（查不到返回 false）。支持
+    // 同型矩阵 + -、矩阵×矩阵（内维相符）、矩阵×标量（两侧）、矩阵÷标量、
+    // 一元负、方阵非负整数次幂；函数实参遇矩阵或其余组合返回 false
+    //（调用方给文案）。表达式须不含 x/y（调用侧 containsX/Y 把关）
+    bool evalVal(const ValResolve &resolve, ExprVal &out) const;
     bool containsX() const { return hasX_; }
     bool containsY() const { return hasY_; }
     bool empty() const { return !root_; }

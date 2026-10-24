@@ -416,6 +416,32 @@ static bool IsCellLabel(const std::string &s)
     return true;
 }
 
+// 1.0.6.2 矩阵算术：exprVal 求值的引用回填——数值依赖读 value，矩阵依赖
+// 拷贝 values/维度（GeoList 行主序与 ExprVal 同布局）。查不到返回 false
+static bool FillExprVal(const std::string &nm, ExprVal &o,
+                        const std::vector<std::pair<std::string, GeoNumeric *>> &deps,
+                        const std::vector<std::pair<std::string, GeoList *>> &mats)
+{
+    for (const auto &d : deps) {
+        if (d.first == nm) {
+            o = ExprVal{};
+            o.num = d.second->value;
+            return true;
+        }
+    }
+    for (const auto &m : mats) {
+        if (m.first == nm) {
+            o = ExprVal{};
+            o.isMat = true;
+            o.rows = m.second->mrows;
+            o.cols = m.second->mcols;
+            o.vals = m.second->values;
+            return true;
+        }
+    }
+    return false;
+}
+
 // 识别形式："(u,v)" 点 / "A=(u,v)" / 命令 / "f(x)=表达式" / 纯表达式(按函数画)
 bool Kernel::inputImpl(const std::string &srcRaw)
 {
@@ -868,11 +894,19 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                     && !t.containsY()) {
                     const std::vector<std::string> &refs = t.refs();
                     std::vector<std::pair<std::string, GeoNumeric *>> deps;
+                    std::vector<std::pair<std::string, GeoList *>> matDeps;
                     bool unresolvable = false;
                     for (const std::string &rn : refs) {
                         GeoElement *ge = lookup(rn);
                         GeoNumeric *dn = dynamic_cast<GeoNumeric *>(ge);
                         if (dn == nullptr) {
+                            // 1.0.6.2：矩阵引用参与表达式算术（A+B、2A、AB、
+                            // A/2、-A、A^k）——收为矩阵依赖，定型走 evalVal
+                            GeoList *ml = dynamic_cast<GeoList *>(ge);
+                            if (ml != nullptr && ml->isMatrix) {
+                                matDeps.emplace_back(rn, ml);
+                                continue;
+                            }
                             // 表格空单元格引用（对象完全不存在时）：自动建
                             // 0 值数值占位（进构造列表与 undo 快照），用户填
                             // 值走重定义联动。已存在的非数值对象（如该地址
@@ -898,7 +932,57 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                             --autoCells_;
                         }
                     }
-                    if (!unresolvable) {
+                    if (!unresolvable && !matDeps.empty()) {
+                        // 矩阵算术（1.0.6.2）：一次性求值定型（结果须为矩阵；
+                        // 不成立给运算规则文案）。src 记原式，getXml 按
+                        // exp="C=A+B" 表达式重放往返；calc 闭包重走 evalVal
+                        ExprVal v0;
+                        auto res0 = [&](const std::string &nm, ExprVal &o) -> bool {
+                            return FillExprVal(nm, o, deps, matDeps);
+                        };
+                        if (!t.evalVal(res0, v0) || !v0.isMat) {
+                            while (autoCells_ > 0) {
+                                geos_.pop_back();
+                                --autoCells_;
+                            }
+                            lastError = "矩阵运算不支持该组合（同型矩阵可 + −；"
+                                        "矩阵可乘矩阵、乘除标量、取非负整数次幂）";
+                            return false;
+                        }
+                        auto out = std::make_unique<GeoList>();
+                        out->isMatrix = true;
+                        out->mrows = v0.rows;
+                        out->mcols = v0.cols;
+                        out->values = v0.vals;
+                        out->src = norm;
+                        out->calc = [t, deps, matDeps, rows0 = v0.rows, cols0 = v0.cols](
+                                        GeoList *g) {
+                            ExprVal v;
+                            auto res = [&](const std::string &nm, ExprVal &o) -> bool {
+                                return FillExprVal(nm, o, deps, matDeps);
+                            };
+                            if (!t.evalVal(res, v) || !v.isMat) {
+                                // 依随重算失效（依赖改维等）：保持外形填 NaN
+                                g->isMatrix = true;
+                                g->mrows = rows0;
+                                g->mcols = cols0;
+                                g->values.assign((size_t)rows0 * cols0, NAN);
+                                return;
+                            }
+                            g->isMatrix = true;
+                            g->mrows = v.rows;
+                            g->mcols = v.cols;
+                            g->values = v.vals;
+                        };
+                        for (const auto &d : deps) {
+                            out->inputs.push_back(d.second);
+                        }
+                        for (const auto &m : matDeps) {
+                            out->inputs.push_back(m.second);
+                        }
+                        out->update();
+                        made = std::move(out);
+                    } else if (!unresolvable) {
                     auto n = std::make_unique<GeoNumeric>();
                     if (deps.empty()) {
                         n->value = t.eval(0.0);
@@ -1085,7 +1169,9 @@ static std::string PolyCoeffSrc(const std::vector<double> &p)
     bool first = true;
     for (size_t i = 0; i < p.size(); ++i) {
         if (fabs(p[i]) < 1e-15) continue;
-        snprintf(b, sizeof(b), "%.17g", p[i]);
+        // 七十三包：恒按绝对值格式化，符号只由前缀给——否则首项负系数
+        // 产出 "--0.16…"（数值自带负号 + 前缀再补一个），代数区双负号
+        snprintf(b, sizeof(b), "%.17g", fabs(p[i]));
         if (!first) s += (p[i] > 0 ? " + " : " - ");
         else if (p[i] < 0) s += "-";
         s += b;
@@ -2913,10 +2999,13 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             d->body.parse(d->src, err);
         }
         // 依随重算走 alt 闭包（Derivative 同款）：求值前比对两列表内容与
-        // 阶数，变了就重解并记忆化（body/src 只承载初始拟合的代数区显示）
+        // 阶数，变了就重解并记忆化。七十三包：重解后同步重建 src/body——
+        // 二者原本只承载初始拟合，数据/阶数变化后代数区仍显示旧方程；
+        // unique_ptr 转移所有权不搬移点对象，self 与 geos_ 中实体同址
         auto cache = std::make_shared<std::vector<double>>();   // raw 系数（空=无效）
         auto cacheKey = std::make_shared<std::vector<double>>();
-        d->alt = [sx, sy, dobj, deg0, fitNorm, normToRaw, cache, cacheKey](double x) -> double {
+        GeoFunction *self = d.get();
+        d->alt = [sx, sy, dobj, deg0, fitNorm, normToRaw, cache, cacheKey, self](double x) -> double {
             const int dg = dobj ? std::max(1, std::min(8, (int)llround(dobj->value))) : deg0;
             std::vector<double> nk;
             nk.reserve(sx->values.size() + sy->values.size() + 1);
@@ -2928,6 +3017,9 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                 if (!fitNorm(dg, p)) return NAN;
                 *cache = normToRaw(dg, p);
                 *cacheKey = nk;
+                self->src = PolyCoeffSrc(*cache);
+                std::string perr;
+                self->body.parse(self->src, perr);
             }
             double r = 0;   // Horner（cache 内为常数项…x^dg 项）
             for (auto it = cache->rbegin(); it != cache->rend(); ++it) r = r * x + *it;
@@ -2981,7 +3073,8 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         // （内容键比对去抖），两列表任一重算后拟合自动跟随
         auto ab = std::make_shared<std::pair<double, double>>(A0, B0);
         auto key = std::make_shared<std::vector<double>>();
-        d->alt = [sx, sy, ab, key](double x) -> double {
+        GeoFunction *self = d.get();
+        d->alt = [sx, sy, ab, key, self](double x) -> double {
             std::vector<double> nk;
             nk.reserve(sx->values.size() + sy->values.size());
             nk.insert(nk.end(), sx->values.begin(), sx->values.end());
@@ -3003,6 +3096,10 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                     if (fabs(den) >= 1e-12) {
                         ab->second = (n * s4 - s1 * s2) / den;
                         ab->first = exp((s2 - ab->second * s1) / n) * sign;
+                        // 七十三包：重解成功才同步代数区显示（失败沿用旧拟合，
+                        // 与求值取旧 ab 一致）
+                        self->src = PolyCoeffSrc({ab->first}) + "*e^("
+                                  + PolyCoeffSrc({ab->second}) + "*x)";
                     }
                 }
                 *key = std::move(nk);
@@ -3074,8 +3171,9 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         return true;
     }
 
-    // Determinant(M) → 数值（整数矩阵取整，上游 GgbMat.hasOnlyIntegers 语义）
-    if (cmdLower == "determinant" && a.size() == 1) {
+    // Determinant(M) → 数值（整数矩阵取整，上游 GgbMat.hasOnlyIntegers 语义）。
+    // 1.0.6.2：det 为 GGB 同款短名别名（产物仍记 Determinant，保存重放同形）
+    if ((cmdLower == "determinant" || cmdLower == "det") && a.size() == 1) {
         GeoList *M = dynamic_cast<GeoList *>(lookup(a[0]));
         if (!M || !M->isMatrix || M->mrows != M->mcols) {
             lastError = "Determinant 需要（方阵）";

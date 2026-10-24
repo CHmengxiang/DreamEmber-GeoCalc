@@ -29,7 +29,16 @@ std::string LineEqText(double a, double b, double c)
 {
     if (fabs(b) > 1e-15) {
         std::string s = "y = " + FormatNum(c / b);
-        if (fabs(a) > 1e-15) s += " - " + FormatNum(a / b) + "x";
+        if (fabs(a) > 1e-15) {
+            // y = c/b − (a/b)x：斜率为负时写 " + m·x"（七十三包修双负号），
+            // ±1 系数省略数值（GGB 同款）
+            const double k = a / b;
+            const bool neg = k < 0;
+            const double m = neg ? -k : k;
+            s += neg ? " + " : " - ";
+            s += fabs(m - 1.0) < 1e-12 ? std::string() : FormatNum(m);
+            s += "x";
+        }
         return s;
     }
     if (fabs(a) > 1e-15) return "x = " + FormatNum(c / a);
@@ -355,6 +364,9 @@ std::string GeoList::definitionText() const
 {
     std::string d = cmdDefText();
     if (!d.empty()) return d;
+    // 七十三包：依随表达式矩阵（C=A+B）定义列带标签，重定义输入框可直达
+    //（GeoNumeric 依随式同款）；自由列表仍回原花括号文本
+    if (calc && !src.empty()) return label + " = " + src;
     if (!src.empty()) return src;
     return valueText();
 }
