@@ -13,6 +13,8 @@ struct Expr::Node {
     enum class Kind { Num, Var, YVar, Param, Ref, Bin, Call, If };
     Kind kind = Kind::Num;
     double num = 0.0;
+    bool isBool = false;   // 布尔字面量 true/false（1.0.6.5）：仍按 1/0 求值，
+                           // 顶层时 isBoolLike 为真 → 值列显示 true/false
     char op = 0;
     std::string name;   // Var/YVar/Param 无用；Ref=对象标签；Call=函数名
     std::unique_ptr<Node> l, r;
@@ -660,6 +662,12 @@ private:
         n->num = v;
         return n;
     }
+    std::unique_ptr<Expr::Node> mkBool(double v)
+    {
+        auto n = mkNum(v);
+        n->isBool = true;
+        return n;
+    }
     std::unique_ptr<Expr::Node> mkVar()
     {
         auto n = std::make_unique<Expr::Node>();
@@ -918,6 +926,10 @@ private:
             }
             if (name == "pi" || name == "PI" || name == "Pi") return mkNum(3.14159265358979323846);
             if (name == "e") return mkNum(2.71828182845904523536);
+            // 1.0.6.5 布尔字面量：官方 .ggb <value val="true|false"> 重放与
+            // 键盘直输；在 refs 之前截住，防止被当对象标签
+            if (name == "true" || name == "True" || name == "TRUE") return mkBool(1.0);
+            if (name == "false" || name == "False" || name == "FALSE") return mkBool(0.0);
             if (!param.empty() && name == param) {
                 hasParam = true;
                 return mkParam();
@@ -1246,7 +1258,9 @@ bool Expr::linearCoef(double &k, double &m) const
 // 顶层比较/逻辑（< L > G = N & | ~）→ 布尔对象（1.0.6.4）
 bool Expr::isBoolLike() const
 {
-    if (!root_ || root_->kind != Node::Kind::Bin) return false;
+    if (!root_) return false;
+    if (root_->isBool) return true;   // 布尔字面量（1.0.6.5）
+    if (root_->kind != Node::Kind::Bin) return false;
     switch (root_->op) {
     case '<': case 'L': case '>': case 'G':
     case '=': case 'N': case '&': case '|': case '~':

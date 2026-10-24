@@ -8641,7 +8641,8 @@ std::string Kernel::getXml() const
             GeoAngle *ga = static_cast<GeoAngle *>(g);
             AppendCommandXml(o, *ga);
             AppendElementHead(o, *ga, "angle", ga->fillAlpha);
-            o += "<value val=\"" + NumA(ga->value) + "\"/>\n</element>\n";
+            // 官方 XML 角值恒存弧度（1.0.6.5；读侧 xmlElement 恒 ×180/π）
+            o += "<value val=\"" + NumA(ga->value * M_PI / 180.0) + "\"/>\n</element>\n";
             break;
         }
         case GeoType::Function: {
@@ -8689,6 +8690,12 @@ std::string Kernel::getXml() const
                 o += "<slider min=\"" + NumA(n->smin) + "\" max=\"" + NumA(n->smax)
                    + "\" step=\"" + NumA(n->sstep) + "\" x=\"" + NumA(n->sx)
                    + "\" y=\"" + NumA(n->sy) + "\"/>\n";
+                // 官方增量在 <animation step>（1.0.6.5 写出——官方 App 打开
+                // 我们的文件滑条步长不丢）；自产读侧两处都收
+                o += std::string("<animation step=\"") + NumA(n->sstep)
+                   + "\" speed=\"" + NumA(n->speed)
+                   + "\" playing=\"" + (n->animating ? "true" : "false")
+                   + "\" type=\"1\"/>\n";
             }
             o += "<value val=\"" + NumA(n->value) + "\"/>\n</element>\n";
             break;
@@ -8774,8 +8781,6 @@ void Kernel::xmlCommand(const std::string &headTag, const std::string &body, int
 // 样式应用到既有对象（颜色/线宽/点径/显隐）
 void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
 {
-    // 弧度→度换算（setXml 已按 <kernel> 段置 angleRadian；滑条范围/数值落位用）
-    auto deg = [this](double v) { return angleRadian ? v * 180.0 / M_PI : v; };
     size_t oc = inner.find("<objColor");
     if (oc != std::string::npos) {
         const size_t end = inner.find('>', oc);
@@ -8844,15 +8849,17 @@ void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
     GeoNumeric *num = dynamic_cast<GeoNumeric *>(e);
     if (num) {
         // <value> 先落位（官方文件里 value 在 slider/animation 之前），滑条
-        // 范围/步长吸附要用它。仅布尔对象跳过：其 <value val="true|false">
-        // 经 strtod 得 0 会把已按 1/0 落位的值覆盖坏（数值/滑条/角照常解析）
+        // 范围/步长吸附要用它。两类跳过：布尔对象（<value val="true|false">
+        // 经 strtod 得 0 会覆盖坏）；角（XML 角值恒存弧度——命令重建的角由
+        // 几何重算，落这里会把弧度数当度数盖到重算值上；自由角的回填见
+        // xmlElement 尾部）
         size_t vv = inner.find("<value");
-        if (vv != std::string::npos) {
+        if (vv != std::string::npos && !dynamic_cast<GeoAngle *>(e)) {
             const size_t end = inner.find('>', vv);
             const std::string t = inner.substr(vv, end == std::string::npos ? end : end - vv);
             const std::string raw = AttrVal(t, "val");
             if (raw != "true" && raw != "false") {
-                num->value = deg(AttrNum(t, "val", num->value));
+                num->value = AttrNum(t, "val", num->value);   // 数值无单位
             }
         }
         size_t sl = inner.find("<slider");
@@ -8866,32 +8873,34 @@ void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
             const std::string smaxS = AttrVal(t, "max");
             if (!sminS.empty()) {
                 double v = strtod(sminS.c_str(), nullptr);
-                if (NumA(v) == sminS) num->smin = deg(v);
+                if (NumA(v) == sminS) num->smin = v;   // 范围是纯数，无单位
             }
             if (!smaxS.empty()) {
                 double v = strtod(smaxS.c_str(), nullptr);
-                if (NumA(v) == smaxS) num->smax = deg(v);
+                if (NumA(v) == smaxS) num->smax = v;
             }
             num->sstep = AttrNum(t, "step", num->sstep);
             num->sx = AttrNum(t, "x", num->sx);
             num->sy = AttrNum(t, "y", num->sy);
             if (!(num->smax > num->smin)) num->smax = num->smin + 5.0;
-            // 步长吸附：值对齐到步长网格（上游 slider step 语义）
-            if (num->sstep > 1e-12) {
-                num->value = num->smin
-                    + std::round((num->value - num->smin) / num->sstep) * num->sstep;
-            }
-            num->value = std::max(num->smin, std::min(num->smax, num->value));
         }
-        // 动画（上游 <animation step speed playing/>）：playing 即刻开跑
+        // 动画（上游 <animation step speed playing/>）：playing 即刻开跑。
+        // 1.0.6.5 补读 step：官方增量存 <animation step>（自产在 <slider
+        // step>）；只落参数不吸值（见下方 isSlider 块）
         size_t an = inner.find("<animation");
         if (an != std::string::npos && num->isSlider) {
             const size_t end = inner.find('>', an);
             const std::string t = inner.substr(an, end == std::string::npos ? end : end - an);
+            num->sstep = AttrNum(t, "step", num->sstep);
             num->animating = AttrVal(t, "playing") == "true";
             num->speed = AttrNum(t, "speed", num->speed);
             if (num->speed <= 0) num->speed = 1.0;
             num->animDir = 1;
+        }
+        if (num->isSlider) {
+            // 只做范围钳位；步长不吸附（官方行为：文件值原样保留，增量只在
+            // 拖动/动画/键盘等交互路径生效——真机实测 2.3@步长0.5 吸成 2.5）
+            num->value = std::max(num->smin, std::min(num->smax, num->value));
         }
     }
 }
@@ -8900,7 +8909,8 @@ void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
 // 其余（依赖对象的命令未被支持）计入跳过。
 // 官方 .ggb 的滑动条是 <element type="numeric"><value/><slider min max .../>
 // <animation .../>：数值按自由数值重建后由 xmlApplyStyle 落滑条参数与动画态。
-// angleUnit=radian 的文件（<kernel> 段标记）：数值/角度字面量先乘 180/π 转内部度制
+// 单位约定（1.0.6.5 对齐官方）：XML 数值无单位，角值恒存弧度（与
+// <kernel> angleUnit 无关）——角重建一律 ×180/π，数值不再按单位换算
 void Kernel::xmlElement(const std::string &type, const std::string &label,
                         const std::string &inner, int *skipped)
 {
@@ -8909,8 +8919,8 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
         xmlApplyStyle(existing, inner);
         return;
     }
-    // 弧度→度换算（kernel 段 angleUnit=radian 时；GGB 数值/角度存弧度值）
-    auto deg = [this](double v) { return angleRadian ? v * 180.0 / M_PI : v; };
+    // 自由角的换算度值（对象落为隐藏数值，样式应用后回填——见尾部）
+    double angleDeg = NAN;
     if (type == "point" && !label.empty()) {
         const size_t c = inner.find("<coords");
         if (c == std::string::npos) { ++*skipped; return; }
@@ -8924,27 +8934,28 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
         if (v == std::string::npos) { ++*skipped; return; }
         const size_t end = inner.find('>', v);
         const std::string t = inner.substr(v, end - v);
-        const double val = deg(AttrNum(t, "val", 0.0));
+        const double val = AttrNum(t, "val", 0.0);   // 数值无单位，不换算
         if (!input(label + "=" + NumA(val))) { ++*skipped; return; }
     } else if (type == "angle" && !label.empty()) {
-        // 角（上游自由角 <element type="angle"><value val="弧度"/>）：
-        // 值换算成度后建隐藏数值型角（无三点依附，仅代数区/属性可见）
+        // 角（上游 <element type="angle"><value val="弧度"/>，官方恒存弧度）：
+        // 一律 ×180/π 转内部度制后建隐藏数值型角（无三点依附，仅代数区可见）
         const size_t v = inner.find("<value");
         if (v == std::string::npos) { ++*skipped; return; }
         const size_t end = inner.find('>', v);
         const std::string t = inner.substr(v, end - v);
-        const double val = deg(AttrNum(t, "val", 0.0));
+        const double val = AttrNum(t, "val", 0.0) * 180.0 / M_PI;
+        angleDeg = val;
         if (!input(label + "=" + NumA(val))) { ++*skipped; return; }
     } else if (type == "boolean" && !label.empty()) {
-        // 布尔（上游 <value val="true|false"/>）：按 1/0 数值落位
-        //（内核无布尔类型；代数区显示数值，语义等价）
+        // 布尔（上游 <value val="true|false"/>）：按布尔字面量落位（1.0.6.5
+        // 内核布尔对象——值列 true/false、可参与 ∧∨¬；旧版按 1/0 数值落位）
         const size_t v = inner.find("<value");
         if (v == std::string::npos) { ++*skipped; return; }
         const size_t end = inner.find('>', v);
         const std::string t = inner.substr(v, end - v);
         const std::string s = AttrVal(t, "val");
         if (s != "true" && s != "false") { ++*skipped; return; }
-        if (!input(label + "=" + (s == "true" ? "1" : "0"))) { ++*skipped; return; }
+        if (!input(label + "=" + s)) { ++*skipped; return; }
     } else if (type == "text" && !label.empty()) {
         // 自由文本（上游 <element type="text"><caption val=".."/> 或表达式
         // 字符串）→ Text("...") 命令重建，画布可显示
@@ -8956,7 +8967,21 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
                 ? std::string::npos : ce - cp), "val");
         }
         if (content.empty()) {
-            // 无 caption：依赖文本（startPoint exp 指向定义）暂不支持重建
+            // 官方正文在 <value val="&quot;..&quot;">（字符串源式带引号壳，
+            // AttrVal 已反转义）；caption 是自产兼容源
+            const size_t vv = inner.find("<value");
+            if (vv != std::string::npos) {
+                const size_t ve = inner.find('>', vv);
+                std::string v = AttrVal(inner.substr(vv, ve == std::string::npos
+                    ? std::string::npos : ve - vv), "val");
+                if (v.size() >= 2 && v.front() == '"' && v.back() == '"') {
+                    v = v.substr(1, v.size() - 2);
+                }
+                content = v;
+            }
+        }
+        if (content.empty()) {
+            // 无 caption/value：依赖文本（startPoint exp 指向定义）暂不支持重建
             ++*skipped;
             return;
         }
@@ -8986,6 +9011,11 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
     }
     GeoElement *made = lookup(label);
     if (made) xmlApplyStyle(made, inner);
+    if (!std::isnan(angleDeg) && made) {
+        // 自由角落为普通数值对象：其 <value> 是弧度原文，xmlApplyStyle 只对
+        // 真角对象跳过 value 落位，这里回填换算后的度值
+        static_cast<GeoNumeric *>(made)->value = angleDeg;
+    }
 }
 
 // 从 XML 重建（先清空；euclidianView 恢复坐标系，construction 按序重放）。
@@ -9012,8 +9042,9 @@ bool Kernel::setXml(const std::string &xml, int *skippedOut)
         }
     }
 
-    // kernel 段：角度单位（degree/radian）。弧度文件重放前记下标记，数值/
-    // 角度类自由对象在 element 重建时换算成内部度制。无该段 = degree
+    // kernel 段：角度单位（degree/radian）。1.0.6.5 起数值不换算（XML 数值
+    // 无单位）、角恒按弧度→度换算（官方角值与该标记无关）；标记仍读入备用。
+    // 无该段 = degree
     angleRadian = false;
     {
         const size_t ks = xml.find("<kernel>");
@@ -9080,8 +9111,26 @@ bool Kernel::setXml(const std::string &xml, int *skippedOut)
             const std::string exp = AttrVal(tagText, "exp");
             const std::string label = AttrVal(tagText, "label");
             if (!exp.empty()) {
-                if (!input(exp) && !label.empty() && exp.find('=') == std::string::npos) {
-                    input(label + "=" + exp);   // exp 缺名时用 label 补全
+                // 1.0.6.5：无 '=' 的自由对象（官方自由列表/文本串）优先带
+                // label 落名——裸 input 会落成匿名对象，后续 <element> 对不上号
+                const bool textLit = exp.size() >= 2
+                    && exp.front() == '"' && exp.back() == '"';
+                std::string src = exp;
+                if (!label.empty() && exp.find('=') == std::string::npos) {
+                    if (textLit) {
+                        // 字符串字面量：表达式层无字符串，经 Text() 命令重建
+                        std::string lit;
+                        for (char ch : exp.substr(1, exp.size() - 2)) {
+                            lit += ch == '"' ? '\'' : ch;
+                        }
+                        src = label + "=Text(\"" + lit + "\")";
+                    } else {
+                        src = label + "=" + exp;
+                    }
+                }
+                if (!input(src) && !label.empty() && exp.find('=') == std::string::npos
+                    && !textLit) {
+                    input(exp);   // 带 label 仍失败才退回匿名
                 }
             }
         } else if (tag == "element") {
