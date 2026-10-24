@@ -123,6 +123,11 @@ target_link_libraries(dreamember PUBLIC giac tommath libace_napi.z.so libhilog_n
 # 改用 -L + -l: 相对名链接 → DT_NEEDED=libratex_ffi.so，运行期从同目录
 # libs/<abi>/libratex_ffi.so 解析；同时复制 so 到 entry/libs/<abi>/ 确保
 # hvigor 随 HAP 打包。
+# 七十二包修复：DESTINATION 必须是模块根的 libs/（entry/libs/<abi>/，
+# hvigor ProcessLibs 的打包源）。原 ../../libs 落在 entry/src/libs/——
+# 打包器不收，HAP 缺 libratex_ffi.so，dlopen 失败复现「native 模块未
+# 加载」崩溃（2026-10-24 模拟器实测）。so 同时入库：增量构建不重跑
+# cmake 时 file(COPY) 不执行，入库保证任何构建路径都能打包成功。
 set(RATEX_PREBUILT_DIR ${NATIVERENDER_ROOT_PATH}/ratex/prebuilt)
 if(OHOS_ARCH STREQUAL arm64-v8a)
     set(RATEX_LIB_DIR ${RATEX_PREBUILT_DIR}/arm64-v8a)
@@ -131,6 +136,6 @@ elseif(OHOS_ARCH STREQUAL x86_64)
 endif()
 if(DEFINED RATEX_LIB_DIR)
     file(COPY ${RATEX_LIB_DIR}/libratex_ffi.so
-         DESTINATION ${NATIVERENDER_ROOT_PATH}/../../libs/${OHOS_ARCH})
+         DESTINATION ${NATIVERENDER_ROOT_PATH}/../../../libs/${OHOS_ARCH})
     target_link_libraries(dreamember PUBLIC -L${RATEX_LIB_DIR} -l:libratex_ffi.so)
 endif()

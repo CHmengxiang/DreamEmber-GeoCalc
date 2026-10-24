@@ -43,4 +43,6 @@ build_win/
 entry/src/main/d*.json
 
 # ===== 构建派生副本（CMake file(COPY) 生成，不入库）=====
+# entry/libs 例外：libratex_ffi.so 入库——增量构建不重跑 cmake 时
+# file(COPY) 不执行，派生缺失会让 HAP 缺库复现 dlopen 崩溃（七十二包）
 entry/src/libs/
