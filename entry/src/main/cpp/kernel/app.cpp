@@ -3188,6 +3188,12 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         out->mcols = n;
         out->values.assign((size_t)n * n, 0.0);
         for (int i = 0; i < n; ++i) out->values[(size_t)i * n + i] = 1.0;
+        // 七十二包修复：命令产物必须回填 cmdName/cmdArgs，否则 getXml 落到
+        // 自由列表分支写出 exp="M="（src 为空），保存重开即被跳过（宿主探针
+        // 复现：Identity 往返后 skipped=5）。Determinant/Transpose/Invert/
+        // Row/Column 均有回填，唯 Identity 漏。
+        out->cmdName = "Identity";
+        out->cmdArgs = { a[0] };
         made = std::move(out);
         return true;
     }
