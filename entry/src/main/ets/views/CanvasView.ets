@@ -1724,7 +1724,15 @@ export struct CanvasView {
       } finally {
         fs.closeSync(file);
       }
-      this.alertBox('保存成功', uri.substring(uri.lastIndexOf('/') + 1));
+      // 选择器回传的 URI 中文是百分号编码（1.0.6.6 解码显示；文件名本身
+      // 可含 %，解码失败时原样展示）
+      let name = uri.substring(uri.lastIndexOf('/') + 1);
+      try {
+        name = decodeURIComponent(name);
+      } catch (e) {
+        // 非法编码序列：原样展示
+      }
+      this.alertBox('保存成功', name);
     }).catch(() => {
       // 取消：静默
     });

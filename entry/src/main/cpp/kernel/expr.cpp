@@ -597,6 +597,17 @@ bool Tokenize(const std::string &s, std::vector<Tok> &out, std::string &err)
                 i += 2;
                 continue;
             }
+            // ∞（1.0.6.6：无穷常量，按 Name 令牌进 parsePrimary）
+            if ((unsigned char)c == 0xE2 && i + 2 < s.size()
+                && (unsigned char)s[i + 1] == 0x88
+                && (unsigned char)s[i + 2] == 0x9E) {
+                Tok t;
+                t.k = Tok::K::Name;
+                t.name = "∞";
+                out.push_back(std::move(t));
+                i += 3;
+                continue;
+            }
         }
         if (strchr("+-*/^(),!%", c) != nullptr) {
             Tok t;
@@ -708,6 +719,23 @@ private:
         static const char kOps[] = { 0, '<', 'L', '>', 'G', '=', 'N', '&', '|', '~' };
         return mkBin(kOps[c], std::move(l), std::move(r));
     }
+    // 1.0.6.6 链式比较重构：中段操作数在两个比较里各用一次，节点为独占
+    // 所有制，递归深拷贝（Call 实参表一并带走）
+    static std::unique_ptr<Expr::Node> CloneNode(const Expr::Node *n)
+    {
+        auto c = std::make_unique<Expr::Node>();
+        c->kind = n->kind;
+        c->num = n->num;
+        c->isBool = n->isBool;
+        c->op = n->op;
+        c->name = n->name;
+        for (const auto &a : n->args) {
+            c->args.push_back(CloneNode(a.get()));
+        }
+        if (n->l) c->l = CloneNode(n->l.get());
+        if (n->r) c->r = CloneNode(n->r.get());
+        return c;
+    }
     std::unique_ptr<Expr::Node> mkIf(std::vector<std::unique_ptr<Expr::Node>> args)
     {
         auto n = std::make_unique<Expr::Node>();
@@ -740,19 +768,40 @@ private:
         return l;
     }
 
-    // 比较层（1.0.6.4）：a<b、a==b 等链式左结合，两侧为算术子式
+    // 比较层（1.0.6.4）：两侧为算术子式。1.0.6.6 链式：a<b<c 官方语义 =
+    // (a<b)∧(b<c)——左结合的 (a<b)<c 对 0/1 结果恒真。收集比较段后重构为
+    // 合取，中段操作数克隆复用；单段（绝大多数）零开销直返
     std::unique_ptr<Expr::Node> parseCmp()
     {
         auto l = parseArith();
         if (!l) return nullptr;
+        if (!(peek().k == Tok::K::Cmp && peek().cmp <= 6)) return l;
+        struct Seg {
+            int cmp;
+            std::unique_ptr<Expr::Node> operand;   // v_{k+1}（右操作数）
+        };
+        std::vector<Seg> tail;
         while (peek().k == Tok::K::Cmp && peek().cmp <= 6) {   // 7=∧ 8=∨ 归逻辑层，9=¬ 是前缀
             const int c = peek().cmp;
             ++pos_;
             auto r = parseArith();
             if (!r) return nullptr;
-            l = mkCmp(c, std::move(l), std::move(r));
+            tail.push_back({c, std::move(r)});
         }
-        return l;
+        if (tail.size() == 1) {
+            return mkCmp(tail[0].cmp, std::move(l), std::move(tail[0].operand));
+        }
+        // seg_k = cmp(op_k, v_k, v_{k+1})：v_k 来自上一段右操作数（move），
+        // 还要当本段左操作数——上一段先克隆它；末段右操作数唯一用 move
+        auto result = mkCmp(tail[0].cmp, std::move(l), CloneNode(tail[0].operand.get()));
+        for (size_t k = 1; k < tail.size(); ++k) {
+            const bool last = k + 1 == tail.size();
+            auto right = last ? std::move(tail[k].operand)
+                              : CloneNode(tail[k].operand.get());
+            auto seg = mkCmp(tail[k].cmp, std::move(tail[k - 1].operand), std::move(right));
+            result = mkBin('&', std::move(result), std::move(seg));
+        }
+        return result;
     }
 
     std::unique_ptr<Expr::Node> parseArith()   // + -
@@ -926,6 +975,9 @@ private:
             }
             if (name == "pi" || name == "PI" || name == "Pi") return mkNum(3.14159265358979323846);
             if (name == "e") return mkNum(2.71828182845904523536);
+            // 1.0.6.6 ∞ 无穷常量：IEEE 算术自然传递（1/0 已是 inf、∞+1=∞），
+            // 值列由 GeoNumeric::valueText 显示 ∞；±∞ 同理（一元负号作用）
+            if (name == "∞") return mkNum(HUGE_VAL);
             // 1.0.6.5 布尔字面量：官方 .ggb <value val="true|false"> 重放与
             // 键盘直输；在 refs 之前截住，防止被当对象标签
             if (name == "true" || name == "True" || name == "TRUE") return mkBool(1.0);

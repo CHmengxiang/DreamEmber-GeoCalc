@@ -397,6 +397,51 @@ bool PathProject(GeoElement *e, double wx, double wy, double prev,
 
 // 撤销打点在包装层：成功创建才留一步（失败输入不留）；setXml 重放与
 // redefine 的内部 input（undoSuspend_ > 0）不打点
+// 1.0.6.6 关系符号 ∥/⊥ 的方向向量活取（calc 闭包内调用——线类几何可变，
+// 创建时缓存方向会失真）。直线 ax+by=c 方向 (-b,a)（verticalConst 同式）；
+// 线段/射线/向量取端点差（image 缓存感知）；函数限一次式（斜率 k → (1,k)），
+// 非线性图像无方向返回 false
+static bool RelationDir(GeoElement *g, double &dx, double &dy)
+{
+    if (auto *l = dynamic_cast<GeoLine *>(g)) {
+        dx = -l->b;
+        dy = l->a;
+        return true;
+    }
+    if (auto *s = dynamic_cast<GeoSegment *>(g)) {
+        dx = s->ex2() - s->ex1();
+        dy = s->ey2() - s->ey1();
+        return true;
+    }
+    if (auto *r = dynamic_cast<GeoRay *>(g)) {
+        if (!r->p1 || !r->p2) return false;
+        dx = r->p2->x - r->p1->x;
+        dy = r->p2->y - r->p1->y;
+        return true;
+    }
+    if (auto *v = dynamic_cast<GeoVector *>(g)) {
+        dx = v->ex2() - v->ex1();
+        dy = v->ey2() - v->ey1();
+        return true;
+    }
+    if (auto *f = dynamic_cast<GeoFunction *>(g)) {
+        double k = 0, m = 0;
+        if (!f->body.linearCoef(k, m)) return false;
+        dx = 1;
+        dy = k;
+        return true;
+    }
+    return false;
+}
+
+// 1.0.6.6 弧度会话缩放判定：角对象（GeoAngle）与文件重建的角度值数值
+//（isAngleVal）在表达式层出弧度值；普通数值不缩放
+static bool IsAngleValue(const GeoElement *g)
+{
+    const GeoNumeric *n = dynamic_cast<const GeoNumeric *>(g);
+    return n != nullptr && n->isAngleVal;
+}
+
 bool Kernel::input(const std::string &srcRaw)
 {
     if (undoSuspend_ > 0) return inputImpl(srcRaw);
@@ -845,6 +890,181 @@ bool Kernel::inputImpl(const std::string &srcRaw)
         }
     }
 
+    // 1.7) 关系符号 ∥ ⊥ ∈ ⊂ ⊆（1.0.6.6 键盘死区激活）：顶层出现即按语义
+    // 建依随布尔对象，不进表达式层（线类/列表对象不是 double）。只认顶层
+    //（括号/花括号/引号内维持原解析路径）；≅ ≇ → ⊗ 官方输入条亦无运算
+    // 语义，维持插入后报错
+    if (!made && !rhs.empty()) {
+        size_t rsPos = std::string::npos;
+        int rsKind = 0;   // 1=∥ 2=⊥ 3=∈ 4=⊂ 5=⊆
+        {
+            int depth = 0;
+            bool inStr = false;
+            for (size_t i = 0; i < rhs.size();) {
+                const unsigned char c = (unsigned char)rhs[i];
+                if (inStr) {
+                    if (c == '"') inStr = false;
+                    ++i;
+                    continue;
+                }
+                if (c == '"') { inStr = true; ++i; continue; }
+                if (c == '(' || c == '{') { ++depth; ++i; continue; }
+                if (c == ')' || c == '}') {
+                    if (depth > 0) --depth;
+                    ++i;
+                    continue;
+                }
+                if (c == 0xE2 && depth == 0 && i + 2 < rhs.size()) {
+                    const unsigned char b1 = (unsigned char)rhs[i + 1];
+                    const unsigned char b2 = (unsigned char)rhs[i + 2];
+                    int k = 0;
+                    if (b1 == 0x88 && b2 == 0xA5) k = 1;          // ∥ U+2225
+                    else if (b1 == 0x8A && b2 == 0xA5) k = 2;     // ⊥ U+22A5
+                    else if (b1 == 0x88 && b2 == 0x88) k = 3;     // ∈ U+2208
+                    else if (b1 == 0x8A && b2 == 0x82) k = 4;     // ⊂ U+2282
+                    else if (b1 == 0x8A && b2 == 0x86) k = 5;     // ⊆ U+2286
+                    if (k) { rsPos = i; rsKind = k; break; }
+                }
+                ++i;
+            }
+        }
+        if (rsKind) {
+            const std::string lop = Trim(rhs.substr(0, rsPos));
+            const std::string rop = Trim(rhs.substr(rsPos + 3));
+            if (lop.empty() || rop.empty()) {
+                lastError = "关系符号需要左右两个对象";
+                return false;
+            }
+            auto n = std::make_unique<GeoNumeric>();
+            n->boolLike = true;
+            n->isFree = false;
+            n->cmd = rhs;   // 定义列/保存重放原文（依随数值 cmd 为 rhs 惯例）
+            // 列表实参：{…} 字面量拍快照（值拷贝进闭包）/标签活引用（挂 inputs）
+            auto listOperand = [&](const std::string &s, std::vector<double> &lit,
+                                   GeoList *&live) -> bool {
+                live = nullptr;
+                if (!s.empty() && s.front() == '{') {
+                    if (s.back() != '}') { lastError = "列表字面量格式：{a,b,…}"; return false; }
+                    std::string lerr;
+                    if (!ParseListValues(s.substr(1, s.size() - 2), lit, lerr)) {
+                        lastError = lerr.empty() ? "列表字面量无法解析: " + s : lerr;
+                        return false;
+                    }
+                    return true;
+                }
+                GeoList *L = dynamic_cast<GeoList *>(lookup(s));
+                if (!L || L->isMatrix) {
+                    lastError = "需要数值列表（标签或 {…} 字面量）: " + s;
+                    return false;
+                }
+                live = L;
+                return true;
+            };
+            if (rsKind == 1 || rsKind == 2) {
+                // 线类平行/垂直判定：夹角归一 |叉积|或|点积| / |d1||d2| < 1e-9
+                GeoElement *ga = lookup(lop);
+                GeoElement *gb = lookup(rop);
+                double t1x, t1y, t2x, t2y;
+                if (!ga || !gb || !RelationDir(ga, t1x, t1y)
+                    || !RelationDir(gb, t2x, t2y)) {
+                    lastError = std::string(rsKind == 1 ? "∥" : "⊥")
+                        + " 需要两个线类对象（直线/线段/射线/向量/一次函数图像）";
+                    return false;
+                }
+                const bool perp = rsKind == 2;
+                n->calc = [ga, gb, perp]() -> double {
+                    double d1x, d1y, d2x, d2y;
+                    if (!RelationDir(ga, d1x, d1y) || !RelationDir(gb, d2x, d2y)) return 0.0;
+                    const double m1 = sqrt(d1x * d1x + d1y * d1y);
+                    const double m2 = sqrt(d2x * d2x + d2y * d2y);
+                    if (m1 < 1e-12 || m2 < 1e-12) return 0.0;
+                    const double q = perp ? fabs(d1x * d2x + d1y * d2y) / (m1 * m2)
+                                          : fabs(d1x * d2y - d1y * d2x) / (m1 * m2);
+                    return q < 1e-9 ? 1.0 : 0.0;
+                };
+                n->inputs = { ga, gb };
+                n->update();
+                made = std::move(n);
+            } else if (rsKind == 3) {
+                // x ∈ L：左侧数值表达式（可含数值对象引用，依随重算）；弧度
+                // 会话角引用出弧度值（与赋值分支同规）
+                Expr e;
+                std::string err;
+                if (!e.parse(lop, err, std::string(), true) || e.containsX()
+                    || e.containsY()) {
+                    lastError = err.empty() ? "∈ 左侧须为数值表达式: " + lop : err;
+                    return false;
+                }
+                std::vector<std::pair<std::string, GeoNumeric *>> deps;
+                for (const std::string &rn : e.refs()) {
+                    GeoNumeric *dn = dynamic_cast<GeoNumeric *>(lookup(rn));
+                    if (!dn) { lastError = "∈ 左侧引用须为数值对象: " + rn; return false; }
+                    deps.emplace_back(rn, dn);
+                }
+                std::vector<double> lit;
+                GeoList *L = nullptr;
+                if (!listOperand(rop, lit, L)) return false;
+                const double angScale = angleRadian ? M_PI / 180.0 : 1.0;
+                n->calc = [e, deps, lit, L, angScale]() -> double {
+                    const double v = e.evalResolved(0.0,
+                        [deps, angScale](const std::string &nm) -> double {
+                            for (const auto &d : deps) {
+                                if (d.first == nm) {
+                                    return d.second->value
+                                        * (IsAngleValue(d.second) ? angScale : 1.0);
+                                }
+                            }
+                            return NAN;
+                        });
+                    const std::vector<double> &vals = L ? L->values : lit;
+                    for (double x : vals) {
+                        if (x == v) return 1.0;   // 精确相等（NAN 恒不中）
+                    }
+                    return 0.0;
+                };
+                for (const auto &d : deps) n->inputs.push_back(d.second);
+                if (L) n->inputs.push_back(L);
+                n->update();
+                made = std::move(n);
+            } else {
+                // L1 ⊂/⊆ L2：集合语义（去重后逐元素包含；⊂ 另要求真子集）
+                std::vector<double> litA, litB;
+                GeoList *LA = nullptr, *LB = nullptr;
+                if (!listOperand(lop, litA, LA) || !listOperand(rop, litB, LB)) return false;
+                const bool strict = rsKind == 4;
+                n->calc = [litA, litB, LA, LB, strict]() -> double {
+                    const std::vector<double> &A = LA ? LA->values : litA;
+                    const std::vector<double> &B = LB ? LB->values : litB;
+                    auto distinct = [](const std::vector<double> &v) {
+                        std::vector<double> d;
+                        for (double x : v) {
+                            bool seen = false;
+                            for (double y : d) {
+                                if (y == x) { seen = true; break; }
+                            }
+                            if (!seen) d.push_back(x);
+                        }
+                        return d;
+                    };
+                    const std::vector<double> da = distinct(A);
+                    const std::vector<double> db = distinct(B);
+                    for (double x : da) {
+                        bool in = false;
+                        for (double y : db) {
+                            if (y == x) { in = true; break; }
+                        }
+                        if (!in) return 0.0;
+                    }
+                    return (!strict || da.size() < db.size()) ? 1.0 : 0.0;
+                };
+                if (LA) n->inputs.push_back(LA);
+                if (LB) n->inputs.push_back(LB);
+                n->update();
+                made = std::move(n);
+            }
+        }
+    }
+
     // 1.5) 列表：{...} 或 L={...}（N6 批次③；元素为不含 x 的数值表达式）。
     // 1.0.6.1：{{...},{...}} 嵌套形式按矩阵解析（GGB 矩阵 = 列表的列表，
     // 行主序扁平进 values，isMatrix/mrows/mcols 落位；行错位即拒）
@@ -1095,12 +1315,21 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                     } else {
                         // calc 闭包捕获表达式树 + 依赖指针（inputs 已注册，
                         // 级联删除保证不悬垂；重定义保持指针身份）
+                        // 1.0.6.6 弧度会话：表达式层的角对象引用出弧度值
+                        //（×π/180）——radian 文件 sin(β)=1、β/2=π/4 与内核
+                        // 裸数弧度三角一致；度制会话出内部度数不变。比例
+                        // 创建时定型进闭包（官方 文件模式即会话模式）
+                        const double angScale =
+                            angleRadian ? M_PI / 180.0 : 1.0;
                         n->isFree = false;
-                        n->calc = [t, deps]() -> double {
+                        n->calc = [t, deps, angScale]() -> double {
                             return t.evalResolved(0.0,
-                                [deps](const std::string &nm) -> double {
+                                [deps, angScale](const std::string &nm) -> double {
                                     for (const auto &d : deps) {
-                                        if (d.first == nm) return d.second->value;
+                                        if (d.first == nm) {
+                                            return d.second->value
+                                                * (IsAngleValue(d.second) ? angScale : 1.0);
+                                        }
                                     }
                                     return NAN;
                                 });
@@ -1390,20 +1619,32 @@ static bool SolveNormalEquations(std::vector<std::vector<double>> M,
 }
 
 // 多项式系数（p[0]=常数项 … p[k]=x^k 项）→ 内核函数源文（"c0 + c1*x + …"）。
-// 系数用 %.17g 全精度（%.6g 会在 x^3 项大系数上损失回归精度）
+// 系数用 FitNum 最短格式（1.0.6.6；%.17g 全精度会把解算噪声上屏，
+// %.6g 会在大系数上出科学计数且损失精度）
+// 1.0.6.6 拟合系数格式：在 1e-8 相对容差内取最短十进制表示——正规方程/
+// 二项式展开的噪声（0.29999999999999999 这类）按 0.3 显示，大系数不出
+// 科学计数（%.6g 会），重解析后曲线差异在 1e-8 相对量级，拟合语义不变
+static std::string FitNum(double v)
+{
+    char b[40];
+    for (int prec = 1; prec <= 10; ++prec) {
+        snprintf(b, sizeof(b), "%.*g", prec, v);
+        if (fabs(strtod(b, nullptr) - v) <= 1e-8 * (fabs(v) + 1e-300)) break;
+    }
+    return std::string(b);
+}
+
 static std::string PolyCoeffSrc(const std::vector<double> &p)
 {
-    char b[64];
     std::string s;
     bool first = true;
     for (size_t i = 0; i < p.size(); ++i) {
         if (fabs(p[i]) < 1e-15) continue;
         // 七十三包：恒按绝对值格式化，符号只由前缀给——否则首项负系数
         // 产出 "--0.16…"（数值自带负号 + 前缀再补一个），代数区双负号
-        snprintf(b, sizeof(b), "%.17g", fabs(p[i]));
         if (!first) s += (p[i] > 0 ? " + " : " - ");
         else if (p[i] < 0) s += "-";
-        s += b;
+        s += FitNum(fabs(p[i]));
         if (i > 0) {
             s += "*x";
             if (i > 1) s += "^" + std::to_string(i);
@@ -3076,7 +3317,8 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         return true;
     }
 
-    // Mean/Median/Min/Max/Sum/Product/SD/Variance(list) → 数值（依随列表）
+    // Mean/Median/Min/Max/Sum/Product/SD/Variance(list) → 数值（依随列表；
+    // 1.0.6.6 实参收 {…} 字面量——listArg 字面量产物为静态，不挂 inputs）
     if (cmdLower == "mean" || cmdLower == "median" || cmdLower == "min" || cmdLower == "max"
         || cmdLower == "sum" || cmdLower == "product" || cmdLower == "sd"
         || cmdLower == "variance") {
@@ -3088,8 +3330,9 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             }
             lastError = "统计命令需要（列表）参数"; made = nullptr; return true;
         }
-        GeoList *L = dynamic_cast<GeoList *>(lookup(a[0]));
-        if (!L) { lastError = "未找到列表 " + a[0]; made = nullptr; return true; }
+        bool lit = false;
+        GeoList *L = listArg(a[0], lit);
+        if (!L) { made = nullptr; return true; }
         const char *ggbName = cmdLower == "mean" ? "Mean"
                             : cmdLower == "median" ? "Median"
                             : cmdLower == "min" ? "Min"
@@ -3101,22 +3344,28 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         n->isFree = false;
         GeoList *src = L;
         const std::string kind = cmdLower;
-        n->calc = [src, kind]() { return ListStat(src->values, kind); };
         n->cmdName = ggbName;
         n->cmdArgs = { a[0] };
         n->cmd = ggbName + std::string("(") + a[0] + ")";
-        n->inputs = { L };
-        n->update();
+        if (lit) {
+            n->value = ListStat(src->values, kind);   // 字面量静态：一次定型
+        } else {
+            n->calc = [src, kind]() { return ListStat(src->values, kind); };
+            n->update();
+            n->inputs = { L };
+        }
         made = std::move(n);
         return true;
     }
 
-    // Element(list, k) / First(list) / Last(list) → 数值（依随列表；k 为 1 起）
+    // Element(list, k) / First(list) / Last(list) → 数值（依随列表；k 为 1 起；
+    // 1.0.6.6 列表实参收 {…} 字面量，静态定型）
     const bool listGet = (cmdLower == "element" && a.size() == 2)
         || (a.size() == 1 && (cmdLower == "first" || cmdLower == "last"));
     if (listGet) {
-        GeoList *L = dynamic_cast<GeoList *>(lookup(a[0]));
-        if (!L) { lastError = "未找到列表 " + a[0]; made = nullptr; return true; }
+        bool lit = false;
+        GeoList *L = listArg(a[0], lit);
+        if (!L) { made = nullptr; return true; }
         double k = 1;
         const bool indexed = cmdLower == "element";
         if (indexed && !numArg(a[1], k)) {
@@ -3130,33 +3379,47 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         GeoList *src = L;
         const double k0 = k;
         const bool isLast = cmdLower == "last";
-        n->calc = [src, k0, indexed, isLast]() -> double {
-            if (src->values.empty()) return NAN;
-            if (!indexed) return isLast ? src->values.back() : src->values.front();
-            const size_t i = (size_t)llround(k0);
-            if (i < 1 || i > src->values.size()) return NAN;
-            return src->values[i - 1];
-        };
         n->cmdName = ggbName;
         n->cmdArgs = a;
-        n->cmd = ggbName + std::string("(") + a[0] + (indexed ? ", " + a[1] : "") + ")";
-        n->inputs = { L };
-        n->update();
+        n->cmd = std::string(ggbName) + "(" + a[0] + (indexed ? ", " + a[1] : "") + ")";
+        if (lit) {
+            if (src->values.empty()) {
+                n->value = NAN;
+            } else if (indexed) {
+                const size_t i = (size_t)llround(k0);
+                n->value = (i >= 1 && i <= src->values.size()) ? src->values[i - 1] : NAN;
+            } else {
+                n->value = isLast ? src->values.back() : src->values.front();
+            }
+        } else {
+            n->calc = [src, k0, indexed, isLast]() -> double {
+                if (src->values.empty()) return NAN;
+                if (!indexed) return isLast ? src->values.back() : src->values.front();
+                const size_t i = (size_t)llround(k0);
+                if (i < 1 || i > src->values.size()) return NAN;
+                return src->values[i - 1];
+            };
+            n->update();
+            n->inputs = { L };
+        }
         made = std::move(n);
         return true;
     }
 
-    // Sort/Unique/Reverse(list) → 列表（依随源列表）
+    // Sort/Unique/Reverse(list) → 列表（依随源列表；1.0.6.6 收 {…} 字面量）
     if (cmdLower == "sort" || cmdLower == "unique" || cmdLower == "reverse") {
         if (a.size() != 1) { lastError = "命令需要（列表）参数"; made = nullptr; return true; }
-        GeoList *L = dynamic_cast<GeoList *>(lookup(a[0]));
-        if (!L) { lastError = "未找到列表 " + a[0]; made = nullptr; return true; }
+        bool lit = false;
+        GeoList *L = listArg(a[0], lit);
+        if (!L) { made = nullptr; return true; }
         const char *ggbName = cmdLower == "sort" ? "Sort" : cmdLower == "unique" ? "Unique" : "Reverse";
         auto out = std::make_unique<GeoList>();
         GeoList *src = L;
         const std::string kind = cmdLower;
-        out->calc = [src, kind](GeoList *g) {
+        auto bake = [src, kind](GeoList *g) {
             g->values = src->values;
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
             if (kind == "sort") {
                 std::sort(g->values.begin(), g->values.end());
             } else if (kind == "reverse") {
@@ -3176,25 +3439,35 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         };
         out->cmdName = ggbName;
         out->cmdArgs = { a[0] };
-        out->inputs = { L };
-        out->update();
+        if (lit) {
+            bake(out.get());   // 字面量静态：一次定型，不挂重算闭包
+        } else {
+            out->calc = bake;
+            out->inputs = { L };
+            out->update();
+        }
         made = std::move(out);
         return true;
     }
 
-    // Length(list) → 元素个数（两点/线段形式在上方分支处理）
+    // Length(list) → 元素个数（两点/线段形式在上方分支处理；1.0.6.6 收字面量）
     if (cmdLower == "length" && a.size() == 1) {
-        GeoList *L = dynamic_cast<GeoList *>(lookup(a[0]));
+        bool lit = false;
+        GeoList *L = listArg(a[0], lit);
         if (!L) { lastError = "Length 需要（点, 点）/（线段/多边形）或（列表）"; made = nullptr; return true; }
         auto n = std::make_unique<GeoNumeric>();
         n->isFree = false;
         GeoList *src = L;
-        n->calc = [src]() { return (double)src->values.size(); };
         n->cmdName = "Length";
         n->cmdArgs = { a[0] };
         n->cmd = "Length(" + a[0] + ")";
-        n->inputs = { L };
-        n->update();
+        if (lit) {
+            n->value = (double)src->values.size();
+        } else {
+            n->calc = [src]() { return (double)src->values.size(); };
+            n->update();
+            n->inputs = { L };
+        }
         made = std::move(n);
         return true;
     }
@@ -8582,7 +8855,14 @@ std::string Kernel::getXml() const
        + std::to_string(view.height) + "\"/>\n";
     o += "<coordSystem xZero=\"" + NumA(view.xZero) + "\" yZero=\"" + NumA(view.yZero)
        + "\" scale=\"" + NumA(view.xscale) + "\" yscale=\"" + NumA(view.yscale) + "\"/>\n";
-    o += "</euclidianView>\n<construction title=\"\" author=\"\" date=\"\">\n";
+    o += "</euclidianView>\n";
+    // 1.0.6.6 弧度会话标记回写（官方 <kernel><angleUnit> 同位；度制=无段，
+    // 读侧缺段即 degree）。表达式层角引用出弧度值的比例随会话，缺了这段
+    // 自产文件重开会退回度制语义
+    if (angleRadian) {
+        o += "<kernel>\n\t<angleUnit val=\"radian\"/>\n</kernel>\n";
+    }
+    o += "<construction title=\"\" author=\"\" date=\"\">\n";
 
     for (auto &gp : geos_) {
         GeoElement *g = gp.get();
@@ -8664,6 +8944,15 @@ std::string Kernel::getXml() const
         }
         case GeoType::Numeric: {
             GeoNumeric *n = static_cast<GeoNumeric *>(g);
+            if (n->isAngleVal && !n->calc && n->cmdName.empty() && !n->isSlider) {
+                // 文件重建的自由角（1.0.6.6）：按官方 angle 元素写回（值恒
+                // 弧度，1.0.6.5 约定）——若走表达式会写成度数原文，重开丢
+                // isAngleVal 且与弧度标记矛盾
+                AppendElementHead(o, *n, "angle", 0.1);
+                o += "<value val=\"" + NumA(n->value * M_PI / 180.0)
+                   + "\"/>\n</element>\n";
+                break;
+            }
             if (n->isSlider) {
                 // 滑动条经表达式重放重建（a=Slider(min, max, step)）
                 o += "<expression label=\"" + XmlEsc(n->label) + "\" exp=\""
@@ -8687,7 +8976,12 @@ std::string Kernel::getXml() const
             }
             AppendElementHead(o, *n, "numeric");
             if (n->isSlider) {
-                o += "<slider min=\"" + NumA(n->smin) + "\" max=\"" + NumA(n->smax)
+                // 1.0.6.6 范围对象引用原文回写（官方 <slider min="b"> 同形；
+                // 空时写数值）——官方 App 打开我们的文件保留动态范围引用
+                o += "<slider min=\""
+                   + (n->sminRef.empty() ? NumA(n->smin) : XmlEsc(n->sminRef))
+                   + "\" max=\""
+                   + (n->smaxRef.empty() ? NumA(n->smax) : XmlEsc(n->smaxRef))
                    + "\" step=\"" + NumA(n->sstep) + "\" x=\"" + NumA(n->sx)
                    + "\" y=\"" + NumA(n->sy) + "\"/>\n";
                 // 官方增量在 <animation step>（1.0.6.5 写出——官方 App 打开
@@ -8867,18 +9161,21 @@ void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
             const size_t end = inner.find('>', sl);
             const std::string t = inner.substr(sl, end == std::string::npos ? end : end - sl);
             num->isSlider = true;
-            // 上游 min/max 属性存的是数值或对象 label 引用（evaluateToNumeric
-            // 二次解析）；label 引用（非纯数）本版不支持，保留默认范围
+            // 上游 min/max 属性存数值或对象 label 引用（evaluateToNumeric
+            // 二次解析）。1.0.6.6：引用（非纯数）存原文，构造重放完成后
+            // setXml 尾部统一解析（引用对象可定义在滑条之后）
             const std::string sminS = AttrVal(t, "min");
             const std::string smaxS = AttrVal(t, "max");
-            if (!sminS.empty()) {
-                double v = strtod(sminS.c_str(), nullptr);
-                if (NumA(v) == sminS) num->smin = v;   // 范围是纯数，无单位
-            }
-            if (!smaxS.empty()) {
-                double v = strtod(smaxS.c_str(), nullptr);
-                if (NumA(v) == smaxS) num->smax = v;
-            }
+            auto sliderBound = [](const std::string &s, double &out,
+                                  std::string &ref) {
+                if (s.empty()) return;
+                char *ep = nullptr;
+                const double v = strtod(s.c_str(), &ep);
+                if (!isspace((unsigned char)s[0]) && ep && *ep == '\0') out = v;
+                else ref = s;
+            };
+            sliderBound(sminS, num->smin, num->sminRef);
+            sliderBound(smaxS, num->smax, num->smaxRef);
             num->sstep = AttrNum(t, "step", num->sstep);
             num->sx = AttrNum(t, "x", num->sx);
             num->sy = AttrNum(t, "y", num->sy);
@@ -9013,8 +9310,11 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
     if (made) xmlApplyStyle(made, inner);
     if (!std::isnan(angleDeg) && made) {
         // 自由角落为普通数值对象：其 <value> 是弧度原文，xmlApplyStyle 只对
-        // 真角对象跳过 value 落位，这里回填换算后的度值
-        static_cast<GeoNumeric *>(made)->value = angleDeg;
+        // 真角对象跳过 value 落位，这里回填换算后的度值；isAngleVal 补回
+        // 角语义（1.0.6.6 弧度会话表达式层缩放判定用）
+        GeoNumeric *an = static_cast<GeoNumeric *>(made);
+        an->value = angleDeg;
+        an->isAngleVal = true;
     }
 }
 
@@ -9146,6 +9446,24 @@ bool Kernel::setXml(const std::string &xml, int *skippedOut)
             xmlElement(AttrVal(tagText, "type"), AttrVal(tagText, "label"), inner, &skipped);
         }
         // 其它标签：pos 已推进过该标签
+    }
+
+    // 1.0.6.6 滑条范围对象引用：构造重放完成后统一解析（引用对象可能定义
+    // 在滑条之后）。解析为数值对象当前值（静态快照；拖动引用对象不联动，
+    // 官方为动态求值——本版简化）；非数值类/未找到保留默认范围。解析后
+    // 重做上界守卫与值钳位
+    for (const auto &gp : geos_) {
+        GeoNumeric *num = dynamic_cast<GeoNumeric *>(gp.get());
+        if (!num || (num->sminRef.empty() && num->smaxRef.empty())) continue;
+        auto resolveBound = [&](const std::string &ref, double def, double &out) {
+            if (ref.empty()) return;
+            GeoNumeric *r = dynamic_cast<GeoNumeric *>(lookup(ref));
+            out = r ? r->value : def;
+        };
+        resolveBound(num->sminRef, num->smin, num->smin);
+        resolveBound(num->smaxRef, num->smax, num->smax);
+        if (!(num->smax > num->smin)) num->smax = num->smin + 5.0;
+        num->value = std::max(num->smin, std::min(num->smax, num->value));
     }
 
     if (skippedOut) *skippedOut = skipped;

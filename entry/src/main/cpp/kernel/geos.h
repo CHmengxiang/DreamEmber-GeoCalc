@@ -2,6 +2,7 @@
 #ifndef DREAMEMBER_KERNEL_GEOS_H
 #define DREAMEMBER_KERNEL_GEOS_H
 
+#include <cmath>
 #include <functional>
 #include <string>
 #include <vector>
@@ -182,6 +183,10 @@ public:
     // 1.0.6.4 布尔对象：定义式顶层为比较/逻辑（a>2、b∧c）的依随数值，
     // 值列显示 true/false（内部仍 1/0 存储，参与运算同数值）
     bool boolLike = false;
+    // 1.0.6.6 角度值标记：官方 radian 文件重放时表达式层的角值引用出
+    // 弧度（×π/180）而非内部度数。自由角从文件重建为普通数值对象
+    //（1.0.6.5），类型信息丢失，靠此标记补回角语义；GeoAngle 恒真
+    bool isAngleVal = false;
     std::function<double()> calc;   // 依随数值的重算闭包（级联删除保证不悬垂）
     std::string cmd;                // 依随时记录的命令原文（"Distance(A, B)"）
 
@@ -191,6 +196,10 @@ public:
     double sx = 40, sy = 40;        // 轨道左端位置（画布位图 px）
     bool animating = false;
     int animDir = 1;                // 动画方向（到端点折返）
+    // 1.0.6.6 滑条范围对象引用（官方 <slider min="b">）：读取期存原文，
+    // setXml 构造重放完成后统一解析为数值对象当前值（静态快照）并重钳位；
+    // 保存时原文回写。非空时对应数值侧不写死
+    std::string sminRef, smaxRef;
 
     // N6 积分填充（Integral(f,a,b) 产物）：渲染时在 [a,b] 画曲线与 x 轴之间
     // 的填充多边形；calc 重算时同步刷新 a/b（滑动条边界）
@@ -202,6 +211,8 @@ public:
     }
     std::string valueText() const override
     {
+        // 1.0.6.6 ∞：IEEE 除零/溢出与 ∞ 常量按官方显示（NAN 维持 "?"）
+        if (std::isinf(value)) return value > 0 ? "∞" : "-∞";
         return boolLike ? (value != 0.0 ? "true" : "false") : FormatNum(value);
     }
     std::string definitionText() const override
@@ -218,6 +229,7 @@ public:
     GeoAngle() : GeoNumeric(GeoType::Angle)
     {
         isFree = false;
+        isAngleVal = true;   // 角对象恒为角度值（1.0.6.6 弧度会话缩放判定）
         visible = true;   // 需要在画布画弧（数值类默认隐藏）
     }
     GeoPoint *va = nullptr, *vb = nullptr, *vc = nullptr;   // 顶点 vb
