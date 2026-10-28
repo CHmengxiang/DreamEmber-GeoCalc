@@ -29,7 +29,8 @@ static GeoElement *find(Kernel &k, const char *label)
 
 int main()
 {
-    // ① kernel 段：radian 文件 → 数值换算成度（π/2 rad = 90°）
+    // ① kernel 段：radian 标记读入（1.0.6.5 起 XML 数值无单位不换算，
+    // 数值原样 1.5707…；角才恒按弧度→度换算）
     {
         Kernel k;
         const char *xml =
@@ -44,7 +45,7 @@ int main()
         CHECK(skipped == 0);
         GeoNumeric *w = dynamic_cast<GeoNumeric *>(find(k, "w"));
         CHECK(w != nullptr);
-        if (w) CHECK(fabs(w->value - 90.0) < 1e-9);
+        if (w) CHECK(fabs(w->value - 1.5707963267948966) < 1e-9);
         CHECK(k.angleRadian);
     }
     // ② degree 文件（无 kernel 段）：数值原样
@@ -91,7 +92,7 @@ int main()
         // 步长吸附：value 落在 min + k*step 网格上
         CHECK(k.anyAnimating());
     }
-    // ④ 滑条步长吸附：值 70.4、step 0.5 → 70.5
+    // ④ 滑条加载不吸附（1.0.6.5 定案：文件值原样保留，吸附只在交互路径）
     {
         Kernel k;
         const char *xml =
@@ -103,7 +104,7 @@ int main()
             "</construction></geogebra>";
         CHECK(k.setXml(xml, nullptr));
         GeoNumeric *s = dynamic_cast<GeoNumeric *>(find(k, "s"));
-        if (s) CHECK(fabs(s->value - 70.5) < 1e-9);
+        if (s) CHECK(fabs(s->value - 70.4) < 1e-9);
     }
     // ⑤ 自由文本：caption + startPoint 世界坐标
     {
@@ -158,7 +159,7 @@ int main()
         CHECK(skipped == 1);
         CHECK(find(k, "text2") == nullptr);
     }
-    // ⑧ 自由角 element（度制文件）：值原样落位
+    // ⑧ 自由角 element：值恒存弧度（1.0.6.5 约定），读侧 ×180/π 落内部度数
     {
         Kernel k;
         const char *xml =
@@ -169,7 +170,7 @@ int main()
         CHECK(k.setXml(xml, &skipped));
         CHECK(skipped == 0);
         GeoNumeric *a = dynamic_cast<GeoNumeric *>(find(k, "α1"));
-        if (a) CHECK(fabs(a->value - 45.0) < 1e-12);
+        if (a) CHECK(fabs(a->value - 45.0 * 180.0 / 3.14159265358979323846) < 1e-6);
     }
     // ⑨ 弧度文件的自由角：π/4 → 45°
     {

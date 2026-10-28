@@ -45,6 +45,9 @@ public:
     // 带 Ref 求值：resolve(名字) 返回对象当前值；解析失败/无 resolver 时 Ref=NaN
     double evalResolved(double x,
                         const std::function<double(const std::string &)> &resolve) const;
+    // 两变量 + Ref 求值（1.0.7.1 链式不等式区域的滑条引用条件）
+    double evalXYResolved(double x, double y,
+                          const std::function<double(const std::string &)> &resolve) const;
     // 矩阵算术求值：resolve 按名回填标量/矩阵（查不到返回 false）。支持
     // 同型矩阵 + -、矩阵×矩阵（内维相符）、矩阵×标量（两侧）、矩阵÷标量、
     // 一元负、方阵非负整数次幂；函数实参遇矩阵或其余组合返回 false

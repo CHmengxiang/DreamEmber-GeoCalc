@@ -140,7 +140,8 @@ import { CanvasStage } from './CanvasStage';
 import { ToolsPanel } from './ToolsPanel';
 import { SheetPanel } from './SheetPanel';
 import { DataAnalysisPanel } from './DataPanel';
-import { TablePanel } from './TablePanel';
+import { TablePanel, genXs } from './TablePanel';
+import { RegPanel } from './RegPanel';
 import { CasPanel } from './CasPanel';
 import { BottomTabs, TABS, TabDef } from './BottomTabs';
 import { MathKeyboard, MathKbHooks, MATH_KB_HEIGHT, KB_WIDE_MAX_WIDTH } from './MathKeyboard';
@@ -202,6 +203,14 @@ export struct CanvasView {
   @State private tableMin: number = -2;
   @State private tableMax: number = 2;
   @State private tableStep: number = 1;
+  // 1.0.7.1 ①：代数列表重建代数——.ggb 载入/撤销重做/新建后 +1，行键后缀
+  // 随变 → List 全量重建。修复重载后只显示尾部分组+滚动失灵（同 label 复用
+  // 旧实例 + 同键 ForEach 复用旧 ListItem 的列表内部态错乱）
+  @State private algebraGen: number = 0;
+  // 1.0.7.1 ⑦：函数值表「显示点」列开关（列标签集；宿主持有跨 Tab 保留）
+  @State private tableShowPts: string[] = [];
+  // 1.0.7.1 ⑥：回归分析虚拟 Tab 的因变量列（数据区列头菜单打开时快照）
+  @State private regYCol: string = 'A';
   @State private isWide: boolean = false;        // 断点：≥640vp 宽屏双栏
   // 第二十一包①：宽屏左栏宽度（vp）——停靠面板右缘分隔条可拖宽（上游 桌面
   // dock 面板同款），拖拽起点快照供 onActionUpdate 增量换算
@@ -621,6 +630,8 @@ export struct CanvasView {
     dreamemberKernel.kernelSelect('');
     this.editingLabel = '';
     this.creating = false;
+    this.resetTablePoints();
+    this.algebraGen++;   // 1.0.7.1 ①：撤销/重做整体重建，代数列表全量重建
     this.pendingInput = '';
     this.mathCaret = 0;
     this.inputError = '';
@@ -1574,6 +1585,44 @@ export struct CanvasView {
     }
   }
 
+  // 1.0.7.1 ⑦：把「显示点」列集换成内核叠加层 spec（x 取值由表范围生成；
+  // y 由内核渲染时按对象现值求——函数重定义/拖动自动随动，无需宿主跟随）
+  private pushTablePoints(): void {
+    const parts: string[] = [];
+    if (this.tableShowPts.length > 0) {
+      const xs: number[] = genXs(this.tableMin, this.tableMax, this.tableStep);
+      const csv = xs.join(',');
+      for (const lb of this.tableShowPts) {
+        parts.push(lb + ':' + csv);
+      }
+    }
+    dreamemberKernel.kernelSetTablePoints(parts.join(';'));
+  }
+
+  private toggleTablePoint(label: string): void {
+    const next: string[] = [];
+    let had = false;
+    for (const lb of this.tableShowPts) {
+      if (lb === label) {
+        had = true;
+        continue;
+      }
+      next.push(lb);
+    }
+    if (!had) {
+      next.push(label);
+    }
+    this.tableShowPts = next;
+    this.pushTablePoints();
+    this.refresh();
+  }
+
+  // 1.0.7.1：构造整体重建（载入/撤销重做/新建）时清显示点开关与内核叠加层
+  private resetTablePoints(): void {
+    this.tableShowPts = [];
+    dreamemberKernel.kernelSetTablePoints('');
+  }
+
   private onResetViewEvt(): void {
     const frame = dreamemberKernel.kernelResetView();
     if (this.canvasW > 1 && this.canvasH > 1) {
@@ -1584,6 +1633,8 @@ export struct CanvasView {
   private onClearAllEvt(): void {
     this.stopAnimTicker();
     this.setTool('');
+    this.resetTablePoints();
+    this.algebraGen++;
     this.syncAlgebra(dreamemberKernel.kernelClearAll());
     this.selectedLabel = '';
     dreamemberKernel.kernelSelect('');
@@ -1651,6 +1702,8 @@ export struct CanvasView {
     dreamemberKernel.kernelSelect('');
     this.editingLabel = '';
     this.creating = false;
+    this.resetTablePoints();
+    this.algebraGen++;   // 1.0.7.1 ①：构造整体重建，代数列表全量重建
     let rows = r;
     let warn = '';
     if (r.startsWith('warn:')) {
@@ -3482,6 +3535,8 @@ export struct CanvasView {
       creating: $creating,
       pendingInput: $pendingInput,
       inputError: $inputError,
+      // 1.0.7.1 ①：重建代数——载入/撤销重做/新建 +1，行键全变 → List 重建
+      gen: this.algebraGen,
       // 二十九包②：滑动条行内编辑四项状态 + 活跃字段（面板内展开渲染）
       slideEditLabel: $slideEditLabel,
       slideEditMin: $slideEditMin,
@@ -3687,6 +3742,11 @@ export struct CanvasView {
           this.analysisRange = r;
           this.openTab('analysis');
         },
+        onShowRegression: (col: string): void => {
+          // 1.0.7.1 ⑥：列头菜单回归分析（当列 = Y）→ regression 虚拟 Tab
+          this.regYCol = col;
+          this.openTab('regression');
+        },
         onToggleKeyboard: (): void => this.togglePanelKeyboard(),
         // 三十六包：格内编辑会话期注册面板键盘处理束（顶层键盘分发用）
         onKbHooks: (h: MathKbHooks | null): void => {
@@ -3718,6 +3778,19 @@ export struct CanvasView {
         onBack: (): void => this.openTab('sheet'),
         onClose: (): void => this.setPanelVisible(false)
       })
+    } else if (this.panelTab === 'regression') {
+      // 1.0.7.1 ⑥：回归分析虚拟 Tab（二十三包积压：GGB 表头列菜单回归入口；
+      // 当列 = Y，X 列在面板内选。「分析并创建」经 onFit 走 kernelInput——
+      // 固定标签 regFit 重定义，重跑不留垃圾对象）
+      RegPanel({
+        algebra: $algebra,
+        dark: this.dark,
+        isWide: wide,
+        yCol: this.regYCol,
+        onFit: (expr: string): string => this.input(expr),
+        onBack: (): void => this.openTab('sheet'),
+        onClose: (): void => this.setPanelVisible(false)
+      })
     } else {
       // 'data'：表格（第二十三包①起为 上游 真·函数值表；此前为数据分析占位）
       TablePanel({
@@ -3732,7 +3805,13 @@ export struct CanvasView {
           this.tableMin = mn;
           this.tableMax = mx;
           this.tableStep = st;
+          // 1.0.7.1 ⑦：范围变了 → 显示点 x 序列重推
+          this.pushTablePoints();
+          this.refresh();
         },
+        // 1.0.7.1 ⑦：函数列「显示点」开关（列头点按；宿主持有跨 Tab 保留）
+        showPts: this.tableShowPts,
+        onTogglePoint: (l: string): void => this.toggleTablePoint(l),
         // 二十五包②：范围编辑合入自带键盘 + ⌨ 切换 + 实测垫高（数据区同机制）
         useSysKeyboard: this.useSysKeyboard,
         onToggleKeyboard: (): void => this.togglePanelKeyboard(),

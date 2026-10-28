@@ -623,6 +623,43 @@ napi_value KernelTableEval(napi_env env, napi_callback_info info)
                                           NapiToString(env, argv[1])));
 }
 
+// kernelObjValue(label): number — 数值对象当前值的原始双精度（1.0.7.1 数据区
+// 回归分析读单元格真值，绕开 FormatNum 显示精度损失）。非数值类/未找到返回 NaN
+napi_value KernelObjValue(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "kernelObjValue requires (label)");
+        return nullptr;
+    }
+    const std::string label = NapiToString(env, argv[0]);
+    double v = NAN;
+    if (dreamember::GeoNumeric *n =
+            dynamic_cast<dreamember::GeoNumeric *>(g_kernel.lookup(label))) {
+        v = n->value;
+    }
+    napi_value out = nullptr;
+    napi_create_double(env, v, &out);
+    return out;
+}
+
+// kernelSetTablePoints(spec): string — 函数值表「显示点」叠加层（1.0.7.1）。
+// spec = "f:0,1,2;g:0,1"（列标签:x 取值序列），空串清空；渲染按对象现值求 y
+napi_value KernelSetTablePoints(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "kernelSetTablePoints requires (spec)");
+        return nullptr;
+    }
+    g_kernel.setTablePoints(NapiToString(env, argv[0]));
+    return ToNapi(env, "ok");
+}
+
 // kernelPushUndo(): string — 宿主在连续手势（拖点/滑杆拖动）首次变更前打点
 napi_value KernelPushUndo(napi_env env, napi_callback_info)
 {
@@ -759,6 +796,8 @@ void DreamemberRegisterKernelApis(napi_env env, napi_value exports)
         { "kernelGetProps", nullptr, KernelGetProps, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelSetProp", nullptr, KernelSetProp, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelTableEval", nullptr, KernelTableEval, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelObjValue", nullptr, KernelObjValue, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelSetTablePoints", nullptr, KernelSetTablePoints, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelPushUndo", nullptr, KernelPushUndo, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelUndo", nullptr, KernelUndo, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelRedo", nullptr, KernelRedo, nullptr, nullptr, nullptr, napi_default, nullptr },

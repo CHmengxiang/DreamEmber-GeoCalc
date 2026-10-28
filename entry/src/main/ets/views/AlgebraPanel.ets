@@ -78,6 +78,10 @@ export struct AlgebraPanel {
   @Prop useSysKeyboard: boolean = false;
   @Prop isWide: boolean = false;
   @Prop showError: boolean = false;
+  // 1.0.7.1 ①：代数列表重建代数（宿主在 .ggb 载入/撤销重做/新建后 +1）——
+  // 行键后缀随之变化，ForEach/List 全量重建。修复重载同文件后「只显示尾部
+  // 分组+滚动失灵」：同 label 复用实例+同键复用 ListItem 的列表内部态错乱
+  @Prop gen: number = 0;
   // MathField 光标（自带键盘模式）与聚焦态
   @Prop mathCaret: number = 0;
   // 第十包②：光标框内/框外双态（框内小号上/下移，框外基线）
@@ -153,7 +157,7 @@ export struct AlgebraPanel {
       ? Theme.typeColor(eyeType, this.dark) : Theme.sub(this.dark);
     r.chevron = this.grpCollapsed.indexOf(key) >= 0 ? '▸' : '▾';
     r.key = 'H:' + key + ':' + r.count + ':' + (allVis ? 1 : 0)
-      + (r.chevron === '▸' ? 'c' : '');
+      + (r.chevron === '▸' ? 'c' : '') + ':' + this.gen;
     return r;
   }
 
@@ -183,7 +187,7 @@ export struct AlgebraPanel {
       for (const i of idxs) {
         const r = new AlgebraGrpRow();
         r.entry = this.algebra[i];
-        r.key = r.entry.label + '#' + (this.dark ? 'D' : 'L');
+        r.key = r.entry.label + '#' + (this.dark ? 'D' : 'L') + '#' + this.gen;
         rows.push(r);
       }
     }
@@ -199,7 +203,7 @@ export struct AlgebraPanel {
         for (const i of rest) {
           const r = new AlgebraGrpRow();
           r.entry = this.algebra[i];
-          r.key = r.entry.label + '#' + (this.dark ? 'D' : 'L');
+          r.key = r.entry.label + '#' + (this.dark ? 'D' : 'L') + '#' + this.gen;
           rows.push(r);
         }
       }

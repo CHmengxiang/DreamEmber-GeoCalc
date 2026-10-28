@@ -15,6 +15,7 @@ std::string ColorHex(const GeoColor &c)
 std::string FormatNum(double v)
 {
     if (!std::isfinite(v)) return "?";
+    if (v == 0.0) return "0";   // 归一 −0（度制会话浮点尾差出负零，官方显示 0）
     if (v == floor(v) && fabs(v) < 1e15) {
         char b[40];
         snprintf(b, sizeof(b), "%.0f", v);
@@ -280,13 +281,13 @@ std::string GeoCircle::definitionText() const
 
 std::string GeoFunction::valueText() const
 {
-    if (ineqOp) return src;   // 不等式：值列/定义列即原文（可回填重定义）
+    if (ineqOp || !ineqChain.empty()) return src;   // 不等式：值列/定义列即原文（可回填重定义）
     return label + "(x) = " + src;
 }
 
 std::string GeoFunction::definitionText() const
 {
-    if (ineqOp) return src;
+    if (ineqOp || !ineqChain.empty()) return src;
     return label + "(x) = " + src;
 }
 

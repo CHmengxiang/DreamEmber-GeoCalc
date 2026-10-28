@@ -1086,6 +1086,13 @@ double Expr::evalResolved(double x,
     return EvalNode(root_.get(), x, 0.0, x, &resolve);
 }
 
+double Expr::evalXYResolved(double x, double y,
+                            const std::function<double(const std::string &)> &resolve) const
+{
+    if (!root_) return NAN;
+    return EvalNode(root_.get(), x, y, 0.0, &resolve);
+}
+
 // ---------- 矩阵算术求值（1.0.6.2） ----------
 
 bool MatSameDims(const ExprVal &a, const ExprVal &b)

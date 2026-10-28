@@ -172,6 +172,12 @@ public:
     // ','。不可求值列（不等式/竖直线/未知对象）与非有限值一律输出空格串
     std::string tableEval(const std::string &labelsCsv, const std::string &xsCsv);
 
+    // 1.0.7.1 函数值表「显示点」叠加层：spec = "f:0,1,2;g:0,1"（列标签:x
+    // 取值序列），空串清空。视图层状态——不入 XML、不进构造、不可拾取；
+    // 渲染时按对象当前定义求 y（重定义/拖动随动），非函数/直线列与非有限
+    // y 跳过。setXml/clearAll 重建构造时一并清空
+    void setTablePoints(const std::string &spec);
+
     // label → 元素查找（找不到 nullptr）
     GeoElement *lookup(const std::string &label) const;
     GeoPoint *lookupPoint(const std::string &label) const;
@@ -233,6 +239,12 @@ private:
 
     std::string nextLabelFor(GeoType t);
     void recomputeAll();
+    // 1.0.7.1 滑条范围对象引用动态联动：重算后按 sminRef/smaxRef 引用对象
+    // 当前值刷新范围并钳位；值有变时依赖者再跑一遍级联（封顶 4 防互引震荡）
+    void refreshSliderRefBounds();
+    // 函数值表叠加点列（列标签 → x 取值序列，世界坐标）
+    std::vector<std::pair<std::string, std::vector<double>>> tablePtCols_;
+    void appendTablePoints(std::vector<DrawCmd> &out) const;
     // 级联删除：把引用 dead 的依赖者一并移除（循环直到无人引用）
     void cascadeErase(GeoElement *dead);
     // 添加对象并重算

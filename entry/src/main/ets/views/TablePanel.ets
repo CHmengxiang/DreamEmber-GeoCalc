@@ -22,8 +22,9 @@ import dreamemberKernel from 'libdreamember.so';
 
 const MAX_ROWS: number = 200;   // 上游 TableValuesView.MAX_ROWS
 
-// 上游 updateValuesFromRange 原算法（ArkTS 版，累加值 1e-10 取整去浮点尾噪）
-function genXs(min: number, max: number, step: number): number[] {
+// 上游 updateValuesFromRange 原算法（ArkTS 版，累加值 1e-10 取整去浮点尾噪）。
+// 1.0.7.1 ⑦：CanvasView 复用（「显示点」叠加层的 x 序列同范围生成）
+export function genXs(min: number, max: number, step: number): number[] {
   if (min === 0 && max === 0 && step === 0) {
     return [];
   }
@@ -90,6 +91,10 @@ export struct TablePanel {
   // null=会话结束注销）
   onKbHooks: (h: MathKbHooks | null) => void = (_h: MathKbHooks | null) => {};
   onEditArea: (n: Area) => void = (_n: Area) => {};
+  // 1.0.7.1 ⑦：函数列「显示点」开关（宿主持有跨 Tab 保留；列头点按切换，
+  // 内核按表范围 x 序列 + 对象现值渲染叠加点）
+  @Prop showPts: string[] = [];
+  onTogglePoint: (label: string) => void = (_l: string) => {};
   @State private editingRange: boolean = false;
   @State private rangeErr: string = '';
   @State private minText: string = '-2';
@@ -291,6 +296,21 @@ export struct TablePanel {
     return ['x', ...this.cols];
   }
 
+  // 1.0.7.1 ⑦：列头文案（函数列开显示点加 '●' 后缀）与键（含开关态，
+  // 切换即重建刷新）
+  private headerLabel(c: string, i: number): string {
+    if (i === 0) {
+      return c;
+    }
+    const on = this.showPts.indexOf(this.cols[i - 1]) >= 0;
+    return on ? c + ' ●' : c;
+  }
+
+  private headerKey(c: string, i: number): string {
+    const on = i > 0 && this.showPts.indexOf(this.cols[i - 1]) >= 0;
+    return `${i}#${c}#${on ? 1 : 0}#${this.dark ? 'D' : 'L'}`;
+  }
+
   build() {
     Column() {
       Row() {
@@ -417,10 +437,11 @@ export struct TablePanel {
           .padding({ left: 12, right: 12, top: 2 })
       }
 
-  // 表头（x + 各函数列；键含列名与主题，改名/换色即重建）
+  // 表头（x + 各函数列；键含列名/主题/显示点态）。1.0.7.1 ⑦：函数列点按
+  // 切换「显示点」（GGB 列头菜单 Show Points 同义，v1 直点简化）
   Row() {
         ForEach(this.headerCells(), (c: string, i: number) => {
-          Text(c)
+          Text(this.headerLabel(c, i))
             .fontSize(11)
             .fontWeight(FontWeight.Medium)
             .fontColor(this.dark ? '#A8ADB5' : '#6E6D73')
@@ -430,9 +451,22 @@ export struct TablePanel {
             .padding({ left: 6, right: 6 })
             .layoutWeight(i === 0 ? 1 : 2)
             .backgroundColor(this.dark ? '#26292D' : '#F3F2F7')
-        }, (c: string, i: number) => `${i}#${c}#${this.dark ? 'D' : 'L'}`)
+            .onClick(() => {
+              if (i > 0) {
+                this.onTogglePoint(this.cols[i - 1]);
+              }
+            })
+        }, (c: string, i: number) => this.headerKey(c, i))
       }
       .width('100%')
+
+      if (this.cols.length > 0) {
+        Text('点函数列头开/关绘图区取值点（● = 显示中）')
+          .fontSize(10)
+          .fontColor(Theme.faint(this.dark))
+          .width('100%')
+          .padding({ left: 8, right: 8, top: 2 })
+      }
 
       if (this.cols.length === 0) {
         Text('在代数区输入函数（如 f(x)=2x+1）或直线后，这里显示对应数值表')

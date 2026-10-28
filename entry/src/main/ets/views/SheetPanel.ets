@@ -86,6 +86,8 @@ export struct SheetPanel {
   // 参数 = 选区数值序列（逗号分隔）与来源描述（如 "B1:B8 · 6 个数值"）
   onShowAnalysis: (values: string, range: string) => void =
     (_v: string, _r: string) => {};
+  // 1.0.7.1 ⑥：列头菜单回归分析入口（当列 = Y；上游 列菜单回归分析同位）
+  onShowRegression: (col: string) => void = (_c: string) => {};
   // 二十四包②：头部 ⌨（切系统/自带键盘）与格内编辑态上报（宿主垫高）
   onToggleKeyboard: () => void = () => {};
   onEditFocus: (focused: boolean) => void = (_f: boolean) => {};
@@ -264,15 +266,9 @@ export struct SheetPanel {
     this.inputError = '';
   }
 
-  // 第二十三包②：收集选中列的数值（上游 DataSource 快照选区同义；本表
-  // 为单格选中，取该列全部非空数值格——上游 要求多格选区，此处按列下探
-  // 是单格选择下的等价入口）。无数值时提示；有则回调宿主开分析面板
-  private startAnalysis(): void {
-    if (this.selCell.length === 0) {
-      this.inputError = '先选中一个单元格，再点分析（收集该列数值）';
-      return;
-    }
-    const col = this.selCell.substring(0, 1);
+  // 1.0.7.1 ⑥：收集指定列全部非空数值格（原 startAnalysis 主体按列参数
+  // 泛化——列头菜单对任意列发起，不依赖选中格）
+  private collectColumn(col: string): void {
     const nums: number[] = [];
     let first = 0;
     let last = 0;
@@ -294,6 +290,22 @@ export struct SheetPanel {
     this.inputError = '';
     const range = `${col}${first}:${col}${last} · ${nums.length} 个数值`;
     this.onShowAnalysis(nums.join(','), range);
+  }
+
+  // 第二十三包②：单变量分析入口（选中格所在列；上游 DataSource 快照选区
+  // 同义——本表单格选中，按列下探是等价入口）
+  private startAnalysis(): void {
+    if (this.selCell.length === 0) {
+      this.inputError = '先选中一个单元格，再点分析（收集该列数值）';
+      return;
+    }
+    this.collectColumn(this.selCell.substring(0, 1));
+  }
+
+  // 1.0.7.1 ⑥：列头菜单入口（当列 = 回归因变量 Y）
+  private startRegressionCol(col: string): void {
+    this.inputError = '';
+    this.onShowRegression(col);
   }
 
   // ---- 二十四包②：自带键盘（挂格内编辑器 customKeyboard，AlgebraPanel 同款）----
@@ -346,7 +358,8 @@ export struct SheetPanel {
     this.kbInsert('', 1, '');
   }
 
-  // 列头字母（A..H 字面渲染——内层列 ForEach 有真机丢项前科，见文件头）
+  // 列头字母（A..H 字面渲染——内层列 ForEach 有真机丢项前科，见文件头）。
+  // 1.0.7.1 ⑥：点列头弹菜单（GGB 列头菜单同位）——单变量分析/回归分析
   @Builder
   private colHdr(letter: string) {
     Text(letter)
@@ -357,6 +370,16 @@ export struct SheetPanel {
       .layoutWeight(1)
       .height(22)
       .backgroundColor(this.colSelected(letter) ? selHdrBg(this.dark) : hdrBg(this.dark))
+      .bindMenu([
+        {
+          value: '单变量分析',
+          action: (): void => this.collectColumn(letter)
+        },
+        {
+          value: '回归分析…',
+          action: (): void => this.startRegressionCol(letter)
+        }
+      ])
   }
 
   // 数据格：内容 + 选中底色 + 格内编辑器（编辑该格时 TextInput 覆叠，

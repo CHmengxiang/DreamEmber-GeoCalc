@@ -162,6 +162,16 @@ public:
     // L/R 为含 x、y 的表达式，body/ineqVertical 均不使用
     bool ineqTwoVar = false;
     Expr ineqL, ineqR;
+    // 1.0.7.1 链式不等式（a<x<b 官方语义 = 各段条件的 AND 区域）：每段
+    // v_k op v_{k+1} 归一化为 s = L−R 的符号条件，lt=true 区域在 s<0 侧；
+    // 渲染 g = max(各段归一化值) < 0（连续，复用两变量列扫描机制）。非空时
+    // ineqOp/ineqVertical/ineqTwoVar 均不使用
+    struct IneqCond {
+        Expr l, r;
+        bool lt = true;      // true: s<0 在区域内（op 为 < / ≤）
+        bool strict = true;  // 严格不等（< / >）：边界虚线
+    };
+    std::vector<IneqCond> ineqChain;
     // 区域填充透明度（0-1，代数区选中行滑杆可调；真机反馈默认太实 0.18 → 0.10）。
     // 持久化复用 上游 <objColor alpha>（仅不等式元素写入；载入 alpha=0 视为旧版占位回默认）
     double fillAlpha = 0.10;

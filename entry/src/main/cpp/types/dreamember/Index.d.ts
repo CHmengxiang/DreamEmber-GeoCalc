@@ -55,6 +55,12 @@ export const kernelSetProp: (label: string, key: string, value: string) => strin
 // 有限值输出空格串
 export const kernelTableEval: (labels: string, xs: string) => string;
 
+// 1.0.7.1 数值对象原始双精度取值（回归分析读单元格真值）；非数值类返回 NaN
+export const kernelObjValue: (label: string) => number;
+// 1.0.7.1 函数值表「显示点」叠加层：spec = "f:0,1,2;g:0,1"（列标签:x 序列），
+// 空串清空；渲染按对象当前定义求 y，重定义/拖动随动
+export const kernelSetTablePoints: (spec: string) => string;
+
 // 轮 B 撤销/重做：内核 XML 快照栈（容量 50）。离散变更（输入/重定义/删除/
 // 改名/显隐/清空/工具作图）内核自动打点；连续手势（拖点/滑杆拖动/透明度
 // 拖动）由宿主在首次变更前调 kernelPushUndo
