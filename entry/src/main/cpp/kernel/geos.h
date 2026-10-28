@@ -172,6 +172,12 @@ public:
         bool strict = true;  // 严格不等（< / >）：边界虚线
     };
     std::vector<IneqCond> ineqChain;
+    // 1.0.7.2 ∧/∨ 组合区域：DNF 句列表——句内条件 AND（与链式同构）、句间
+    // OR（并集）。渲染 g=min(句内 max(归一化值))<0 复用两变量列扫描；非空时
+    // ineqChain/ineqOp/ineqVertical/ineqTwoVar 均不使用
+    std::vector<std::vector<IneqCond>> ineqDNF;
+    // 链式/组合区域判据（ineqOp 之外）：1.0.7.1 链式 + 1.0.7.2 ∧/∨ 组合
+    bool ineqCombo() const { return !ineqChain.empty() || !ineqDNF.empty(); }
     // 区域填充透明度（0-1，代数区选中行滑杆可调；真机反馈默认太实 0.18 → 0.10）。
     // 持久化复用 上游 <objColor alpha>（仅不等式元素写入；载入 alpha=0 视为旧版占位回默认）
     double fillAlpha = 0.10;

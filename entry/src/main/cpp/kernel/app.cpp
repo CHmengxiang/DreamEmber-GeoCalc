@@ -188,7 +188,8 @@ bool IsPathType(GeoElement *e)
     }
     if (t == GeoType::Function) {
         GeoFunction *f = static_cast<GeoFunction *>(e);
-        return !f->ineqOp && !f->ineqTwoVar && f->ineqChain.empty() && f->definable();
+        return !f->ineqOp && !f->ineqTwoVar && f->ineqChain.empty()
+            && f->ineqDNF.empty() && f->definable();
     }
     return false;
 }
@@ -440,6 +441,228 @@ static bool IsAngleValue(const GeoElement *g)
 {
     const GeoNumeric *n = dynamic_cast<const GeoNumeric *>(g);
     return n != nullptr && n->isAngleVal;
+}
+
+// —— 1.0.7.2 ∧/∨ 组合区域（文本级 DNF）——
+// 顶层比较符扫描（引号外；≤≥ 按 E2 89 A4/A5 归并为带 eq 的 < >）。
+// 1.0.7.1 链式切段与组合区域原子切段共用
+struct TextCmpSeg {
+    size_t pos;   // 算符起始字节
+    char op;      // '<' / '>'
+    bool eq;      // ≤/≥/<=/>=
+    size_t len;   // 算符字节数
+};
+
+static std::vector<TextCmpSeg> ScanTextCmp(const std::string &s)
+{
+    std::vector<TextCmpSeg> segs;
+    bool inStr = false;
+    for (size_t i = 0; i < s.size();) {
+        const char c = s[i];
+        if (c == '"') { inStr = !inStr; ++i; continue; }
+        if (!inStr && (unsigned char)c == 0xE2 && i + 2 < s.size()
+            && (unsigned char)s[i + 1] == 0x89) {
+            // Unicode ≤（E2 89 A4）/ ≥（E2 89 A5）：键盘键字符，闭边界
+            const unsigned char tail = (unsigned char)s[i + 2];
+            if (tail == 0xA4 || tail == 0xA5) {
+                segs.push_back({ i, tail == 0xA4 ? '<' : '>', true, 3 });
+                i += 3;
+                continue;
+            }
+        }
+        if (inStr || (c != '<' && c != '>')) { ++i; continue; }
+        const bool eq = i + 1 < s.size() && s[i + 1] == '=';
+        segs.push_back({ i, c, eq, eq ? (size_t)2 : (size_t)1 });
+        i += eq ? 2 : 1;
+    }
+    return segs;
+}
+
+// 顶层逻辑连词扫描（引号外、括号深度 0）：∧（E2 88 A7 / & / &&）、
+// ∨（E2 88 A8 / ||）。单 | 非连词（绝对值条不受扰），单 & 同 ∧
+struct TextConnTok { size_t pos; bool isOr; size_t len; };
+
+static std::vector<TextConnTok> ScanTextConn(const std::string &s)
+{
+    std::vector<TextConnTok> toks;
+    bool inStr = false;
+    int depth = 0;
+    for (size_t i = 0; i < s.size();) {
+        const char c = s[i];
+        if (c == '"') { inStr = !inStr; ++i; continue; }
+        if (!inStr && (c == '(' || c == '[' || c == '{')) { ++depth; ++i; continue; }
+        if (!inStr && (c == ')' || c == ']' || c == '}')) { if (depth > 0) --depth; ++i; continue; }
+        if (inStr || depth != 0) { ++i; continue; }
+        if ((unsigned char)c == 0xE2 && i + 2 < s.size() && (unsigned char)s[i + 1] == 0x88
+            && ((unsigned char)s[i + 2] == 0xA7 || (unsigned char)s[i + 2] == 0xA8)) {
+            toks.push_back({ i, (unsigned char)s[i + 2] == 0xA8, 3 });
+            i += 3;
+            continue;
+        }
+        if (c == '&') {
+            const bool two = i + 1 < s.size() && s[i + 1] == '&';
+            toks.push_back({ i, false, two ? (size_t)2 : (size_t)1 });
+            i += two ? 2 : 1;
+            continue;
+        }
+        if (c == '|' && i + 1 < s.size() && s[i + 1] == '|') {
+            toks.push_back({ i, true, 2 });
+            i += 2;
+            continue;
+        }
+        ++i;
+    }
+    return toks;
+}
+
+// 整体括号剥壳：'(x>1)∧(x<5)' 原子、'((1<x<3))' 链式外壳（引号感知；
+// 顺带去两端空白）
+static void StripOuterParens(std::string &t)
+{
+    for (;;) {
+        const size_t b = t.find_first_not_of(" \t");
+        if (b == std::string::npos) return;
+        const size_t e = t.find_last_not_of(" \t");
+        const std::string s = t.substr(b, e - b + 1);
+        if (s.size() < 2 || s.front() != '(' || s.back() != ')') { t = s; return; }
+        int d = 0;
+        bool wrapped = false;
+        bool inQ = false;
+        for (size_t i = 0; i < s.size(); ++i) {
+            const char c = s[i];
+            if (c == '"') inQ = !inQ;
+            else if (!inQ && c == '(') ++d;
+            else if (!inQ && c == ')') { --d; if (d == 0) { wrapped = i == s.size() - 1; break; } }
+        }
+        if (!wrapped) { t = s; return; }
+        t = s.substr(1, s.size() - 2);
+    }
+}
+
+// 组合式规范化到 DNF：句内条件 AND（链式切段同构），句间 OR。∨ 优先级
+// 低于 ∧（1.0.6.4 语义）→ 先按顶层 ∨ 分句、句内按顶层 ∧ 摊平、原子剥壳
+// 后按比较段建条件；∧∨ 交叉嵌套按分配律展开（句数封顶 32 防失控）。
+// false 时 err 给出文案
+static bool NormIneqDnf(const std::string &t0,
+                        std::vector<std::vector<GeoFunction::IneqCond>> &cls,
+                        int depth, std::string &err)
+{
+    if (depth > 12) { err = "组合区域嵌套过深"; return false; }
+    std::string t = t0;
+    StripOuterParens(t);
+    if (t.empty()) { err = "组合区域条件为空"; return false; }
+    const std::vector<TextConnTok> toks = ScanTextConn(t);
+    auto splitTop = [&](bool wantOr) {
+        std::vector<std::string> parts;
+        size_t start = 0;
+        bool any = false;
+        for (const TextConnTok &tk : toks) {
+            if (tk.isOr != wantOr) continue;
+            any = true;
+            parts.push_back(t.substr(start, tk.pos - start));
+            start = tk.pos + tk.len;
+        }
+        if (any) parts.push_back(t.substr(start));
+        return parts;
+    };
+    const std::vector<std::string> orParts = splitTop(true);
+    if (orParts.size() >= 2) {
+        for (const std::string &p : orParts) {
+            std::vector<std::vector<GeoFunction::IneqCond>> sub;
+            if (!NormIneqDnf(p, sub, depth + 1, err)) return false;
+            cls.insert(cls.end(), std::make_move_iterator(sub.begin()),
+                       std::make_move_iterator(sub.end()));
+        }
+        return true;
+    }
+    const std::vector<std::string> andParts = splitTop(false);
+    if (andParts.size() >= 2) {
+        std::vector<std::vector<GeoFunction::IneqCond>> acc(1);
+        for (const std::string &p : andParts) {
+            std::vector<std::vector<GeoFunction::IneqCond>> sub;
+            if (!NormIneqDnf(p, sub, depth + 1, err)) return false;
+            std::vector<std::vector<GeoFunction::IneqCond>> next;
+            for (std::vector<GeoFunction::IneqCond> &c1 : acc) {
+                for (std::vector<GeoFunction::IneqCond> &c2 : sub) {
+                    std::vector<GeoFunction::IneqCond> m = c1;
+                    m.insert(m.end(), c2.begin(), c2.end());
+                    next.push_back(std::move(m));
+                }
+            }
+            if (next.size() > 32) { err = "组合区域过复杂（∧∨ 嵌套分配）"; return false; }
+            acc = std::move(next);
+        }
+        cls = std::move(acc);
+        return true;
+    }
+    // 原子：比较式（含链式切段）——所有比较段条件并入一条句
+    const std::vector<TextCmpSeg> segs = ScanTextCmp(t);
+    if (segs.empty()) {
+        err = "组合区域条件须为比较式（如 x>1∧x<5、x<0∨x>1）";
+        return false;
+    }
+    std::vector<std::string> operands;
+    size_t start = 0;
+    for (const TextCmpSeg &sg : segs) {
+        operands.push_back(t.substr(start, sg.pos - start));
+        start = sg.pos + sg.len;
+    }
+    operands.push_back(t.substr(start));
+    std::vector<GeoFunction::IneqCond> clause;
+    for (size_t k = 0; k + 1 < operands.size(); ++k) {
+        Expr el, er;
+        std::string e1, e2;
+        if (!el.parse(operands[k], e1, std::string(), true)
+            || !er.parse(operands[k + 1], e2, std::string(), true)
+            || el.isBoolLike() || er.isBoolLike()) {
+            err = "组合区域条件须为比较式（如 x>1∧x<5、x<0∨x>1）";
+            return false;
+        }
+        GeoFunction::IneqCond c;
+        c.l = std::move(el);
+        c.r = std::move(er);
+        c.lt = segs[k].op == '<';
+        c.strict = !segs[k].eq;
+        clause.push_back(std::move(c));
+    }
+    cls.push_back(std::move(clause));
+    return true;
+}
+
+// 组合/链式区域符号函数 g（<0 在区域内）：句内条件归一化取 max（AND），
+// 句间取 min（OR，并集）。max/min 连续，g 的符号翻转即区域边界——两变量
+// 列扫描渲染机制不变。ineqChain 单句（1.0.7.1 链式）同构特例。引用对象
+//（滑条）按 resolver 现值解析，随拖动联动
+static double IneqComboG(const GeoFunction &f, double wx, double wy,
+                         const std::function<double(const std::string &)> &resolver)
+{
+    auto condVal = [&](const GeoFunction::IneqCond &c) -> double {
+        const double s = c.l.evalXYResolved(wx, wy, resolver)
+                       - c.r.evalXYResolved(wx, wy, resolver);
+        return c.lt ? s : -s;
+    };
+    if (f.ineqDNF.empty()) {
+        double g = NAN;
+        for (const GeoFunction::IneqCond &c : f.ineqChain) {
+            const double s = condVal(c);
+            if (!std::isfinite(s)) return NAN;
+            g = std::isnan(g) ? s : std::max(g, s);
+        }
+        return g;
+    }
+    double g = NAN;
+    for (const std::vector<GeoFunction::IneqCond> &cl : f.ineqDNF) {
+        double h = NAN;
+        bool fin = true;
+        for (const GeoFunction::IneqCond &c : cl) {
+            const double s = condVal(c);
+            if (!std::isfinite(s)) { fin = false; break; }
+            h = std::isnan(h) ? s : std::max(h, s);
+        }
+        if (!fin) continue;   // 未定义句按不满足处理（OR 下不吞噬其余句）
+        g = std::isnan(g) ? h : std::min(g, h);
+    }
+    return g;
 }
 
 bool Kernel::input(const std::string &srcRaw)
@@ -759,36 +982,14 @@ bool Kernel::inputImpl(const std::string &srcRaw)
     // 1.0.7.1 链式：顶层比较段全收集——≥2 段按 a op1 b op2 c 官方语义建
     // AND 区域（各段条件取交），单段走既有路径
     if (!made) {
-        struct CmpSeg {
-            size_t pos;   // 算符起始字节
-            char op;      // '<' / '>'（≤/≥ 归并为带 eq 的 < / >）
-            bool eq;
-            size_t len;   // 算符字节数（ASCII 1 或 2；Unicode ≤/≥ 为 3）
-        };
-        std::vector<CmpSeg> cmpSegs;
-        {
-        bool inStr = false;
-        for (size_t i = 0; i < rhs.size();) {
-            const char c = rhs[i];
-            if (c == '"') { inStr = !inStr; ++i; continue; }
-            if (!inStr && (unsigned char)c == 0xE2 && i + 2 < rhs.size()
-                && (unsigned char)rhs[i + 1] == 0x89) {
-                // Unicode ≤（E2 89 A4）/ ≥（E2 89 A5）：上游 键盘键，按
-                // 闭边界 <= / >= 处理（op 2/4 的着色语义早已存在）
-                const unsigned char tail = (unsigned char)rhs[i + 2];
-                if (tail == 0xA4 || tail == 0xA5) {
-                    cmpSegs.push_back({ i, tail == 0xA4 ? '<' : '>', true, 3 });
-                    i += 3;
-                    continue;
-                }
-            }
-            if (inStr || (c != '<' && c != '>')) { ++i; continue; }
-            const bool eq = i + 1 < rhs.size() && rhs[i + 1] == '=';
-            cmpSegs.push_back({ i, c, eq, eq ? (size_t)2 : (size_t)1 });
-            i += eq ? 2 : 1;
-        }
-        }
-        const bool chained = cmpSegs.size() >= 2;
+        const std::vector<TextCmpSeg> cmpSegs = ScanTextCmp(rhs);
+        // 链式/组合切段用剥壳视图（'((1<x<3))'、'(x>1)∧(x<5)' 类外壳不参与
+        // 切段；单段路径仍按原文坐标切）；src 恒存原文
+        std::string core = rhs;
+        StripOuterParens(core);
+        const std::vector<TextCmpSeg> coreCmp = ScanTextCmp(core);
+        const std::vector<TextConnTok> connToks = ScanTextConn(core);
+        const bool chained = coreCmp.size() >= 2;
         const size_t cpos = cmpSegs.empty() ? std::string::npos : cmpSegs[0].pos;
         const char cop = cmpSegs.empty() ? 0 : cmpSegs[0].op;
         const bool cEq = cmpSegs.empty() ? false : cmpSegs[0].eq;
@@ -806,21 +1007,35 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                 isRegion = false;
             }
         }
-        if (isRegion && chained) {
+        if (isRegion && !connToks.empty()) {
+            // 1.0.7.2 ∧/∨ 组合区域：文本级 DNF——句内 AND（链式同构）、句间
+            // OR（并集）。单句退化写 ineqChain（下游零改动），多句写 ineqDNF
+            //（渲染 g=min(句内 max)<0，列扫描机制不变）
+            auto f2 = std::make_unique<GeoFunction>();
+            f2->src = rhs;
+            std::vector<std::vector<GeoFunction::IneqCond>> cls;
+            std::string nerr;
+            if (!NormIneqDnf(rhs, cls, 0, nerr)) {
+                lastError = nerr;
+                return false;
+            }
+            if (cls.size() == 1) f2->ineqChain = std::move(cls[0]);
+            else f2->ineqDNF = std::move(cls);
+            made = std::move(f2);
+        } else if (isRegion && chained) {
             // 1.0.7.1 链式不等式 a op1 b op2 c：官方语义 = (a op1 b)∧(b op2 c)
             // 的 AND 区域。每段归一化为 s=L−R 符号条件（lt=true 区域在 s<0 侧），
-            // 渲染 g=max(归一化值)<0 走两变量列扫描。操作数须为纯算术式——
-            // 含顶层比较/逻辑（x>1∧x<5 组合区域）拒绝，另批；refs 模式解析
-            //（滑条引用 a<x<b 随拖动联动，渲染端按对象现值求值）
+            // 渲染 g=max(归一化值)<0 走两变量列扫描。操作数须为纯算术式；
+            // refs 模式解析（滑条引用 a<x<b 随拖动联动，渲染端按对象现值求值）
             auto f2 = std::make_unique<GeoFunction>();
             f2->src = rhs;
             size_t start = 0;
             std::vector<std::string> operands;
-            for (const CmpSeg &sg : cmpSegs) {
-                operands.push_back(rhs.substr(start, sg.pos - start));
+            for (const TextCmpSeg &sg : coreCmp) {
+                operands.push_back(core.substr(start, sg.pos - start));
                 start = sg.pos + sg.len;
             }
-            operands.push_back(rhs.substr(start));
+            operands.push_back(core.substr(start));
             bool ok = operands.size() == cmpSegs.size() + 1;
             for (size_t k = 0; ok && k + 1 < operands.size(); ++k) {
                 Expr el, er;
@@ -839,7 +1054,7 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                 f2->ineqChain.push_back(std::move(c));
             }
             if (!ok) {
-                lastError = "暂不支持链式不等式（如 a<x<b；∧/∨ 组合区域另批）";
+                lastError = "暂不支持链式不等式（各段须为算术式，如 a<x<b）";
                 return false;
             }
             made = std::move(f2);
@@ -5660,7 +5875,8 @@ GeoPoint *Kernel::lookupPoint(const std::string &label) const
 GeoFunction *Kernel::resolveFunctionArg(const std::string &arg)
 {
     if (GeoFunction *f = dynamic_cast<GeoFunction *>(lookup(arg))) {
-        if (!f->ineqOp && !f->ineqTwoVar && f->ineqChain.empty() && f->definable()) {
+        if (!f->ineqOp && !f->ineqTwoVar && f->ineqChain.empty()
+            && f->ineqDNF.empty() && f->definable()) {
             return f;
         }
         lastError = "函数实参须为可绘函数（不等式/区域不可）: " + arg;
@@ -5829,7 +6045,7 @@ void Kernel::appendTablePoints(std::vector<DrawCmd> &out) const
         if (!e || !e->visible) continue;
         const GeoFunction *fn = dynamic_cast<GeoFunction *>(e);
         const GeoLine *ln = dynamic_cast<GeoLine *>(e);
-        if (fn && (fn->ineqOp || !fn->ineqChain.empty())) continue;
+        if (fn && (fn->ineqOp || fn->ineqCombo())) continue;
         if (!fn && (!ln || ln->verticalConst)) continue;
         const std::string base = ObjectColor(e->color, darkTheme);
         for (double x : col.second) {
@@ -5916,7 +6132,7 @@ void Kernel::algebraRows(std::vector<AlgebraRow> &out) const
         r.selected = g->selected;
         if (g->type() == GeoType::Function) {
             GeoFunction *fn = static_cast<GeoFunction *>(g.get());
-            if (fn->ineqOp || !fn->ineqChain.empty()) {
+            if (fn->ineqOp || fn->ineqCombo()) {
                 r.fillAlphaPct = (int)std::lround(fn->fillAlpha * 100.0);
             }
         } else if (g->type() == GeoType::Polygon) {
@@ -6305,7 +6521,7 @@ GeoElement *Kernel::pickObject(double px, double py)
         } else if (t == GeoType::Function) {
             GeoFunction *f = static_cast<GeoFunction *>(g.get());
             d = 1e18;
-            if (f->ineqOp || !f->ineqChain.empty()) {
+            if (f->ineqOp || f->ineqCombo()) {
                 // 区域拾取：触点满足不等式即命中（权重 6px，边界上的其他对象优先）
                 const double wxx = view.wx(px), wyy = view.wy(py);
                 bool inside = false;
@@ -6313,22 +6529,14 @@ GeoElement *Kernel::pickObject(double px, double py)
                     const double s = f->ineqL.evalXY(wxx, wyy) - f->ineqR.evalXY(wxx, wyy);
                     inside = std::isfinite(s)
                         && ((f->ineqOp == 1 || f->ineqOp == 2) ? s < 0.0 : s > 0.0);
-                } else if (!f->ineqChain.empty()) {
-                    // 1.0.7.1 链式区域拾取：与渲染同口径 g=max(归一化值)<0
+                } else if (f->ineqCombo()) {
+                    // 1.0.7.1 链式 + 1.0.7.2 ∧/∨ 组合拾取：与渲染同口径 g<0
                     auto resolver = [this](const std::string &nm) -> double {
                         GeoNumeric *n = dynamic_cast<GeoNumeric *>(lookup(nm));
                         return n ? n->value : NAN;
                     };
-                    double g = NAN;
-                    bool fin = true;
-                    for (const GeoFunction::IneqCond &c : f->ineqChain) {
-                        double s = c.l.evalXYResolved(wxx, wyy, resolver)
-                                 - c.r.evalXYResolved(wxx, wyy, resolver);
-                        if (!c.lt) s = -s;
-                        if (!std::isfinite(s)) { fin = false; break; }
-                        g = std::isnan(g) ? s : std::max(g, s);
-                    }
-                    inside = fin && std::isfinite(g) && g < 0.0;
+                    const double g = IneqComboG(*f, wxx, wyy, resolver);
+                    inside = std::isfinite(g) && g < 0.0;
                 } else if (f->ineqVertical) {
                     inside = (f->ineqOp == 3 || f->ineqOp == 4) ? wxx > f->ineqX : wxx < f->ineqX;
                 } else {
@@ -6487,7 +6695,7 @@ std::string Kernel::propsOf(const std::string &label) const
     }
     if (g->type() == GeoType::Function) {
         GeoFunction *f = static_cast<GeoFunction *>(g);
-        if (f->ineqOp || !f->ineqChain.empty()) {
+        if (f->ineqOp || f->ineqCombo()) {
             add("fill", std::to_string((int)std::lround(f->fillAlpha * 100.0)));
         }
     } else if (g->type() == GeoType::Polygon) {
@@ -6540,7 +6748,8 @@ std::string Kernel::tableEval(const std::string &labelsCsv, const std::string &x
             double v = std::numeric_limits<double>::quiet_NaN();
             GeoElement *g = lookup(lb);
             GeoFunction *f = dynamic_cast<GeoFunction *>(g);
-            if (f && !f->ineqOp && !f->ineqTwoVar && f->ineqChain.empty() && f->definable()) {
+            if (f && !f->ineqOp && !f->ineqTwoVar && f->ineqChain.empty()
+                && f->ineqDNF.empty() && f->definable()) {
                 v = f->evalAt(x);
             } else if (GeoLine *l = dynamic_cast<GeoLine *>(g)) {
                 if (fabs(l->b) > 1e-15) {
@@ -6575,7 +6784,7 @@ bool Kernel::setProp(const std::string &label, const std::string &key,
         if (a > 1) a = 1;
         if (g->type() == GeoType::Function) {
             GeoFunction *f = static_cast<GeoFunction *>(g);
-            if (!f->ineqOp && f->ineqChain.empty()) {
+            if (!f->ineqOp && f->ineqChain.empty() && f->ineqDNF.empty()) {
                 lastError = "该函数没有区域填充";
                 return false;
             }
@@ -6859,6 +7068,7 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->ineqL = s->ineqL;
             d->ineqR = s->ineqR;
             d->ineqChain = s->ineqChain;
+            d->ineqDNF = s->ineqDNF;
             d->fillAlpha = s->fillAlpha;
             break;
         }
@@ -8245,9 +8455,15 @@ void Kernel::appendInequalityPlot(const GeoFunction &f, std::vector<DrawCmd> &ou
     const std::string base = ObjectColor(f.color, darkTheme);
     const std::string fillCol = RgbaFromHex(base, f.fillAlpha);
     const std::string selHalo = darkTheme ? "rgba(143,182,255,0.40)" : "rgba(0,125,255,0.30)";
-    const bool strict = !f.ineqChain.empty()
+    const bool combo = !f.ineqChain.empty() || !f.ineqDNF.empty();
+    const bool strict = combo
         ? std::all_of(f.ineqChain.begin(), f.ineqChain.end(),
                       [](const GeoFunction::IneqCond &c) { return c.strict; })
+          && std::all_of(f.ineqDNF.begin(), f.ineqDNF.end(),
+                      [](const std::vector<GeoFunction::IneqCond> &cl) {
+                          return std::all_of(cl.begin(), cl.end(),
+                              [](const GeoFunction::IneqCond &c) { return c.strict; });
+                      })
         : (f.ineqOp == 1 || f.ineqOp == 3);
     const bool below = f.ineqOp == 1 || f.ineqOp == 2;   // y<expr：曲线下方
     const double pad = 4000.0;   // 填充多边形越界钳制（防 exp 类巨值坐标）
@@ -8299,7 +8515,7 @@ void Kernel::appendInequalityPlot(const GeoFunction &f, std::vector<DrawCmd> &ou
         }
         return;
     }
-    if (f.ineqTwoVar || !f.ineqChain.empty()) {
+    if (f.ineqTwoVar || f.ineqCombo()) {
         // 批次⑥：两变量区域（x^2+y^2<r^2 类）。逐列沿 y 扫 L−R 的符号，
         // 状态翻转处对 s 二分求边界交点 → 相邻交点成对构成竖直 quad 填充；
         // 偶/奇序交点分别连成两条边界折线（跳变 >24px 或列间断开），
@@ -8319,21 +8535,13 @@ void Kernel::appendInequalityPlot(const GeoFunction &f, std::vector<DrawCmd> &ou
             return n ? n->value : NAN;
         };
         auto evalS = [&](double wx, double wy) -> double {
-            if (f.ineqChain.empty()) {
+            if (f.ineqTwoVar) {
                 return f.ineqL.evalXY(wx, wy) - f.ineqR.evalXY(wx, wy);
             }
-            double g = NAN;
-            for (const GeoFunction::IneqCond &c : f.ineqChain) {
-                double s = c.l.evalXYResolved(wx, wy, resolver)
-                         - c.r.evalXYResolved(wx, wy, resolver);
-                if (!c.lt) s = -s;
-                if (!std::isfinite(s)) return NAN;
-                g = std::isnan(g) ? s : std::max(g, s);
-            }
-            return g;
+            return IneqComboG(f, wx, wy, resolver);
         };
         auto insideS = [&](double s) {
-            if (f.ineqChain.empty()) {
+            if (f.ineqTwoVar) {
                 return std::isfinite(s) && (lt ? s < 0.0 : s > 0.0);
             }
             return std::isfinite(s) && s < 0.0;
@@ -9025,7 +9233,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
         }
         case GeoType::Function: {
             GeoFunction *f = static_cast<GeoFunction *>(g.get());
-            if (f->ineqOp || !f->ineqChain.empty()) appendInequalityPlot(*f, out);
+            if (f->ineqOp || f->ineqCombo()) appendInequalityPlot(*f, out);
             else appendFunctionPlot(*f, out, f->selected);
             break;
         }
@@ -9281,8 +9489,9 @@ std::string Kernel::getXml() const
         }
         case GeoType::Function: {
             GeoFunction *f = static_cast<GeoFunction *>(g);
-            if (f->ineqOp || !f->ineqChain.empty()) {
-                // 不等式（含 1.0.7.1 链式）：exp="f=y<x^2" 经赋值分割守卫重放回不等式分支
+            if (f->ineqOp || f->ineqCombo()) {
+                // 不等式（含 1.0.7.1 链式、1.0.7.2 ∧/∨ 组合）：exp="f=y<x^2"
+                // 经赋值分割守卫重放回不等式分支
                 o += "<expression label=\"" + XmlEsc(f->label) + "\" exp=\""
                    + XmlEsc(f->label + "=" + f->src) + "\"/>\n";
             } else if (!f->cmdName.empty()) {
@@ -9293,7 +9502,7 @@ std::string Kernel::getXml() const
                    + XmlEsc(f->label + "(x)=" + f->src) + "\"/>\n";
             }
             AppendElementHead(o, *f, "function",
-                (f->ineqOp || !f->ineqChain.empty()) ? f->fillAlpha : 0.0);
+                (f->ineqOp || f->ineqCombo()) ? f->fillAlpha : 0.0);
             AppendLineStyle(o, f->lineThickness);
             break;
         }
@@ -9440,7 +9649,7 @@ void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
         // 区域填充透明度：不等式 / 多边形 / 角（新版文件才有意义；旧版 alpha=0
         // 占位回默认，避免 0 当真把区域藏没）
         GeoFunction *fn = dynamic_cast<GeoFunction *>(e);
-        if (fn && (fn->ineqOp || !fn->ineqChain.empty())) {
+        if (fn && (fn->ineqOp || fn->ineqCombo())) {
             double a = AttrNum(t, "alpha", fn->fillAlpha);
             fn->fillAlpha = a > 0.0 ? (a > 1.0 ? 1.0 : a) : 0.10;
         }

@@ -281,13 +281,13 @@ std::string GeoCircle::definitionText() const
 
 std::string GeoFunction::valueText() const
 {
-    if (ineqOp || !ineqChain.empty()) return src;   // 不等式：值列/定义列即原文（可回填重定义）
+    if (ineqOp || !ineqChain.empty() || !ineqDNF.empty()) return src;   // 不等式：值列/定义列即原文（可回填重定义）
     return label + "(x) = " + src;
 }
 
 std::string GeoFunction::definitionText() const
 {
-    if (ineqOp || !ineqChain.empty()) return src;
+    if (ineqOp || !ineqChain.empty() || !ineqDNF.empty()) return src;
     return label + "(x) = " + src;
 }
 

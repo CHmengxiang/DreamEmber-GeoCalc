@@ -60,6 +60,17 @@ function fmt(v: number): string {
   return Number.isInteger(r) ? r.toString() : r.toFixed(2);
 }
 
+// R² 专用：两位小数会把 0.9996 舍成整数 1 丢信息（1.0.7.1 备查②）——
+// 4 位小数去尾零；仅 R² 使用，坐标轴范围标签仍走 fmt
+function fmtR2(v: number): string {
+  if (!isFinite(v)) {
+    return '—';
+  }
+  const s = v.toFixed(4);
+  const t = s.replace(/0+$/, '').replace(/\.$/, '');
+  return t.length > 0 && t !== '-' ? t : '0';
+}
+
 @Component
 export struct RegPanel {
   @Link algebra: AlgebraEntry[];   // 宿主代数区（取 regFit 方程文本）
@@ -174,7 +185,7 @@ export struct RegPanel {
       const dt = pts[2 * i + 1] - mean;
       sst += dt * dt;
     }
-    this.r2Text = ok && sst > 1e-15 ? fmt(1 - ssr / sst) : '—';
+    this.r2Text = ok && sst > 1e-15 ? fmtR2(1 - ssr / sst) : '—';
     // 曲线采样
     let x0 = pts[0];
     let x1 = pts[0];
