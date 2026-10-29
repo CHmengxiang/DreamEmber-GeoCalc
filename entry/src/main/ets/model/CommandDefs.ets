@@ -240,6 +240,12 @@ export const COMMANDS: CommandMeta[] = [
   { name: 'Join', category: 'lists', ins: 'Join(,)', back: 2,
     sig: 'Join( <列表1>, <列表2>, … )', desc: '顺次拼接多个列表',
     keys: 'join 拼接 合并 连接' },
+  { name: 'Intersection', category: 'lists', ins: 'Intersection(,)', back: 2,
+    sig: 'Intersection( <列表1>, <列表2> )', desc: '两列表交集（数值或点列表）',
+    keys: 'intersection 交集' },
+  { name: 'Union', category: 'lists', ins: 'Union(,)', back: 2,
+    sig: 'Union( <列表1>, <列表2> )', desc: '两列表并集去重（数值或点列表）',
+    keys: 'union 并集' },
 
   // ---- 统计（mean-median-min-max-sum-product-sd-variance 2451；单参列表版）----
   { name: 'Mean', category: 'stats', ins: 'Mean()', back: 1,
