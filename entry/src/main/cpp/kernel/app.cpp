@@ -8977,24 +8977,66 @@ void Kernel::appendInequalityPlot(const GeoFunction &f, std::vector<DrawCmd> &ou
             }
             *inTop = prevIn;
         };
-        // 列节点：真实交点 + 虚拟边交点（isReal=false），按世界 y 排序。
+        // 列节点：真实交点 + 虚拟边交点（real=false），按世界 y 排序。
         // 配对与奇偶序都以这份列表为准 → 区域越出可见边时奇偶依然对齐。
+        // 1.0.7.4 逐边界虚实线：真实交点另记活跃条件 (cl,co)——该点取到 g
+        // 边界值的条件（链式 argmax；DNF 取 min 句内 argmax），同 tag 交点
+        // 才连段，段按该条件 strict 定虚实（GGB 口径）
         struct ColNode {
             double x;
-            std::vector<std::pair<double, bool>> pts;   // (世界 y, 是否真实交点)
+            struct Pt {
+                double y;
+                bool real;
+                int cl = 0, co = 0;   // 活跃条件（虚拟交点不描线，不看）
+            };
+            std::vector<Pt> pts;
+        };
+        auto condValT = [&](const GeoFunction::IneqCond &c, double wx, double wy) -> double {
+            const double s = c.l.evalXYResolved(wx, wy, resolver)
+                           - c.r.evalXYResolved(wx, wy, resolver);
+            return c.lt ? s : -s;
+        };
+        auto activeTag = [&](double wx, double wy, int &cl, int &co) {
+            cl = 0; co = 0;
+            if (f.ineqTwoVar) return;
+            if (f.ineqDNF.empty()) {
+                double best = NAN;
+                for (size_t i = 0; i < f.ineqChain.size(); ++i) {
+                    const double s = condValT(f.ineqChain[i], wx, wy);
+                    if (!std::isfinite(s)) continue;
+                    if (std::isnan(best) || s > best) { best = s; co = (int)i; }
+                }
+                return;
+            }
+            double bestG = NAN;
+            for (size_t cj = 0; cj < f.ineqDNF.size(); ++cj) {
+                double h = NAN;
+                int bi = 0;
+                bool fin = true;
+                for (size_t i = 0; i < f.ineqDNF[cj].size(); ++i) {
+                    const double s = condValT(f.ineqDNF[cj][i], wx, wy);
+                    if (!std::isfinite(s)) { fin = false; break; }
+                    if (std::isnan(h) || s > h) { h = s; bi = (int)i; }
+                }
+                if (!fin || std::isnan(h)) continue;
+                if (std::isnan(bestG) || h < bestG) { bestG = h; cl = (int)cj; co = bi; }
+            }
         };
         auto buildNode = [&](double xc, ColNode &n, std::vector<double> &cross) {
             n.x = xc;
             n.pts.clear();
             bool inBot = false, inTop = false;
             scanCross(xc, cross, &inBot, &inTop);
-            for (double y : cross) n.pts.push_back({ y, true });
-            if (inBot) n.pts.push_back({ yBotW, false });
-            if (inTop) n.pts.push_back({ yTopW, false });
+            const double wx = view.wx(xc);
+            for (double y : cross) {
+                ColNode::Pt p{ y, true, 0, 0 };
+                activeTag(wx, y, p.cl, p.co);
+                n.pts.push_back(p);
+            }
+            if (inBot) n.pts.push_back({ yBotW, false, 0, 0 });
+            if (inTop) n.pts.push_back({ yTopW, false, 0, 0 });
             std::sort(n.pts.begin(), n.pts.end(),
-                      [](const std::pair<double, bool> &a, const std::pair<double, bool> &b) {
-                          return a.first < b.first;
-                      });
+                      [](const ColNode::Pt &a, const ColNode::Pt &b) { return a.y < b.y; });
         };
         std::vector<ColNode> nodes;
         nodes.reserve((size_t)(view.width / colW) + 2);
@@ -9010,8 +9052,8 @@ void Kernel::appendInequalityPlot(const GeoFunction &f, std::vector<DrawCmd> &ou
                 const float xl = (float)(n.x - colW * 0.5);
                 const float xr = xl + colW;
                 for (size_t ci = 0; ci + 1 < n.pts.size(); ci += 2) {
-                    const float pyA = (float)view.py(n.pts[ci].first);
-                    const float pyB = (float)view.py(n.pts[ci + 1].first);
+                    const float pyA = (float)view.py(n.pts[ci].y);
+                    const float pyB = (float)view.py(n.pts[ci + 1].y);
                     if (fabs(pyB - pyA) < 0.5f) continue;   // py 方向随 wy 反序，取幅值
                     DrawCmd fill;
                     fill.op = DrawOp::FillPoly;
@@ -9021,11 +9063,23 @@ void Kernel::appendInequalityPlot(const GeoFunction &f, std::vector<DrawCmd> &ou
                 }
             }
         }
-        // 边界折线：奇偶序各一条；相邻列同序交点跳变 >24px（陡峭段）先二分
-        // 细分再发射，细到 0.75px 仍跳变才真正断行（真不连续/另一叶）
-        std::vector<float> runEven, runOdd;
-        auto flushLine = [&](std::vector<float> &run) {
-            if (run.size() < 4) { run.clear(); return; }
+        // 边界折线：奇偶序 + 活跃条件 tag 共同定段——相邻列同奇偶同 tag 的
+        // 交点相连，tag 切换即断段并按新条件 strict 重定虚实（逐边界虚实线）；
+        // 相邻列交点跳变 >24px（陡峭段）先二分细分再发射，细到 0.75px 仍跳变
+        // 才真正断行（真不连续/另一叶）
+        struct BndRun {
+            std::vector<float> pts;
+            int parity = 0, cl = 0, co = 0;
+        };
+        std::vector<BndRun> runs;
+        auto condStrict = [&](int cl, int co) -> bool {
+            if (!combo) return f.ineqOp == 1 || f.ineqOp == 3;
+            if (f.ineqDNF.empty()) return f.ineqChain[(size_t)co].strict;
+            return f.ineqDNF[(size_t)cl][(size_t)co].strict;
+        };
+        auto emitRun = [&](const BndRun &r) {
+            const std::vector<float> &run = r.pts;
+            if (run.size() < 4) return;
             if (f.selected) {
                 DrawCmd h;
                 h.op = DrawOp::Polyline;
@@ -9035,39 +9089,48 @@ void Kernel::appendInequalityPlot(const GeoFunction &f, std::vector<DrawCmd> &ou
                 out.push_back(h);
             }
             DrawCmd seg;
-            if (strict) {
+            seg.color = base;
+            seg.lineWidth = f.lineThickness / 3.0f;
+            if (condStrict(r.cl, r.co)) {
                 seg.op = DrawOp::MultiSeg;
-                seg.color = base;
-                seg.lineWidth = f.lineThickness / 3.0f;
                 AppendDashSegs(run, 6.0 * view.uiScale, 5.0 * view.uiScale, seg.pts);
                 if (seg.pts.size() >= 4) out.push_back(seg);
             } else {
                 seg.op = DrawOp::Polyline;
-                seg.color = base;
-                seg.lineWidth = f.lineThickness / 3.0f;
                 seg.pts = run;
                 out.push_back(seg);
             }
-            run.clear();
         };
-        auto appendPt = [&](std::vector<float> &run, double wy, double xc) {
+        auto appendPt = [&](int parity, int cl, int co, double wy, double xc) {
             const float ppx = (float)xc;
             const float ppy = (float)view.py(wy);
-            if (run.size() >= 2) {
-                const float ly = run[run.size() - 1];
-                const float lx = run[run.size() - 2];
+            BndRun *r = nullptr;
+            for (auto it = runs.rbegin(); it != runs.rend(); ++it) {
+                if (it->parity == parity && it->cl == cl && it->co == co) { r = &*it; break; }
+            }
+            if (!r) {
+                BndRun nr;
+                nr.parity = parity;
+                nr.cl = cl;
+                nr.co = co;
+                runs.push_back(std::move(nr));
+                r = &runs.back();
+            } else if (r->pts.size() >= 2) {
+                const float ly = r->pts[r->pts.size() - 1];
+                const float lx = r->pts[r->pts.size() - 2];
                 if (fabs(ppy - ly) > 24.0f || fabs(ppx - lx) > (float)colW + 0.5f) {
-                    flushLine(run);
+                    emitRun(*r);
+                    r->pts.clear();
                 }
             }
-            run.push_back(ppx);
-            run.push_back(ppy);
+            r->pts.push_back(ppx);
+            r->pts.push_back(ppy);
         };
         std::function<void(const ColNode &, const ColNode &, int)> emitRange =
             [&](const ColNode &a, const ColNode &b, int depth) {
             bool need = a.pts.size() != b.pts.size();
             for (size_t k = 0; !need && k < a.pts.size() && k < b.pts.size(); ++k) {
-                if (fabs(view.py(b.pts[k].first) - view.py(a.pts[k].first)) > 24.0) need = true;
+                if (fabs(view.py(b.pts[k].y) - view.py(a.pts[k].y)) > 24.0) need = true;
             }
             if (need && depth < 6 && b.x - a.x > 0.2) {
                 ColNode m;
@@ -9077,19 +9140,80 @@ void Kernel::appendInequalityPlot(const GeoFunction &f, std::vector<DrawCmd> &ou
                 return;
             }
             for (size_t k = 0; k < b.pts.size(); ++k) {
-                if (!b.pts[k].second) continue;   // 虚拟交点定奇偶序，不画边界
-                appendPt(k % 2 == 0 ? runEven : runOdd, b.pts[k].first, b.x);
+                if (!b.pts[k].real) continue;   // 虚拟交点定奇偶序，不画边界
+                appendPt(k % 2 == 0 ? 0 : 1, b.pts[k].cl, b.pts[k].co, b.pts[k].y, b.x);
             }
         };
         if (!nodes.empty()) {
             for (size_t k = 0; k < nodes[0].pts.size(); ++k) {
-                if (!nodes[0].pts[k].second) continue;
-                appendPt(k % 2 == 0 ? runEven : runOdd, nodes[0].pts[k].first, nodes[0].x);
+                if (!nodes[0].pts[k].real) continue;
+                appendPt(k % 2 == 0 ? 0 : 1, nodes[0].pts[k].cl, nodes[0].pts[k].co,
+                         nodes[0].pts[k].y, nodes[0].x);
             }
             for (size_t i = 1; i < nodes.size(); ++i) emitRange(nodes[i - 1], nodes[i], 0);
         }
-        flushLine(runEven);
-        flushLine(runOdd);
+        for (const BndRun &r : runs) emitRun(r);
+        // 纯 x 条件竖直边界（1.0.7.4 一般化，补 1.0.7.1/72 链式与 DNF 中 x 段
+        // 边界画不出的缺口——列扫描整列同号无 y 向翻转）。对每个线性纯 x 条件
+        // 解 vx，逐行测区域内外跨 vx 的翻转：其余条件/句共同作用自动把线裁到
+        // 真实边界段（并集内部的竖直线不画），虚实按该条件 strict。含引用条件
+        // 不描（线性系数无法静态解出，随滑条值动）
+        auto vseg = [&](double vx, bool vstrict) {
+            const float bx = (float)view.px(vx);
+            if (bx < 0.0f || bx > (float)view.width) return;
+            const double dwx = 0.25 * (view.wx((double)colW) - view.wx(0.0));
+            if (!(dwx > 0.0)) return;
+            std::vector<float> run;
+            auto flushV = [&]() {
+                if (run.size() < 4) { run.clear(); return; }
+                if (f.selected) {
+                    DrawCmd h;
+                    h.op = DrawOp::Polyline;
+                    h.color = selHalo;
+                    h.lineWidth = f.lineThickness / 3.0f + 8.0f * view.uiScale;
+                    h.pts = run;
+                    out.push_back(h);
+                }
+                DrawCmd seg;
+                seg.color = base;
+                seg.lineWidth = f.lineThickness / 3.0f;
+                if (vstrict) {
+                    seg.op = DrawOp::MultiSeg;
+                    AppendDashSegs(run, 6.0 * view.uiScale, 5.0 * view.uiScale, seg.pts);
+                    if (seg.pts.size() >= 4) out.push_back(seg);
+                } else {
+                    seg.op = DrawOp::Polyline;
+                    seg.pts = run;
+                    out.push_back(seg);
+                }
+                run.clear();
+            };
+            for (int r2 = 0; r2 <= rows; ++r2) {
+                const double wy = yBotW + (yTopW - yBotW) * r2 / rows;
+                const bool inL = insideS(evalS(vx - dwx, wy));
+                const bool inR = insideS(evalS(vx + dwx, wy));
+                if (inL != inR) {
+                    run.push_back(bx);
+                    run.push_back((float)view.py(wy));
+                } else {
+                    flushV();
+                }
+            }
+            flushV();
+        };
+        if (f.ineqDNF.empty()) {
+            for (const GeoFunction::IneqCond &c : f.ineqChain) {
+                double vx = 0; int vop = 0;
+                if (VerticalFromCond(c, vx, vop)) vseg(vx, c.strict);
+            }
+        } else {
+            for (const std::vector<GeoFunction::IneqCond> &cl : f.ineqDNF) {
+                for (const GeoFunction::IneqCond &c : cl) {
+                    double vx = 0; int vop = 0;
+                    if (VerticalFromCond(c, vx, vop)) vseg(vx, c.strict);
+                }
+            }
+        }
         return;
     }
     if (f.body.empty()) return;
