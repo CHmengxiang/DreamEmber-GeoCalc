@@ -515,6 +515,24 @@ static std::vector<TextConnTok> ScanTextConn(const std::string &s)
     return toks;
 }
 
+// 顶层 ¬（0xC2 0xAC）存在扫描（引号外、括号深度 0）——1.0.7.3 ¬ 补集区域
+// 的入口判定（¬ 在括号内时外层剥壳后才见顶，core 已剥壳）
+static bool ScanTextTopNeg(const std::string &s)
+{
+    bool inStr = false;
+    int depth = 0;
+    for (size_t i = 0; i < s.size();) {
+        const char c = s[i];
+        if (c == '"') { inStr = !inStr; ++i; continue; }
+        if (!inStr && (c == '(' || c == '[' || c == '{')) { ++depth; ++i; continue; }
+        if (!inStr && (c == ')' || c == ']' || c == '}')) { if (depth > 0) --depth; ++i; continue; }
+        if (!inStr && depth == 0 && (unsigned char)c == 0xC2
+            && i + 1 < s.size() && (unsigned char)s[i + 1] == 0xAC) return true;
+        ++i;
+    }
+    return false;
+}
+
 // 整体括号剥壳：'(x>1)∧(x<5)' 原子、'((1<x<3))' 链式外壳（引号感知；
 // 顺带去两端空白）
 static void StripOuterParens(std::string &t)
@@ -539,6 +557,40 @@ static void StripOuterParens(std::string &t)
     }
 }
 
+// 1.0.7.3 ¬ 补集的 DNF 取反：¬(∨句) = ∧(¬句)，各句取反为「取反原子的 OR」，
+// 分配律压回 DNF = 句间叉积（每终句从各源句各取一个取反原子）。取反 = lt 与
+// strict 双翻（开集补为闭集，¬(x>2)→x≤2）。句数封顶 32 同主解析
+static bool NegateDnf(std::vector<std::vector<GeoFunction::IneqCond>> cls,
+                      std::vector<std::vector<GeoFunction::IneqCond>> &out,
+                      std::string &err)
+{
+    std::vector<std::vector<GeoFunction::IneqCond>> acc(1);
+    for (std::vector<GeoFunction::IneqCond> &c : cls) {
+        std::vector<GeoFunction::IneqCond> neg;
+        neg.reserve(c.size());
+        for (GeoFunction::IneqCond &a : c) {
+            GeoFunction::IneqCond na;
+            na.l = std::move(a.l);
+            na.r = std::move(a.r);
+            na.lt = !a.lt;
+            na.strict = !a.strict;
+            neg.push_back(std::move(na));
+        }
+        std::vector<std::vector<GeoFunction::IneqCond>> next;
+        for (const std::vector<GeoFunction::IneqCond> &c1 : acc) {
+            for (const GeoFunction::IneqCond &na : neg) {
+                std::vector<GeoFunction::IneqCond> m = c1;
+                m.push_back(na);
+                next.push_back(std::move(m));
+            }
+        }
+        if (next.size() > 32) { err = "组合区域过复杂（∧∨ 嵌套分配）"; return false; }
+        acc = std::move(next);
+    }
+    out = std::move(acc);
+    return true;
+}
+
 // 组合式规范化到 DNF：句内条件 AND（链式切段同构），句间 OR。∨ 优先级
 // 低于 ∧（1.0.6.4 语义）→ 先按顶层 ∨ 分句、句内按顶层 ∧ 摊平、原子剥壳
 // 后按比较段建条件；∧∨ 交叉嵌套按分配律展开（句数封顶 32 防失控）。
@@ -551,6 +603,44 @@ static bool NormIneqDnf(const std::string &t0,
     std::string t = t0;
     StripOuterParens(t);
     if (t.empty()) { err = "组合区域条件为空"; return false; }
+    // 1.0.7.3 ¬ 补集：只收 ¬(条件) 前缀形式。全式即 ¬(…) 时整体取反；其后
+    // 还有 ∧/∨ 时视 ¬(…) 为一个因子，补整括号后走常规分拆（各因子递归）
+    if (t.size() >= 4 && (unsigned char)t[0] == 0xC2 && (unsigned char)t[1] == 0xAC) {
+        size_t i = 2;
+        while (i < t.size() && isspace((unsigned char)t[i])) ++i;
+        if (i + 1 < t.size() && (unsigned char)t[i] == 0xC2
+            && (unsigned char)t[i + 1] == 0xAC) {
+            // ¬¬ 双重否定：余式整体递归取反（余式内部的 ∧/∨ 分拆由递归自理）
+            std::vector<std::vector<GeoFunction::IneqCond>> sub;
+            if (!NormIneqDnf(t.substr(i), sub, depth + 1, err)) return false;
+            return NegateDnf(std::move(sub), cls, err);
+        }
+        if (i >= t.size() || t[i] != '(') {
+            err = "¬ 后需要括号条件（如 ¬(x>2)）";
+            return false;
+        }
+        int d = 0;
+        size_t j = i;
+        bool inQ = false;
+        for (; j < t.size(); ++j) {
+            const char c = t[j];
+            if (c == '"') inQ = !inQ;
+            else if (!inQ && c == '(') ++d;
+            else if (!inQ && c == ')') { --d; if (d == 0) break; }
+        }
+        if (j >= t.size() || d != 0) { err = "¬ 括号不匹配"; return false; }
+        const std::string rest = Trim(t.substr(j + 1));
+        if (rest.empty()) {
+            std::vector<std::vector<GeoFunction::IneqCond>> sub;
+            if (!NormIneqDnf(t.substr(i + 1, j - i - 1), sub, depth + 1, err)) return false;
+            return NegateDnf(std::move(sub), cls, err);
+        }
+        if (ScanTextConn(rest).empty()) {
+            err = "¬(条件) 后须接 ∧/∨ 连词";
+            return false;
+        }
+        return NormIneqDnf("(" + t.substr(0, j + 1) + ") " + rest, cls, depth + 1, err);
+    }
     const std::vector<TextConnTok> toks = ScanTextConn(t);
     auto splitTop = [&](bool wantOr) {
         std::vector<std::string> parts;
@@ -665,6 +755,26 @@ static double IneqComboG(const GeoFunction &f, double wx, double wy,
     return g;
 }
 
+// 单条件 x 线性式退化竖直半平面（1.0.7.3 ¬ 补集最常见形态 ¬(x>2) 等）：
+// s = L(x)−R(x) = k·x+c0，按 lt/strict 定 op（1='<' 2='<=' 3='>' 4='>='）。
+// 含 y / 非线性 / 有对象引用（动态条件须走列扫描 resolver）时不退化返回
+// false。成功填 vx 与 op，渲染走竖直半平面路径（边界竖直线 + 虚实线语义
+// 完整——列扫描对纯 x 条件无 y 向交点，竖直边界画不出）
+static bool VerticalFromCond(const GeoFunction::IneqCond &c, double &vx, int &op)
+{
+    if (!c.l.refs().empty() || !c.r.refs().empty()) return false;
+    if (c.l.containsY() || c.r.containsY()) return false;
+    double k1 = 0, m1 = 0, k2 = 0, m2 = 0;
+    if (!c.l.linearCoef(k1, m1) || !c.r.linearCoef(k2, m2)) return false;
+    const double k = k1 - k2, m0 = m1 - m2;
+    if (fabs(k) < 1e-12) return false;
+    vx = -m0 / k;
+    // 区域在 s<0（lt）侧：k>0 → x 小于阈值；lt=false（s>0）侧反转
+    const bool less = c.lt ? (k > 0.0) : (k < 0.0);
+    op = less ? (c.strict ? 1 : 2) : (c.strict ? 3 : 4);
+    return true;
+}
+
 bool Kernel::input(const std::string &srcRaw)
 {
     if (undoSuspend_ > 0) return inputImpl(srcRaw);
@@ -744,6 +854,129 @@ static bool ParseListValues(const std::string &inner, std::vector<double> &out,
         if (comma == std::string::npos) break;
         start = comma + 1;
     }
+    return true;
+}
+
+// 1.0.7.3 点列表元组探测：{…} 内部存在「整括号包裹且内含顶层逗号」的元素
+//（(1,2) 点元组）即按点列表解析。括号包裹的纯算术元素（(1+2)）不算——
+// {(1+2),3} 仍是数值列表
+static bool ListHasPointTuple(const std::string &inner)
+{
+    int depth = 0;
+    size_t start = 0;
+    bool inQ = false;
+    for (size_t i = 0; i <= inner.size(); ++i) {
+        const char c = i < inner.size() ? inner[i] : ',';
+        if (c == '"') { inQ = !inQ; continue; }
+        if (!inQ && (c == '(' || c == '[' || c == '{')) { ++depth; continue; }
+        if (!inQ && (c == ')' || c == ']' || c == '}')) { if (depth > 0) --depth; continue; }
+        if (c != ',' || depth != 0 || inQ) continue;
+        const std::string t = Trim(inner.substr(start, i - start));
+        start = i + 1;
+        if (t.size() >= 3 && t.front() == '(' && t.back() == ')') {
+            // 元组判定：最外层括号内还有顶层逗号（坐标分隔）
+            int d2 = 0;
+            bool q2 = false;
+            for (size_t k = 1; k + 1 < t.size(); ++k) {
+                const char c2 = t[k];
+                if (c2 == '"') q2 = !q2;
+                else if (!q2 && c2 == '(') ++d2;
+                else if (!q2 && c2 == ')') --d2;
+                else if (!q2 && c2 == ',' && d2 == 0) return true;
+            }
+        }
+    }
+    // 括号/引号失衡：无元组（外层数值解析会给报错文案）
+    return false;
+}
+
+// 1.0.7.3 点列表解析：{…} 内部为点序列。元素：点字面量 (a,b)（坐标为不含
+// x/y 的算术式，静态）或点标签（动态引用，进 refDeps）。refCount 记成功
+// 解析的引用元素数——调用方据此区分混排与纯数值解析失败。false 时 err 已填
+static bool ParsePointList(const std::string &inner, Kernel &k, GeoList *out,
+                           std::vector<GeoPoint *> &refDeps, int &refCount,
+                           std::string &err)
+{
+    // 括号/引号感知的顶层逗号分段（点元组内逗号不切）
+    int depth = 0;
+    size_t start = 0;
+    bool inQ = false;
+    for (size_t i = 0; i <= inner.size(); ++i) {
+        const char c = i < inner.size() ? inner[i] : ',';
+        if (c == '"') { inQ = !inQ; continue; }
+        if (!inQ && (c == '(' || c == '[' || c == '{')) { ++depth; continue; }
+        if (!inQ && (c == ')' || c == ']' || c == '}')) { if (depth > 0) --depth; continue; }
+        if (c != ',' || depth != 0 || inQ) continue;
+        const std::string t = Trim(inner.substr(start, i - start));
+        start = i + 1;
+        if (t.empty()) continue;
+        if (t.front() == '(') {
+            // 点字面量：剥最外层括号，坐标按首个顶层逗号切两段算术式
+            if (t.back() != ')') { err = "点字面量格式: (a,b): " + t; return false; }
+            const std::string co = t.substr(1, t.size() - 2);
+            int d2 = 0;
+            bool q2 = false;
+            size_t comma = std::string::npos;
+            for (size_t k2 = 0; k2 < co.size(); ++k2) {
+                const char c2 = co[k2];
+                if (c2 == '"') q2 = !q2;
+                else if (!q2 && c2 == '(') ++d2;
+                else if (!q2 && c2 == ')') --d2;
+                else if (!q2 && c2 == ',' && d2 == 0) { comma = k2; break; }
+            }
+            if (comma == std::string::npos) {
+                err = "点字面量须含坐标逗号: " + t;
+                return false;
+            }
+            // 第二个顶层逗号 = 三元坐标，本内核不支持
+            {
+                int d3 = 0;
+                bool q3 = false;
+                for (size_t k3 = comma + 1; k3 < co.size(); ++k3) {
+                    const char c3 = co[k3];
+                    if (c3 == '"') q3 = !q3;
+                    else if (!q3 && c3 == '(') ++d3;
+                    else if (!q3 && c3 == ')') --d3;
+                    else if (!q3 && c3 == ',' && d3 == 0) {
+                        err = "点字面量须为二维坐标: " + t;
+                        return false;
+                    }
+                }
+            }
+            Expr ex, ey;
+            std::string e1, e2;
+            if (!ex.parse(Trim(co.substr(0, comma)), e1)
+                || !ey.parse(Trim(co.substr(comma + 1)), e2)) {
+                err = "点字面量坐标无法解析: " + t;
+                return false;
+            }
+            if (ex.containsX() || ex.containsY() || ey.containsX() || ey.containsY()) {
+                err = "点字面量坐标不能含 x/y: " + t;
+                return false;
+            }
+            const double px = ex.eval(0.0), py = ey.eval(0.0);
+            if (!std::isfinite(px) || !std::isfinite(py)) {
+                err = "点字面量坐标不是有限数: " + t;
+                return false;
+            }
+            out->points.push_back({ px, py });
+            out->pointRefs.push_back("");
+            continue;
+        }
+        // 点标签引用
+        GeoPoint *p = dynamic_cast<GeoPoint *>(k.lookup(t));
+        if (!p) {
+            err = "点列表元素须为点字面量 (a,b) 或点引用: " + t;
+            return false;
+        }
+        out->points.push_back({ p->x, p->y });
+        out->pointRefs.push_back(t);
+        refDeps.push_back(p);
+        ++refCount;
+    }
+    // 括号/引号失衡：尾段未刷，不得静默截断
+    if (depth != 0 || inQ) { err = "列表括号不匹配"; return false; }
+    if (out->points.empty()) { err = "列表不能为空"; return false; }
     return true;
 }
 
@@ -989,6 +1222,8 @@ bool Kernel::inputImpl(const std::string &srcRaw)
         StripOuterParens(core);
         const std::vector<TextCmpSeg> coreCmp = ScanTextCmp(core);
         const std::vector<TextConnTok> connToks = ScanTextConn(core);
+        // 1.0.7.3 ¬ 补集入口：顶层含 ¬（与 ∧/∨ 组合同走 DNF 管线）
+        const bool hasTopNeg = ScanTextTopNeg(core);
         const bool chained = coreCmp.size() >= 2;
         const size_t cpos = cmpSegs.empty() ? std::string::npos : cmpSegs[0].pos;
         const char cop = cmpSegs.empty() ? 0 : cmpSegs[0].op;
@@ -1007,10 +1242,11 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                 isRegion = false;
             }
         }
-        if (isRegion && !connToks.empty()) {
-            // 1.0.7.2 ∧/∨ 组合区域：文本级 DNF——句内 AND（链式同构）、句间
-            // OR（并集）。单句退化写 ineqChain（下游零改动），多句写 ineqDNF
-            //（渲染 g=min(句内 max)<0，列扫描机制不变）
+        if (isRegion && (!connToks.empty() || hasTopNeg)) {
+            // 1.0.7.2 ∧/∨ 组合区域 + 1.0.7.3 ¬ 补集：文本级 DNF——句内 AND
+            //（链式同构）、句间 OR（并集）、¬ 取反压回。单句退化写 ineqChain
+            //（下游零改动），多句写 ineqDNF（渲染 g=min(句内 max)<0，列扫描
+            // 机制不变）
             auto f2 = std::make_unique<GeoFunction>();
             f2->src = rhs;
             std::vector<std::vector<GeoFunction::IneqCond>> cls;
@@ -1019,7 +1255,19 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                 lastError = nerr;
                 return false;
             }
-            if (cls.size() == 1) f2->ineqChain = std::move(cls[0]);
+            if (cls.size() == 1 && cls[0].size() == 1) {
+                // 单条件 x 线性（¬(x>2) 类）退化竖直半平面：边界绘制与
+                // 虚实线语义完整；其余走链式/多句 DNF
+                double vx2 = 0;
+                int vop = 0;
+                if (VerticalFromCond(cls[0][0], vx2, vop)) {
+                    f2->ineqOp = vop;
+                    f2->ineqVertical = true;
+                    f2->ineqX = vx2;
+                } else {
+                    f2->ineqChain = std::move(cls[0]);
+                }
+            } else if (cls.size() == 1) f2->ineqChain = std::move(cls[0]);
             else f2->ineqDNF = std::move(cls);
             made = std::move(f2);
         } else if (isRegion && chained) {
@@ -1411,18 +1659,51 @@ bool Kernel::inputImpl(const std::string &srcRaw)
         }
     }
 
-    // 1.5b) 平面列表：{...}（元素为不含 x 的数值表达式）
+    // 1.5b) 平面列表：{...}（元素为不含 x 的数值表达式；1.0.7.3 点列表：
+    // 元素为点字面量 (a,b) 或点标签——字面量坐标静态，标签引用 calc 按点
+    // 现值刷坐标、inputs 挂引用点级联重算）
     if (!made && !rhs.empty() && rhs.front() == '{' && rhs.back() == '}'
         && (name.empty() || name.find('(') == std::string::npos)) {
         const std::string inner = rhs.substr(1, rhs.size() - 2);
         auto L = std::make_unique<GeoList>();
         L->src = "{" + inner + "}";
         std::string lerr;
-        if (!ParseListValues(inner, L->values, lerr)) {
-            lastError = lerr;
-            return false;
+        std::vector<GeoPoint *> refDeps;
+        if (ListHasPointTuple(inner)) {
+            // 点元组出现即按点列表解析（数值元素混入由 ParsePointList 拒）
+            int rc = 0;
+            if (!ParsePointList(inner, *this, L.get(), refDeps, rc, lerr)) {
+                lastError = lerr.empty() ? "列表字面量无法解析: " + rhs : lerr;
+                return false;
+            }
+        } else if (!ParseListValues(inner, L->values, lerr)) {
+            // 数值解析失败回探点标签引用（{A,B}）；已有元素解析为点时按
+            // 点侧文案（混排更可读），否则保留数值侧原文案
+            std::vector<GeoPoint *> deps2;
+            std::string perr;
+            int rc = 0;
+            if (!ParsePointList(inner, *this, L.get(), deps2, rc, perr)) {
+                lastError = rc > 0 ? perr : lerr;
+                return false;
+            }
+            refDeps = std::move(deps2);
         }
-        if (L->values.empty()) { lastError = "列表不能为空"; return false; }
+        if (!refDeps.empty()) {
+            L->calc = [refs = refDeps](GeoList *g) {
+                size_t di = 0;
+                for (size_t i = 0; i < g->pointRefs.size(); ++i) {
+                    if (g->pointRefs[i].empty()) continue;
+                    if (di < refs.size()) {
+                        g->points[i].first = refs[di]->x;
+                        g->points[i].second = refs[di]->y;
+                    }
+                    ++di;
+                }
+            };
+            for (GeoPoint *d : refDeps) L->inputs.push_back(d);
+        }
+        if (L->values.empty() && L->points.empty()) { lastError = "列表不能为空"; return false; }
+        if (!L->points.empty()) L->visible = true;   // 点列表画布可见（数值列表不绘制）
         made = std::move(L);
     }
 
@@ -2251,15 +2532,29 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
     // 字面量列表临时对象（命令实参允许 {1,2,3} 直接书写；不入构造列表，
     // 含字面量实参的产物为静态——闭包不得捕获这些指针）
     std::vector<std::unique_ptr<GeoList>> litLists;
-    // 实参取列表：'{' 开头按字面量解析进 litLists，否则按标签查表（矩阵拒）
-    auto listArg = [&](const std::string &s, bool &lit) -> GeoList * {
+    // 实参取列表：'{' 开头按字面量解析进 litLists，否则按标签查表（矩阵拒）。
+    // 1.0.7.3 allowPoints：点列表放行（Element/First/Last/FitLine/散点折线
+    // 单参形式）；缺省拒——数值/统计命令对点列表给明确文案
+    auto listArg = [&](const std::string &s, bool &lit,
+                       bool allowPoints = false) -> GeoList * {
         lit = false;
         if (!s.empty() && s.front() == '{') {
             if (s.back() != '}') { lastError = "列表字面量格式：{a,b,…}"; return nullptr; }
             lit = true;
             auto t = std::make_unique<GeoList>();
             std::string err;
-            if (!ParseListValues(s.substr(1, s.size() - 2), t->values, err)) {
+            const std::string inner = s.substr(1, s.size() - 2);
+            if (ListHasPointTuple(inner)) {
+                std::vector<GeoPoint *> deps;
+                int rc = 0;
+                if (!ParsePointList(inner, *this, t.get(), deps, rc, err)) {
+                    lastError = err.empty() ? "列表字面量无法解析: " + s : err;
+                    return nullptr;
+                }
+                litLists.push_back(std::move(t));
+                return litLists.back().get();
+            }
+            if (!ParseListValues(inner, t->values, err)) {
                 lastError = err.empty() ? "列表字面量无法解析: " + s : err;
                 return nullptr;
             }
@@ -2269,6 +2564,10 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         GeoList *L = dynamic_cast<GeoList *>(lookup(s));
         if (!L) { lastError = "未找到列表 " + s; return nullptr; }
         if (L->isMatrix) { lastError = "需要数值列表（矩阵不可）"; return nullptr; }
+        if (L->isPointList() && !allowPoints) {
+            lastError = "点列表不支持该命令";
+            return nullptr;
+        }
         return L;
     };
     // 数值实参 → NumRefExpr（可含数值对象引用，进 deps 去重收集）。
@@ -3610,12 +3909,13 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
     }
 
     // Element(list, k) / First(list) / Last(list) → 数值（依随列表；k 为 1 起；
-    // 1.0.6.6 列表实参收 {…} 字面量，静态定型）
+    // 1.0.6.6 列表实参收 {…} 字面量，静态定型）。1.0.7.3 点列表 → 依随点
+    //（字面量静态定型；标签引用 calc 取现值，越界保持原坐标）
     const bool listGet = (cmdLower == "element" && a.size() == 2)
         || (a.size() == 1 && (cmdLower == "first" || cmdLower == "last"));
     if (listGet) {
         bool lit = false;
-        GeoList *L = listArg(a[0], lit);
+        GeoList *L = listArg(a[0], lit, true);
         if (!L) { made = nullptr; return true; }
         double k = 1;
         const bool indexed = cmdLower == "element";
@@ -3625,11 +3925,43 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             return true;
         }
         const char *ggbName = indexed ? "Element" : cmdLower == "first" ? "First" : "Last";
+        const bool isLast = cmdLower == "last";
+        // 元素序号取整口径同数值路径（llround）；0/负数/超界走越界分支
+        //（数值 → NAN，点 → 保持原坐标）
+        const size_t k0 = indexed ? (size_t)llround(k) : 1;
+        if (L->isPointList()) {
+            auto p = std::make_unique<GeoPoint>();
+            p->isFree = false;
+            p->pointSize = 4;   // DEFAULT_POINT_SIZE_DEPENDENT 同款
+            p->color = {0x64, 0x64, 0x64};
+            p->cmdName = ggbName;
+            p->cmdArgs = a;
+            if (lit) {
+                const size_t i = isLast ? L->points.size()
+                               : (indexed ? k0 : 1);
+                if (i >= 1 && i <= L->points.size()) {
+                    p->x = L->points[i - 1].first;
+                    p->y = L->points[i - 1].second;
+                }
+            } else {
+                GeoList *src = L;
+                p->calc = [src, k0, indexed, isLast](GeoPoint *g) {
+                    if (src->points.empty()) return;
+                    const size_t i = isLast ? src->points.size()
+                                   : (indexed ? k0 : 1);
+                    if (i < 1 || i > src->points.size()) return;   // 越界保持原坐标
+                    g->x = src->points[i - 1].first;
+                    g->y = src->points[i - 1].second;
+                };
+                p->inputs = { L };
+            }
+            p->update();
+            made = std::move(p);
+            return true;
+        }
         auto n = std::make_unique<GeoNumeric>();
         n->isFree = false;
         GeoList *src = L;
-        const double k0 = k;
-        const bool isLast = cmdLower == "last";
         n->cmdName = ggbName;
         n->cmdArgs = a;
         n->cmd = std::string(ggbName) + "(" + a[0] + (indexed ? ", " + a[1] : "") + ")";
@@ -4219,24 +4551,47 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
     }
 
     // LineGraph / ScatterPlot(x 列表, y 列表)：折线 / 散点（长度取最小）
-    if ((cmdLower == "linegraph" || cmdLower == "scatterplot") && a.size() == 2) {
+    if ((cmdLower == "linegraph" || cmdLower == "scatterplot")
+        && (a.size() == 1 || a.size() == 2)) {
         bool lit1 = false, lit2 = false;
-        GeoList *Lx = listArg(a[0], lit1);
-        if (!Lx) { made = nullptr; return true; }
-        GeoList *Ly = listArg(a[1], lit2);
-        if (!Ly) { made = nullptr; return true; }
+        GeoList *Lx = nullptr, *Ly = nullptr;
+        bool ptForm = false;   // 1.0.7.3 单参点列表形式
+        if (a.size() == 1) {
+            GeoList *Lp = listArg(a[0], lit1, true);
+            if (!Lp) { made = nullptr; return true; }
+            Lx = Lp;
+            ptForm = true;
+        } else {
+            Lx = listArg(a[0], lit1);
+            if (!Lx) { made = nullptr; return true; }
+            Ly = listArg(a[1], lit2);
+            if (!Ly) { made = nullptr; return true; }
+        }
         auto out = std::make_unique<GeoList>();
         out->chart = cmdLower == "linegraph" ? "line" : "scatter";
         out->cmdName = cmdLower == "linegraph" ? "LineGraph" : "ScatterPlot";
         out->cmdArgs = a;
-        auto bake = [Lx, Ly](GeoList *g) {
+        auto bake = [Lx, Ly, ptForm](GeoList *g) {
             g->isMatrix = false;
             g->mrows = g->mcols = 0;
+            if (ptForm) {
+                g->chartX.clear();
+                g->values.clear();
+                for (const auto &q : Lx->points) {
+                    g->chartX.push_back(q.first);
+                    g->values.push_back(q.second);
+                }
+                return;
+            }
             const size_t n = std::min(Lx->values.size(), Ly->values.size());
             g->chartX.assign(Lx->values.begin(), Lx->values.begin() + (long)n);
             g->values.assign(Ly->values.begin(), Ly->values.begin() + (long)n);
         };
-        finishChart(out, bake, lit1 || lit2, { Lx, Ly });
+        if (ptForm) {
+            finishChart(out, bake, lit1, { Lx });
+        } else {
+            finishChart(out, bake, lit1 || lit2, { Lx, Ly });
+        }
         return true;
     }
 
@@ -4341,27 +4696,58 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
 
     // ---------- 1.0.6.1 回归批（Fit 族）与矩阵代数 ----------
     // 输入形态对齐上游：点序列 = 点列表（列表命令走 tryCommand 时实参只有
-    // 列表标签）或两个数值列表（x/y 各一）。内核列表是纯数值（点列表在
-    // 本内核无对应物），点序列按「两个等长数值列表」解释——FitLine({1,2},
-    // {3,5}) 即回归 y on x。官方 .ggb 保存的点列表重放为 Expression
-    // {A1,A2,…}（本内核点无法进列表），这类文件落到「未找到列表」的既有
-    // 报错，不静默错拟
+    // 列表标签）或两个数值列表（x/y 各一）。点序列按「两个等长数值列表」
+    // 解释——FitLine({1,2},{3,5}) 即回归 y on x。1.0.7.3 起点列表落地：
+    // FitLine 与 LineGraph/ScatterPlot 收单参点列表形式；FitPoly/Exp 等的
+    // 单参形式在遗留清单（暂按「未找到列表」报错，不静默错拟）
 
     // FitLine(x 列表, y 列表) → 直线（y on x 最小二乘）。依随两列表重算。
-    // 直线 ax+by=c 与上游 AlgoFitLineY 同式（Sxy/Sxx 消除除法的系数形）
-    if (cmdLower == "fitline" && a.size() == 2) {
-        // 1.0.7.1 实参收 {…} 字面量（GGB 同款内嵌数据式）：字面量产物为
-        // 静态（闭包捕获冻结副本），标签实参维持活引用
+    // 直线 ax+by=c 与上游 AlgoFitLineY 同式（Sxy/Sxx 消除除法的系数形）。
+    // 1.0.7.3 单参形式 FitLine(点列表)：字面量冻结副本静态，标签活引用
+    //（每次重算按 points 现值刷双缓冲，拖点联动）
+    if (cmdLower == "fitline" && (a.size() == 1 || a.size() == 2)) {
         bool litX = false, litY = false;
-        GeoList *Lx = listArg(a[0], litX);
-        GeoList *Ly = Lx ? listArg(a[1], litY) : nullptr;
-        if (!Lx || !Ly) { made = nullptr; return true; }   // listArg 已给文案
+        GeoList *Lx = nullptr, *Ly = nullptr;
+        GeoList *ptLive = nullptr;   // 单参点列表活引用（非空 → 挂 inputs）
+        std::function<const std::vector<double> &()> xvals, yvals;
+        if (a.size() == 1) {
+            GeoList *Lp = listArg(a[0], litX, true);
+            if (!Lp) { made = nullptr; return true; }   // listArg 已给文案
+            auto bx = std::make_shared<std::vector<double>>();
+            auto by = std::make_shared<std::vector<double>>();
+            if (litX) {
+                for (const auto &q : Lp->points) {
+                    bx->push_back(q.first);
+                    by->push_back(q.second);
+                }
+                xvals = [bx]() -> const std::vector<double> & { return *bx; };
+                yvals = [by]() -> const std::vector<double> & { return *by; };
+            } else {
+                ptLive = Lp;
+                xvals = [Lp, bx, by]() -> const std::vector<double> & {
+                    bx->clear();
+                    by->clear();
+                    for (const auto &q : Lp->points) {
+                        bx->push_back(q.first);
+                        by->push_back(q.second);
+                    }
+                    return *bx;
+                };
+                yvals = [by]() -> const std::vector<double> & { return *by; };
+            }
+        } else {
+            // 1.0.7.1 实参收 {…} 字面量（GGB 同款内嵌数据式）：字面量产物为
+            // 静态（闭包捕获冻结副本），标签实参维持活引用
+            Lx = listArg(a[0], litX);
+            Ly = Lx ? listArg(a[1], litY) : nullptr;
+            if (!Lx || !Ly) { made = nullptr; return true; }   // listArg 已给文案
+            auto fx = litX ? std::make_shared<std::vector<double>>(Lx->values) : nullptr;
+            auto fy = litY ? std::make_shared<std::vector<double>>(Ly->values) : nullptr;
+            xvals = [Lx, fx]() -> const std::vector<double> & { return fx ? *fx : Lx->values; };
+            yvals = [Ly, fy]() -> const std::vector<double> & { return fy ? *fy : Ly->values; };
+        }
         auto l = std::make_unique<GeoLine>();
         l->mode = GeoLine::Mode::Fixed;
-        auto fx = litX ? std::make_shared<std::vector<double>>(Lx->values) : nullptr;
-        auto fy = litY ? std::make_shared<std::vector<double>>(Ly->values) : nullptr;
-        auto xvals = [Lx, fx]() -> const std::vector<double> & { return fx ? *fx : Lx->values; };
-        auto yvals = [Ly, fy]() -> const std::vector<double> & { return fy ? *fy : Ly->values; };
         l->calc = [xvals, yvals](GeoLine *g) {
             const std::vector<double> &XV = xvals();
             const std::vector<double> &YV = yvals();
@@ -4391,8 +4777,9 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             g->c = Sxy * mux - Sxx * muy;
         };
         l->cmdName = "FitLine";
-        l->cmdArgs = { a[0], a[1] };
-        if (!litX && !litY) l->inputs = { Lx, Ly };
+        l->cmdArgs = a;
+        if (ptLive) l->inputs = { ptLive };
+        else if (!litX && !litY) l->inputs = { Lx, Ly };
         l->update();
         made = std::move(l);
         return true;
@@ -6937,10 +7324,20 @@ std::string Kernel::rename(const std::string &oldLabel, const std::string &newLa
     if (lookup(newLabel)) return "标签 " + newLabel + " 已存在";
     const std::string pre = getXml();
     e->label = newLabel;
-    // 命令参数引用同步（.ggb 重放与代数区定义列依赖它）
+    // 命令参数引用同步（.ggb 重放与代数区定义列依赖它）；1.0.7.3 点列表
+    // 引用标签同步（XML 往返依赖 pointRefs 原文）
     for (auto &g : geos_) {
         for (std::string &arg : g->cmdArgs) {
             if (arg == oldLabel) arg = newLabel;
+        }
+        if (GeoList *L = dynamic_cast<GeoList *>(g.get())) {
+            for (std::string &rf : L->pointRefs) {
+                if (rf == oldLabel) rf = newLabel;
+            }
+            // 点列表原文同步（XML 往返 exp="L={A,B}" 依赖 src）
+            if (!L->pointRefs.empty()) {
+                ReplaceWord(L->src, oldLabel, newLabel);
+            }
         }
     }
     // 表达式定义文本同步（轮 D 依随数值 cmd="A1+1"；顺带修正命令数值的
@@ -7108,6 +7505,8 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->values = s->values;
             d->src = s->src;
             d->calc = s->calc;
+            d->points = s->points;
+            d->pointRefs = s->pointRefs;
             break;
         }
         case GeoType::Text: {
@@ -9333,9 +9732,33 @@ void Kernel::render(std::vector<DrawCmd> &out)
         }
         case GeoType::List: {
             // 普通数值列表不绘制（上游 同语义）；1.0.6.3 图表列表走
-            // appendChartPlot（bar/hist/line/scatter/box/stem）
+            // appendChartPlot（bar/hist/line/scatter/box/stem）；
+            // 1.0.7.3 点列表逐元素画点标记（GGB 列表元素同款：无标签、
+            // 不参与画布拾取，选中特效整组亮环）
             GeoList *cl = static_cast<GeoList *>(g.get());
-            if (!cl->chart.empty()) appendChartPlot(*cl, out, selHalo);
+            if (!cl->chart.empty()) {
+                appendChartPlot(*cl, out, selHalo);
+            } else if (!cl->points.empty()) {
+                const std::string pc = ObjectColor(cl->color, darkTheme);
+                for (const auto &q : cl->points) {
+                    const double cx = view.px(q.first), cy = view.py(q.second);
+                    if (cx < -20 || cx > view.width + 20
+                        || cy < -20 || cy > view.height + 20) continue;
+                    if (cl->selected) {
+                        DrawCmd ring;
+                        ring.op = DrawOp::CirclePix;
+                        ring.color = selRing;
+                        ring.lineWidth = 2.5f * view.uiScale;
+                        ring.pts = { (float)cx, (float)cy, (float)(11.0 * view.uiScale) };
+                        out.push_back(ring);
+                    }
+                    DrawCmd d;
+                    d.op = DrawOp::FillCircle;
+                    d.color = pc;
+                    d.pts = { (float)cx, (float)cy, (float)(5.0 * view.uiScale) };
+                    out.push_back(d);
+                }
+            }
             break;
         }
         case GeoType::Text: {

@@ -294,6 +294,13 @@ public:
     std::vector<double> chartX;
     double chartA = 0, chartB = 1;
 
+    // 1.0.7.3 点列表第一期：元素为点。points/pointRefs 一一对应（pointRefs
+    // 空串 = 字面坐标 (a,b)，静态；非空 = 引用点标签，calc 按点现值刷坐标，
+    // inputs 挂引用点级联重算）。values 保持空；数值/统计命令对点列表拒绝
+    std::vector<std::pair<double, double>> points;
+    std::vector<std::string> pointRefs;
+    bool isPointList() const { return !points.empty(); }
+
     void update() override { if (calc) calc(this); }
     std::string valueText() const override;
     std::string definitionText() const override;

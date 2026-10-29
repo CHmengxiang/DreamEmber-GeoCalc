@@ -354,6 +354,16 @@ std::string GeoList::valueText() const
         return std::string(cn) + "（" + std::to_string(n)
              + (chart == "hist" ? " 组）" : chart == "box" ? " 数概括）" : " 条）");
     }
+    // 1.0.7.3 点列表：{(1, 2), (3, 4)}（最多 10 项，余略）
+    if (!points.empty()) {
+        std::string s = "{";
+        for (size_t i = 0; i < points.size() && i < 10; ++i) {
+            if (i > 0) s += ", ";
+            s += "(" + FormatNum(points[i].first) + ", " + FormatNum(points[i].second) + ")";
+        }
+        if (points.size() > 10) s += ", …";
+        return s + "}";
+    }
     if (values.empty()) return "{}";
     if (isMatrix) {
         // 矩阵按行拆行显示（{{1,2},{3,4}} → 两行花括号串）；GGB 用 LaTeX
