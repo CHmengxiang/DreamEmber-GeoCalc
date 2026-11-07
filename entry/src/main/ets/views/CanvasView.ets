@@ -137,6 +137,7 @@ import { AlgebraEntry, parseAlgebra } from '../model/GeoTypes';
 import { Theme } from '../model/Theme';
 import { AlgebraPanel } from './AlgebraPanel';
 import { CanvasStage } from './CanvasStage';
+import { View3D } from './View3D';
 import { ToolsPanel } from './ToolsPanel';
 import { SheetPanel } from './SheetPanel';
 import { DataAnalysisPanel } from './DataPanel';
@@ -239,6 +240,8 @@ export struct CanvasView {
   @StorageProp('evt.saveGgb') @Watch('onSaveGgbEvt') private saveGgbTick: number = 0;
   // 第五包：CAS 视图（☰ 菜单"视图"分组发起，上游经典版 同位）
   @StorageProp('evt.openCas') @Watch('onOpenCasEvt') private openCasTick: number = 0;
+  // 1.0.8.1 3D 视图开关（☰ 菜单"视图"分组切换；true = 画布区挂 View3D）
+  @StorageProp('view3dOn') @Watch('onView3dToggle') private view3dOn: boolean = false;
   // 六十八包④（真机反馈⑤）：面板浮层的系统返回拦截信号（Index.onBackPress
   // 打点，这里分级关闭：二级页先回分类列表，一级才关面板）+ 显隐上报
   @StorageProp('evt.cmdOverlayBack') @Watch('onCmdOverlayBack') private cmdOverlayBackTick: number = 0;
@@ -435,6 +438,8 @@ export struct CanvasView {
     if (frame.length === 0) {
       return;
     }
+    // 1.0.8.1：2D 帧重绘伴随内核构造变化，可能影响三维对象 → 通知 View3D
+    this.bump3D();
     // 整帧重绘：清屏（深色下画布底色同步）
     this.ctx.fillStyle = Theme.canvas(this.dark);
     this.ctx.fillRect(0, 0, this.canvasW, this.canvasH);
@@ -1664,6 +1669,26 @@ export struct CanvasView {
       this.showPanel = true;
       this.panelTab = 'cas';
     });
+  }
+
+  // 1.0.8.1 3D 视图开关（☰ 菜单"视图"分组）：切走时收键盘/提交待输入，
+  // 切回 2D 后整帧重绘（画布位图尺寸沿用 CanvasStage 上报值）
+  private onView3dToggle(): void {
+    this.commitPending();
+    this.dismissKeyboard();
+    if (!this.view3dOn) {
+      this.refresh();
+    }
+  }
+
+  // 1.0.8.1 3D 帧刷新信号：2D 侧任何重绘（输入/删除/拖点/滑条动画）都可能
+  // 改变共享内核构造里的三维对象，bump 让挂载中的 View3D 重取帧
+  private bump3D(): void {
+    if (!this.view3dOn) {
+      return;
+    }
+    AppStorage.setOrCreate('view3dRefresh',
+      (AppStorage.get<number>('view3dRefresh') ?? 0) + 1);
   }
 
   // 六十八包④（真机反馈⑤）：面板浮层期间的系统返回——分级关闭（二级页
@@ -3659,34 +3684,54 @@ export struct CanvasView {
       if (this.isWide && this.selectedLabel.length > 0) {
         this.styleBarRow()
       }
-      CanvasStage({
-        dark: this.dark,
-        tool: this.tool,
-        toolHint: this.toolHint,
-        vpW: $vpW,
-        vpH: $vpH,
-        ctx: this.ctx,
-        onCanvasReady: (w: number, h: number, s: number): void => {
-          this.canvasW = w;
-          this.canvasH = h;
-          this.uiScale = s;
-          this.refresh();
-        },
-        onFrame: (f: string): void => this.execFrame(f),
-        onSelectLabel: (l: string): void => this.canvasSelect(l),
-        onDragMoveSync: (): void => this.onDragSync(false),
-        onDragEndSync: (): void => this.onDragSync(true),
-        onToolResult: (r: string): void => this.applyToolResult(r),
-        onSetVisible: (l: string, s: boolean): void => this.toggleRowVisible(l, s),
-        onDeleteObj: (l: string): void => this.deleteObj(l),
-        onCommitPending: (): void => this.commitPending(),
-        onDismissKeyboard: (): void => this.dismissKeyboard(),
-        canUndo: this.canUndo,
-        canRedo: this.canRedo,
-        onMenuAct: (): void => this.onMenuRequest(),
-        onUndoAct: (): void => this.doUndo(),
-        onRedoAct: (): void => this.doRedo()
-      })
+      if (this.view3dOn) {
+        // 1.0.8.1 3D 视图：同画布位替换（代数区/工具面板照常共用）
+        View3D({
+          dark: this.dark,
+          canUndo: this.canUndo,
+          canRedo: this.canRedo,
+          onCanvasReady: (w: number, h: number, s: number): void => {
+            this.canvasW = w;
+            this.canvasH = h;
+            this.uiScale = s;
+          },
+          onSelectLabel: (l: string): void => this.canvasSelect(l),
+          onCommitPending: (): void => this.commitPending(),
+          onDismissKeyboard: (): void => this.dismissKeyboard(),
+          onMenuAct: (): void => this.onMenuRequest(),
+          onUndoAct: (): void => this.doUndo(),
+          onRedoAct: (): void => this.doRedo()
+        })
+      } else {
+        CanvasStage({
+          dark: this.dark,
+          tool: this.tool,
+          toolHint: this.toolHint,
+          vpW: $vpW,
+          vpH: $vpH,
+          ctx: this.ctx,
+          onCanvasReady: (w: number, h: number, s: number): void => {
+            this.canvasW = w;
+            this.canvasH = h;
+            this.uiScale = s;
+            this.refresh();
+          },
+          onFrame: (f: string): void => this.execFrame(f),
+          onSelectLabel: (l: string): void => this.canvasSelect(l),
+          onDragMoveSync: (): void => this.onDragSync(false),
+          onDragEndSync: (): void => this.onDragSync(true),
+          onToolResult: (r: string): void => this.applyToolResult(r),
+          onSetVisible: (l: string, s: boolean): void => this.toggleRowVisible(l, s),
+          onDeleteObj: (l: string): void => this.deleteObj(l),
+          onCommitPending: (): void => this.commitPending(),
+          onDismissKeyboard: (): void => this.dismissKeyboard(),
+          canUndo: this.canUndo,
+          canRedo: this.canRedo,
+          onMenuAct: (): void => this.onMenuRequest(),
+          onUndoAct: (): void => this.doUndo(),
+          onRedoAct: (): void => this.doRedo()
+        })
+      }
     }
     // 画布区占满剩余高度（窄/宽屏通用）：内层 CanvasStage 的 layoutWeight
     // 依赖本 Column 有确定高度，缺了它画布会被压成 0 高（真机反馈）

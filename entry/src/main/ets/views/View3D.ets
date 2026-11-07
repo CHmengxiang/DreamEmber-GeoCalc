@@ -1,0 +1,398 @@
+// View3D.ets — 1.0.8.1 三维视图（3D 一期；上游 Ggb3D 轨道相机交互子集）。
+// 画布本体：内核 render3D 出帧（底面网格/三轴/曲面网格/球柱线框/空间线/
+// 三维点，投影后与 2D 帧同协议），本组件持有帧执行器（与 CanvasView.execFrame
+// 同一套 op 语义）。
+// 交互：单指拖 = 轨道旋转（按在三维点上则视平面拖点）；双指捏 = 缩放；
+// 点按 = 选中三维点（代数区联动）；PC 滚轮 = 缩放；「复位」= 视角回标准。
+// 刷新：宿主在输入/删除/滑条动画等变更后 bump AppStorage view3dRefresh，
+// 本组件 @StorageProp+@Watch 重取帧（代数区与本视图共享同一内核构造）。
+import dreamemberKernel from 'libdreamember.so';
+import { Theme } from '../model/Theme';
+
+@Component
+export struct View3D {
+  @Prop dark: boolean = false;
+  // 宿主变更信号（输入/删除/滑条动画）→ 重取 3D 帧
+  @StorageProp('view3dRefresh') @Watch('onRefreshBump') refreshGen: number = 0;
+  // 复位按钮按压回弹 + 画布 vp 尺寸（复位按钮定位用）
+  @State private resetPressed: boolean = false;
+  @State private vpW: number = 0;
+  @State private vpH: number = 0;
+  onCanvasReady: (w: number, h: number, s: number) => void = (_w: number, _h: number, _s: number) => {};
+  // 点按/拖动命中三维点后上报宿主（代数区选中联动，'' 清除）
+  onSelectLabel: (l: string) => void = (_l: string) => {};
+  // 宿主统一提交待输入行/收键盘（点画布语义与 2D 一致）
+  onCommitPending: () => void = () => {};
+  onDismissKeyboard: () => void = () => {};
+  // 1.0.8.1 左上浮层（☰/↶/↷：3D 视图顶替 CanvasStage 后主菜单/撤销入口
+  // 不能丢——冒烟实测缺口；撤销栈状态由宿主直传）
+  @Prop canUndo: boolean = false;
+  @Prop canRedo: boolean = false;
+  onMenuAct: () => void = () => {};
+  onUndoAct: () => void = () => {};
+  onRedoAct: () => void = () => {};
+
+  private ctx: CanvasRenderingContext2D =
+    new CanvasRenderingContext2D(new RenderingContextSettings(true));
+  // 位图像素（ctx.width/height）与 vp/px 比例；就绪前渲染调用直接跳过
+  private canvasW: number = 0;
+  private canvasH: number = 0;
+  private uiScale: number = 1.0;
+  // 触摸状态：0=无 1=拖三维点 2=旋转 3=捏合
+  private mode: number = 0;
+  private lastX: number = 0;      // vp
+  private lastY: number = 0;
+  private pinchDist: number = 0;
+  private tapMoved: boolean = false;
+  private downX: number = 0;
+  private downY: number = 0;
+  // 鼠标滚轮（onAxisEvent）：UPDATE 事件间的垂直轴值差
+  private axisLastY: number = 0;
+
+  private onRefreshBump(): void {
+    this.refresh();
+  }
+
+  // 触摸 vp 坐标 -> 位图像素
+  private toPx(vpX: number, vpY: number): number[] {
+    return [vpX * this.uiScale, vpY * this.uiScale];
+  }
+
+  // 四十包 同款会聚重解：onReady（位图就绪）与 onAreaChange（vp 就绪）
+  // 双侧重解、按值去重——无论两事件谁先到，后到者拿正确配对
+  private syncCanvasMetrics(): void {
+    const w = this.ctx.width;
+    const h = this.ctx.height;
+    if (w <= 0 || h <= 0) {
+      return;
+    }
+    const s = this.vpW > 0 ? w / this.vpW : this.uiScale;
+    if (w === this.canvasW && h === this.canvasH && s === this.uiScale) {
+      return;
+    }
+    this.canvasW = w;
+    this.canvasH = h;
+    this.uiScale = s;
+    this.onCanvasReady(w, h, s);
+    this.refresh();
+  }
+
+  private refresh(): void {
+    if (this.canvasW <= 1 || this.canvasH <= 1) {
+      return;
+    }
+    this.execFrame(dreamemberKernel.kernelRender3D(this.canvasW, this.canvasH,
+      this.uiScale, this.dark));
+  }
+
+  // ---- 帧执行器（op 语义与 CanvasView.execFrame 一致；3D 帧是同一协议） ----
+
+  private execFrame(frame: string): void {
+    if (frame.length === 0) {
+      return;
+    }
+    this.ctx.fillStyle = Theme.canvas(this.dark);
+    this.ctx.fillRect(0, 0, this.canvasW, this.canvasH);
+    const rows = frame.split('\n');
+    for (const row of rows) {
+      if (row.length < 4) continue;
+      const parts = row.split('|');
+      if (parts.length < 4) continue;
+      const op = parts[0];
+      if (op === 'c') continue;
+      const color = parts[1];
+      const lw = parseFloat(parts[2]);
+      let text = '';
+      let coordsStr = parts[3];
+      if (op === 't') {
+        text = parts[3];
+        coordsStr = parts.length > 4 ? parts[4] : '';
+      }
+      const nums: number[] = [];
+      if (coordsStr.length > 0) {
+        for (const s of coordsStr.split(',')) {
+          const v = parseFloat(s);
+          if (!isNaN(v)) nums.push(v);
+        }
+      }
+      switch (op) {
+        case 's':
+          if (nums.length >= 4) {
+            this.ctx.beginPath();
+            this.ctx.strokeStyle = color;
+            this.ctx.lineWidth = lw;
+            this.ctx.moveTo(nums[0], nums[1]);
+            this.ctx.lineTo(nums[2], nums[3]);
+            this.ctx.stroke();
+          }
+          break;
+        case 'm':
+          for (let i = 0; i + 3 < nums.length; i += 4) {
+            this.ctx.beginPath();
+            this.ctx.strokeStyle = color;
+            this.ctx.lineWidth = lw;
+            this.ctx.moveTo(nums[i], nums[i + 1]);
+            this.ctx.lineTo(nums[i + 2], nums[i + 3]);
+            this.ctx.stroke();
+          }
+          break;
+        case 'p':
+          if (nums.length >= 4) {
+            this.ctx.beginPath();
+            this.ctx.strokeStyle = color;
+            this.ctx.lineWidth = lw;
+            this.ctx.moveTo(nums[0], nums[1]);
+            for (let i = 2; i + 1 < nums.length; i += 2) {
+              this.ctx.lineTo(nums[i], nums[i + 1]);
+            }
+            this.ctx.stroke();
+          }
+          break;
+        case 'o':
+          if (nums.length >= 3) {
+            this.ctx.beginPath();
+            this.ctx.strokeStyle = color;
+            this.ctx.lineWidth = lw;
+            this.ctx.arc(nums[0], nums[1], nums[2], 0, Math.PI * 2);
+            this.ctx.stroke();
+          }
+          break;
+        case 'f':
+          if (nums.length >= 3) {
+            this.ctx.beginPath();
+            this.ctx.fillStyle = color;
+            this.ctx.arc(nums[0], nums[1], nums[2], 0, Math.PI * 2);
+            this.ctx.fill();
+          }
+          break;
+        case 't':
+          if (text.length > 0 && nums.length >= 2) {
+            this.ctx.fillStyle = color;
+            this.ctx.font = `${Math.round(14 * this.uiScale)}px sans-serif`;
+            this.ctx.fillText(text, nums[0], nums[1]);
+          }
+          break;
+        case 'a':
+          if (nums.length >= 6) {
+            this.ctx.beginPath();
+            this.ctx.strokeStyle = color;
+            this.ctx.lineWidth = lw;
+            this.ctx.arc(nums[0], nums[1], nums[2], nums[3], nums[4], false);
+            this.ctx.stroke();
+          }
+          break;
+        case 'y':
+          // 曲面四边形填充（rgba() 串）
+          if (nums.length >= 6) {
+            this.ctx.beginPath();
+            this.ctx.fillStyle = color;
+            this.ctx.moveTo(nums[0], nums[1]);
+            for (let i = 2; i + 1 < nums.length; i += 2) {
+              this.ctx.lineTo(nums[i], nums[i + 1]);
+            }
+            this.ctx.closePath();
+            this.ctx.fill();
+          }
+          break;
+        default:
+          break;
+      }
+    }
+  }
+
+  // ---- 交互 ----
+
+  private resetView(): void {
+    this.resetPressed = true;
+    setTimeout(() => {
+      this.resetPressed = false;
+    }, 120);
+    this.execFrame(dreamemberKernel.kernel3DReset());
+  }
+
+  // PC 滚轮缩放（方向语义与 CanvasStage 同：轴值增大 = 下滚 = 缩小）
+  private onCanvasAxis(ev: AxisEvent): void {
+    if (ev.action === AxisAction.BEGIN) {
+      this.axisLastY = ev.getVerticalAxisValue();
+      return;
+    }
+    if (ev.action === AxisAction.UPDATE) {
+      const cur = ev.getVerticalAxisValue();
+      const dv = cur - this.axisLastY;
+      this.axisLastY = cur;
+      if (dv === 0 || this.canvasW <= 1) {
+        return;
+      }
+      let steps = dv > 0 ? 1 : -1;
+      if (ev.scrollStep !== undefined && ev.scrollStep > 0) {
+        steps *= Math.min(4, Math.max(1, Math.round(ev.scrollStep)));
+      }
+      const f = Math.pow(1.1, -steps);
+      this.execFrame(dreamemberKernel.kernel3DZoom(f));
+    } else if (ev.action === AxisAction.END || ev.action === AxisAction.CANCEL) {
+      this.axisLastY = 0;
+    }
+  }
+
+  private handleTouch(ev: TouchEvent): void {
+    switch (ev.type) {
+      case TouchType.Down: {
+        this.onCommitPending();
+        this.onDismissKeyboard();
+        if (ev.touches.length === 1) {
+          this.mode = 2;   // 待旋转（Down 先探点：命中三维点则升级拖点）
+          this.lastX = ev.touches[0].x;
+          this.lastY = ev.touches[0].y;
+          this.downX = ev.touches[0].x;
+          this.downY = ev.touches[0].y;
+          this.tapMoved = false;
+          const p = this.toPx(ev.touches[0].x, ev.touches[0].y);
+          const hit: string = dreamemberKernel.kernel3DPick(p[0], p[1]);
+          if (hit.startsWith('+|')) {
+            this.mode = 1;   // 拖三维点（kernel 内已记住命中点）
+          }
+        } else if (ev.touches.length >= 2) {
+          this.mode = 3;   // 捏合
+          dreamemberKernel.kernelEndDrag();   // 取消拖点拾取
+          const dx = ev.touches[0].x - ev.touches[1].x;
+          const dy = ev.touches[0].y - ev.touches[1].y;
+          this.pinchDist = Math.sqrt(dx * dx + dy * dy);
+        }
+        break;
+      }
+      case TouchType.Move: {
+        if (ev.touches.length >= 2 && this.mode === 3) {
+          const dx = ev.touches[0].x - ev.touches[1].x;
+          const dy = ev.touches[0].y - ev.touches[1].y;
+          const dist = Math.sqrt(dx * dx + dy * dy);
+          if (this.pinchDist > 1e-6 && dist > 1e-6) {
+            this.execFrame(dreamemberKernel.kernel3DZoom(dist / this.pinchDist));
+          }
+          this.pinchDist = dist;
+          this.tapMoved = true;
+          break;
+        }
+        if (ev.touches.length === 0 || this.mode === 0) {
+          break;
+        }
+        const dx = ev.touches[0].x - this.lastX;
+        const dy = ev.touches[0].y - this.lastY;
+        if (Math.abs(ev.touches[0].x - this.downX) > 6
+          || Math.abs(ev.touches[0].y - this.downY) > 6) {
+          this.tapMoved = true;
+        }
+        if (dx === 0 && dy === 0) {
+          break;
+        }
+        this.lastX = ev.touches[0].x;
+        this.lastY = ev.touches[0].y;
+        if (this.mode === 1) {
+          const dpx = this.toPx(dx, dy);
+          const frame = dreamemberKernel.kernel3DDragPoint(dpx[0], dpx[1]);
+          if (frame !== '-|') {
+            this.execFrame(frame);
+          }
+        } else if (this.mode === 2) {
+          const dpx = this.toPx(dx, dy);
+          this.execFrame(dreamemberKernel.kernel3DRotate(dpx[0], dpx[1]));
+        }
+        break;
+      }
+      case TouchType.Up:
+      case TouchType.Cancel: {
+        if (this.mode === 1 || this.mode === 2) {
+          dreamemberKernel.kernelEndDrag();
+        }
+        // 点按（未移动未捏合）：拾取三维点选中，未命中清除选中
+        if (ev.type === TouchType.Up && this.mode === 2 && !this.tapMoved) {
+          const p = this.toPx(this.downX, this.downY);
+          const hit: string = dreamemberKernel.kernel3DPick(p[0], p[1]);
+          if (hit.startsWith('+|')) {
+            this.onSelectLabel(hit.substring(2));
+          } else {
+            this.onSelectLabel('');
+          }
+        }
+        this.mode = 0;
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  build() {
+    Stack({ alignContent: Alignment.TopStart }) {
+      Canvas(this.ctx)
+        .width('100%')
+        .height('100%')
+        .backgroundColor(Theme.canvas(this.dark))
+        .onAreaChange((_o: Area, n: Area) => {
+          this.vpW = n.width as number;
+          this.vpH = n.height as number;
+          this.syncCanvasMetrics();
+        })
+        .onReady(() => {
+          this.syncCanvasMetrics();
+        })
+        .onTouch((ev: TouchEvent) => this.handleTouch(ev))
+        .onAxisEvent((ev: AxisEvent) => this.onCanvasAxis(ev))
+
+      // 左上浮层 ☰ ↶ ↷（与 CanvasStage 同款：3D 视图下保住主菜单/撤销入口）
+      Row({ space: 6 }) {
+        Text('☰')
+          .fontSize(18)
+          .fontColor(Theme.sub(this.dark))
+          .width(34)
+          .height(34)
+          .textAlign(TextAlign.Center)
+          .borderRadius(8)
+          .backgroundColor(this.dark ? 'rgba(30,32,36,0.72)' : 'rgba(255,255,255,0.72)')
+          .onClick(() => this.onMenuAct())
+        Text('↶')
+          .fontSize(16)
+          .fontColor(this.canUndo ? Theme.sub(this.dark)
+            : (this.dark ? '#4A4D52' : '#C8CBD0'))
+          .width(34)
+          .height(34)
+          .textAlign(TextAlign.Center)
+          .borderRadius(8)
+          .backgroundColor(this.dark ? 'rgba(30,32,36,0.72)' : 'rgba(255,255,255,0.72)')
+          .onClick(() => this.onUndoAct())
+        Text('↷')
+          .fontSize(16)
+          .fontColor(this.canRedo ? Theme.sub(this.dark)
+            : (this.dark ? '#4A4D52' : '#C8CBD0'))
+          .width(34)
+          .height(34)
+          .textAlign(TextAlign.Center)
+          .borderRadius(8)
+          .backgroundColor(this.dark ? 'rgba(30,32,36,0.72)' : 'rgba(255,255,255,0.72)')
+          .onClick(() => this.onRedoAct())
+      }
+      .margin({ left: 8, top: 44 })
+
+      // 左上提示条（交互说明；深浅色自适应半透明底）
+      Text('单指拖=旋转 · 双指=缩放 · 点选/拖动三维点')
+        .fontSize(11)
+        .fontColor(Theme.sub(this.dark))
+        .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+        .borderRadius(6)
+        .backgroundColor(this.dark ? 'rgba(30,32,36,0.72)' : 'rgba(255,255,255,0.72)')
+        .margin({ left: 122, top: 8 })
+
+      // 右上复位视角
+      Text('复位')
+        .fontSize(12)
+        .fontColor(this.resetPressed ? Theme.accent(this.dark) : Theme.sub(this.dark))
+        .padding({ left: 12, right: 12, top: 5, bottom: 5 })
+        .borderRadius(6)
+        .backgroundColor(this.dark ? 'rgba(30,32,36,0.72)' : 'rgba(255,255,255,0.72)')
+        .scale({ x: this.resetPressed ? 0.94 : 1, y: this.resetPressed ? 0.94 : 1 })
+        .margin({ left: this.vpW > 0 ? this.vpW - 64 : 300 })
+        .onClick(() => this.resetView())
+    }
+    .width('100%')
+    .height('100%')
+  }
+}

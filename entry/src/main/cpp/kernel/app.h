@@ -55,6 +55,8 @@ public:
     Kernel() { geos_.reserve(64); }
 
     EuclidianView view;
+    // 1.0.8.1 三维视图坐标系统（3D 一期；状态独立于 2D view，持久化不含）
+    EuclidianView3D view3d;
     std::string lastError;
     // 显示开关（N3：设置面板控制；刻度/轴数字随坐标轴一起开关）
     bool showGrid = true;
@@ -90,6 +92,17 @@ public:
 
     // 生成一帧绘制指令（世界->像素转换在本层完成）
     void render(std::vector<DrawCmd> &out);
+
+    // ---- 1.0.8.1 三维视图（3D 一期） ----
+    // 生成一帧 3D 绘制指令（世界 → 视轨道相机投影像素，DrawCmd 协议与 2D
+    // 共用：底面网格/三轴/曲面网格（画家算法+法向光照）/球柱线框/空间线/
+    // 三维点；2D 对象不出现在 3D 帧，3D 对象不出现在 2D 帧）
+    void render3D(std::vector<DrawCmd> &out);
+    // 3D 点拾取（投影距离最近；仅 is3D 点；outD 回写命中距离）
+    GeoPoint *pickPoint3D(double px, double py, double *outD = nullptr);
+    // 3D 点拖动（屏幕位移 → 视平面内世界位移；仅自由三维点）
+    void movePoint3D(GeoPoint *p, double dxPx, double dyPx);
+    void resetView3D() { view3d.reset(); }
 
     // 命中测试：找像素 (px,py) 附近的可拖动自由点；返回 nullptr 表示无。
     // outD 非空时回写命中距离（无命中 1e9）——工具层点/对象就近比较用

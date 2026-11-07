@@ -16,6 +16,7 @@ namespace {
 dreamember::Kernel g_kernel;
 dreamember::GeoPoint *g_dragPoint = nullptr;    // 当前被单指拖动的自由点（NAPI 侧持有，跨调用有效）
 dreamember::GeoNumeric *g_dragSlider = nullptr; // N5 当前被拖动的滑动条
+dreamember::GeoPoint *g_dragPoint3D = nullptr;  // 1.0.8.1 当前被拖动的三维自由点
 
 std::string NapiToString(napi_env env, napi_value v)
 {
@@ -86,6 +87,17 @@ std::string RenderFrame()
     g_kernel.render(frame);
     std::string out;
     out.reserve(4096);
+    for (const auto &c : frame) AppendCmd(out, c);
+    return out;
+}
+
+// 1.0.8.1 三维帧（协议同 2D：投影后像素坐标，View3D.ets 同一执行器绘制）
+std::string RenderFrame3D()
+{
+    std::vector<dreamember::DrawCmd> frame;
+    g_kernel.render3D(frame);
+    std::string out;
+    out.reserve(8192);
     for (const auto &c : frame) AppendCmd(out, c);
     return out;
 }
@@ -214,9 +226,116 @@ napi_value KernelEndDrag(napi_env env, napi_callback_info)
 {
     g_dragPoint = nullptr;
     g_dragSlider = nullptr;
+    g_dragPoint3D = nullptr;
     napi_value undef;
     napi_get_undefined(env, &undef);
     return undef;
+}
+
+// ---- 1.0.8.1 三维视图 NAPI（协议与 2D 同一套帧文本） ----
+
+// kernelRender3D(w, h, uiScale, dark): string — 3D 画布尺寸 + 比例 + 深色，
+// 输出一帧 3D 绘图指令
+napi_value KernelRender3D(napi_env env, napi_callback_info info)
+{
+    size_t argc = 4;
+    napi_value argv[4] = {nullptr, nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 2) {
+        napi_throw_error(env, nullptr, "kernelRender3D requires (width, height, uiScale?, dark?)");
+        return nullptr;
+    }
+    double w = 0, h = 0, us = 1.0;
+    napi_get_value_double(env, argv[0], &w);
+    napi_get_value_double(env, argv[1], &h);
+    if (argc >= 3 && argv[2] != nullptr) {
+        napi_get_value_double(env, argv[2], &us);
+    }
+    if (argc >= 4 && argv[3] != nullptr) {
+        bool dark = false;
+        napi_get_value_bool(env, argv[3], &dark);
+        g_kernel.darkTheme = dark;
+    }
+    g_kernel.view3d.setCanvasSize((int)w, (int)h, us);
+    return ToNapi(env, RenderFrame3D());
+}
+
+// kernel3DRotate(dx, dy): string — 轨道旋转（拖动像素增量）后返回重绘帧
+napi_value Kernel3DRotate(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 2) {
+        napi_throw_error(env, nullptr, "kernel3DRotate requires (dx, dy)");
+        return nullptr;
+    }
+    double dx = 0, dy = 0;
+    napi_get_value_double(env, argv[0], &dx);
+    napi_get_value_double(env, argv[1], &dy);
+    g_kernel.view3d.rotateBy(dx, dy);
+    return ToNapi(env, RenderFrame3D());
+}
+
+// kernel3DZoom(factor): string — 缩放（捏合倍率）后返回重绘帧
+napi_value Kernel3DZoom(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "kernel3DZoom requires (factor)");
+        return nullptr;
+    }
+    double f = 1.0;
+    napi_get_value_double(env, argv[0], &f);
+    g_kernel.view3d.zoomBy(f);
+    return ToNapi(env, RenderFrame3D());
+}
+
+// kernel3DReset(): string — 视角复位（yaw 30°/pitch 20°/scale 50）
+napi_value Kernel3DReset(napi_env env, napi_callback_info)
+{
+    g_kernel.view3d.reset();
+    return ToNapi(env, RenderFrame3D());
+}
+
+// kernel3DPick(px, py): string — 命中三维自由点则记住并返回 "+|label"，否则 "-|"
+napi_value Kernel3DPick(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 2) {
+        napi_throw_error(env, nullptr, "kernel3DPick requires (px, py)");
+        return nullptr;
+    }
+    double px = 0, py = 0;
+    napi_get_value_double(env, argv[0], &px);
+    napi_get_value_double(env, argv[1], &py);
+    g_dragPoint3D = g_kernel.pickPoint3D(px, py);
+    if (g_dragPoint3D) return ToNapi(env, "+|" + g_dragPoint3D->label);
+    return ToNapi(env, "-|");
+}
+
+// kernel3DDragPoint(dx, dy): string — 拖动已拾取三维点（视平面内位移），返回重绘帧
+napi_value Kernel3DDragPoint(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 2) {
+        napi_throw_error(env, nullptr, "kernel3DDragPoint requires (dx, dy)");
+        return nullptr;
+    }
+    double dx = 0, dy = 0;
+    napi_get_value_double(env, argv[0], &dx);
+    napi_get_value_double(env, argv[1], &dy);
+    if (g_dragPoint3D) {
+        g_kernel.movePoint3D(g_dragPoint3D, dx, dy);
+        return ToNapi(env, RenderFrame3D());
+    }
+    return ToNapi(env, "-|");
 }
 
 // kernelGestureZoom(px, py, factor): string — 以锚点缩放后返回重绘帧
@@ -767,6 +886,12 @@ void DreamemberRegisterKernelApis(napi_env env, napi_value exports)
         { "kernelDeleteObj", nullptr, KernelDeleteObj, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelAlgebra", nullptr, KernelAlgebra, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelRender", nullptr, KernelRender, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelRender3D", nullptr, KernelRender3D, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernel3DRotate", nullptr, Kernel3DRotate, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernel3DZoom", nullptr, Kernel3DZoom, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernel3DReset", nullptr, Kernel3DReset, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernel3DPick", nullptr, Kernel3DPick, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernel3DDragPoint", nullptr, Kernel3DDragPoint, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelPickPoint", nullptr, KernelPickPoint, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelDragPointTo", nullptr, KernelDragPointTo, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelEndDrag", nullptr, KernelEndDrag, nullptr, nullptr, nullptr, napi_default, nullptr },

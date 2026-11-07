@@ -11,6 +11,13 @@ export const kernelDeleteLast: () => string;
 export const kernelDeleteObj: (label: string) => string;
 export const kernelAlgebra: () => string;
 export const kernelRender: (width: number, height: number, uiScale?: number, dark?: boolean) => string;
+// 1.0.8.1 三维视图（3D 一期）：帧协议与 2D 同一套
+export const kernelRender3D: (width: number, height: number, uiScale?: number, dark?: boolean) => string;
+export const kernel3DRotate: (dx: number, dy: number) => string;
+export const kernel3DZoom: (factor: number) => string;
+export const kernel3DReset: () => string;
+export const kernel3DPick: (px: number, py: number) => string;
+export const kernel3DDragPoint: (dx: number, dy: number) => string;
 export const kernelPickPoint: (px: number, py: number) => string;
 export const kernelDragPointTo: (px: number, py: number) => string;
 export const kernelEndDrag: () => void;

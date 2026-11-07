@@ -1350,9 +1350,22 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                     Expr ex, ey;
                     std::string e1, e2;
                     std::string sx = inner.substr(0, cm), sy = inner.substr(cm + 1);
-                    if (ex.parse(sx, e1) && ey.parse(sy, e2)
+                    // 1.0.8.1 三元组 X(u,v,w)（sy 含第二个逗号）：拆出 sz 一并
+                    // 校验后按 (u,v,w) 赋值路径建三维点
+                    size_t cm2 = sy.find(',');
+                    std::string sz;
+                    if (cm2 != std::string::npos) {
+                        sz = sy.substr(cm2 + 1);
+                        sy = sy.substr(0, cm2);
+                    }
+                    Expr ez;
+                    std::string e3;
+                    const bool zOk = sz.empty()
+                        || (ez.parse(sz, e3) && !ez.containsX());
+                    if (ex.parse(sx, e1) && ey.parse(sy, e2) && zOk
                         && !ex.containsX() && !ey.containsX()) {
-                        src = head + "=(" + sx + "," + sy + ")";
+                        src = head + "=(" + sx + "," + sy
+                            + (sz.empty() ? "" : "," + sz) + ")";
                     }
                 }
             }
@@ -1381,8 +1394,27 @@ bool Kernel::inputImpl(const std::string &srcRaw)
         for (size_t ci = 0; ci < lhs.size();) {
             if (IsGreekAt(lhs, ci)) { ci += 2; continue; }   // 希腊标识符（第八包）
             const char c = lhs[ci];
-            if (!isalnum((unsigned char)c) && c != '_' && c != '(' && c != ')') { lhsIsName = false; break; }
+            if (!isalnum((unsigned char)c) && c != '_' && c != '(' && c != ')'
+                && c != ',') { lhsIsName = false; break; }
             ++ci;
+        }
+        // 1.0.8.1 参数化左部 f(x,y)=：逗号仅允许出现在末尾括号组内
+        //（"a,b=5" 这类非参数化逗号左部仍按非赋值处理）
+        if (lhsIsName && lhs.find(',') != std::string::npos) {
+            const size_t op2 = lhs.find('(');
+            if (op2 == std::string::npos || lhs.back() != ')'
+                || lhs.find(',', op2) == std::string::npos
+                || lhs.find(')', op2) != lhs.size() - 1) {
+                lhsIsName = false;
+            } else {
+                for (size_t ci = op2 + 1; ci < lhs.size() - 1; ++ci) {
+                    const char c2 = lhs[ci];
+                    if (!isalpha((unsigned char)c2) && c2 != ',') {
+                        lhsIsName = false;
+                        break;
+                    }
+                }
+            }
         }
         if (lhsIsName) {
             hasAssign = true;
@@ -1393,7 +1425,13 @@ bool Kernel::inputImpl(const std::string &srcRaw)
     if (!hasAssign) rhs = src;
 
     // f(x)= 形式的左部先归一化掉 "(x)"（与函数分支同规则）——必须在下方占用
-    // 检查之前：否则查 "f(x)" 落空，f 已存在时会新建重复标签对象而非重定义
+    // 检查之前：否则查 "f(x)" 落空，f 已存在时会新建重复标签对象而非重定义。
+    // 1.0.8.1 f(x,y)= 曲面形式同理剥 "(x,y)"（surfaceForm 标记进函数分支）
+    bool surfaceForm = false;
+    if (hasAssign && name.size() > 5 && name.compare(name.size() - 5, 5, "(x,y)") == 0) {
+        name.resize(name.size() - 5);
+        surfaceForm = true;
+    }
     if (hasAssign && name.size() > 3 && name.compare(name.size() - 3, 3, "(x)") == 0) {
         name.resize(name.size() - 3);
     }
@@ -1966,20 +2004,41 @@ bool Kernel::inputImpl(const std::string &srcRaw)
     }
 
     // 2) 点： "(u,v)" 或 "A=(u,v)"。无逗号/解析不完整时放行后续分支——
-    // 1.0.6.4 布尔式可整体带括号（(2>1)&&(3>2)），不是点
+    // 1.0.6.4 布尔式可整体带括号（(2>1)&&(3>2)），不是点。
+    // 1.0.8.1 三元组 "(u,v,w)" → 三维点（is3D；2D 视图跳绘，3D 视图投影绘制）
     if (!made && !rhs.empty() && rhs.front() == '(' && rhs.back() == ')') {
         std::string inner = rhs.substr(1, rhs.size() - 2);
         size_t comma = inner.find(',');
         if (comma != std::string::npos) {
             std::string sx = inner.substr(0, comma), sy = inner.substr(comma + 1);
-            std::string e1, e2;
-            Expr ex, ey;
-            if (ex.parse(sx, e1) && ey.parse(sy, e2) && sy.find(',') == std::string::npos) {
-                if (ex.containsX() || ey.containsX()) { lastError = "点坐标不能含 x"; return false; }
+            // 三元组：sy 再按首个逗号拆出 sz
+            size_t comma2 = sy.find(',');
+            std::string sz;
+            if (comma2 != std::string::npos) {
+                sz = sy.substr(comma2 + 1);
+                sy = sy.substr(0, comma2);
+            }
+            std::string e1, e2, e3;
+            Expr ex, ey, ez;
+            if (ex.parse(sx, e1) && ey.parse(sy, e2)
+                && (sz.empty() || ez.parse(sz, e3))
+                && sy.find(',') == std::string::npos) {
+                if (ex.containsX() || ey.containsX() || ez.containsX()) {
+                    lastError = "点坐标不能含 x";
+                    return false;
+                }
                 auto p = std::make_unique<GeoPoint>();
                 p->x = ex.eval(0.0);
                 p->y = ey.eval(0.0);
-                if (!std::isfinite(p->x) || !std::isfinite(p->y)) { lastError = "坐标不是有限数"; return false; }
+                if (!sz.empty()) {
+                    p->z = ez.eval(0.0);
+                    p->is3D = true;
+                }
+                if (!std::isfinite(p->x) || !std::isfinite(p->y)
+                    || !std::isfinite(p->z)) {
+                    lastError = "坐标不是有限数";
+                    return false;
+                }
                 made = std::move(p);
             }
         }
@@ -2151,6 +2210,40 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                 }
             }
         }
+        // 1.0.8.1 曲面入口先于单变量函数校验：f(x,y)=expr 显式形式，或 z=expr
+        //（GGB 3D 输入口径，常数式已在数值分支定型为数值不会到这）。refs 模式
+        // 独立重解析——含滑条引用的式子 plain parse 会先报"未知符号"
+        if (!made && (surfaceForm || (hasAssign && name == "z"))) {
+            Expr body2;
+            std::string err2;
+            if (!body2.parse(norm, err2, std::string(), true)) {
+                lastError = err2;
+                return false;
+            }
+            std::vector<std::pair<std::string, GeoNumeric *>> deps;
+            bool unres = false;
+            for (const std::string &rn : body2.refs()) {
+                GeoNumeric *dn = dynamic_cast<GeoNumeric *>(lookup(rn));
+                if (!dn) {
+                    unres = true;
+                    break;
+                }
+                deps.emplace_back(rn, dn);
+            }
+            if (unres) {
+                lastError = "曲面引用了非数值对象（仅滑条/数值可随动）";
+                return false;
+            }
+            auto s2 = std::make_unique<GeoSurface>();
+            s2->src = norm;
+            s2->body = std::move(body2);
+            for (const auto &d : deps) {
+                s2->refDeps.push_back(d);
+                s2->inputs.push_back(d.second);
+            }
+            made = std::move(s2);
+            if (!surfaceForm && name == "z") name.clear();
+        }
         if (!made) {
             if (!body.parse(norm, err)) {
                 lastError = err;
@@ -2159,7 +2252,8 @@ bool Kernel::inputImpl(const std::string &srcRaw)
             if (body.containsY()) {
                 // y 已是第二变量（批次⑥）：单变量函数路径静默按 y=0 求值会画错，
                 // 显式拒绝并引导到两变量不等式
-                lastError = "函数暂不支持 y，两变量请用不等式（如 x^2+y^2<9）";
+                lastError = "函数暂不支持 y，两变量请用不等式（如 x^2+y^2<9）"
+                            "或曲面 f(x,y)=…";
                 return false;
             }
             if (!body.containsX()) {
@@ -3139,6 +3233,16 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                 s->cmdName = "Segment";
                 s->cmdArgs = { a[0], a[1] };
                 made = std::move(s);
+            } else if (pts[0]->is3D || pts[1]->is3D) {
+                // 1.0.8.1 空间直线：任一端为三维点 → 参数式 Line3
+                //（2D GeoLine 的 ax+by=c 无 z 分量，混用会把直线压平）
+                auto l3 = std::make_unique<GeoLine3>();
+                l3->p1 = pts[0];
+                l3->p2 = pts[1];
+                l3->inputs = { pts[0], pts[1] };
+                l3->cmdName = "Line";
+                l3->cmdArgs = { a[0], a[1] };
+                made = std::move(l3);
             } else {
                 auto l = std::make_unique<GeoLine>();
                 l->mode = GeoLine::Mode::TwoPoints;
@@ -3261,6 +3365,101 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         made = std::move(c);
         return true;
     }
+    // 1.0.8.1 Sphere(M, r | A)：球心 M（2D 点按 z=0 允许），半径取数值/
+    // 数值引用或过点距离。渲染 lat/long 线框（render3D）
+    if (cmdLower == "sphere" && a.size() == 2) {
+        GeoPoint *center = lookupPoint(a[0]);
+        if (!center) { lastError = "未找到点 " + a[0]; made = nullptr; return true; }
+        auto sp = std::make_unique<GeoSphere>();
+        sp->center = center;
+        if (GeoPoint *through = lookupPoint(a[1])) {
+            sp->through = through;
+            sp->inputs = { center, through };
+        } else if (GeoNumeric *rn = dynamic_cast<GeoNumeric *>(lookup(a[1]))) {
+            sp->radiusNum = rn;
+            sp->inputs = { center, rn };
+        } else {
+            Expr re;
+            std::string err;
+            if (!re.parse(a[1], err) || re.containsX()) {
+                lastError = "半径不是数: " + a[1];
+                made = nullptr;
+                return true;
+            }
+            sp->radius = re.eval(0.0);
+            if (!(sp->radius > 0)) { lastError = "半径必须为正数"; made = nullptr; return true; }
+            sp->inputs = { center };
+        }
+        sp->cmdName = "Sphere";
+        sp->cmdArgs = { a[0], a[1] };
+        made = std::move(sp);
+        return true;
+    }
+    // 1.0.8.1 Cylinder 两种形式：Cylinder(M, r, h) 底心 M + 半径 r + 沿 z 高
+    // h；Cylinder(A, B, r) 轴线 A→B 半径 r（一般方向轴，圆面⊥轴）
+    if (cmdLower == "cylinder" && (a.size() == 3)) {
+        GeoPoint *p0 = lookupPoint(a[0]);
+        if (!p0) { lastError = "未找到点 " + a[0]; made = nullptr; return true; }
+        auto cy = std::make_unique<GeoCylinder>();
+        cy->base = p0;
+        if (GeoPoint *p1 = lookupPoint(a[1])) {
+            // 轴线形式 (A, B, r)
+            cy->topPt = p1;
+            if (GeoNumeric *rn = dynamic_cast<GeoNumeric *>(lookup(a[2]))) {
+                cy->radiusNum = rn;
+                cy->inputs = { p0, p1, rn };
+            } else {
+                Expr re;
+                std::string err;
+                if (!re.parse(a[2], err) || re.containsX()) {
+                    lastError = "半径不是数: " + a[2];
+                    made = nullptr;
+                    return true;
+                }
+                cy->radius = re.eval(0.0);
+                if (!(cy->radius > 0)) { lastError = "半径必须为正数"; made = nullptr; return true; }
+                cy->inputs = { p0, p1 };
+            }
+        } else if (lookup(a[1]) != nullptr
+                   && dynamic_cast<GeoNumeric *>(lookup(a[1])) == nullptr) {
+            lastError = "Cylinder 需要（点, 数, 数）或（点, 点, 数）";
+            made = nullptr;
+            return true;
+        } else {
+            // 底心形式 (M, r, h)
+            if (GeoNumeric *rn = dynamic_cast<GeoNumeric *>(lookup(a[1]))) {
+                cy->radiusNum = rn;
+            } else {
+                Expr re;
+                std::string err;
+                if (!re.parse(a[1], err) || re.containsX()) {
+                    lastError = "半径不是数: " + a[1];
+                    made = nullptr;
+                    return true;
+                }
+                cy->radius = re.eval(0.0);
+            }
+            if (GeoNumeric *hn = dynamic_cast<GeoNumeric *>(lookup(a[2]))) {
+                cy->heightNum = hn;
+            } else {
+                Expr re;
+                std::string err;
+                if (!re.parse(a[2], err) || re.containsX()) {
+                    lastError = "高不是数: " + a[2];
+                    made = nullptr;
+                    return true;
+                }
+                cy->height = re.eval(0.0);
+            }
+            cy->inputs = { p0 };
+            if (cy->radiusNum) cy->inputs.push_back(cy->radiusNum);
+            if (cy->heightNum) cy->inputs.push_back(cy->heightNum);
+        }
+        cy->cmdName = "Cylinder";
+        cy->cmdArgs = a;
+        made = std::move(cy);
+        return true;
+    }
     if (cmdLower == "perpendicularline" && a.size() == 2) {
         // PerpendicularLine(点, 基准) — 上游 参数序：点在前，基准（直线/线段/
         // 一次函数图像）在后。先按点,基准解；若第一个参数不是点再试反序（容错）。
@@ -3370,8 +3569,10 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         auto n = std::make_unique<GeoNumeric>();
         GeoPoint *p1 = pts[0], *p2 = pts[1];
         n->calc = [p1, p2]() {
+            // 1.0.8.1 三维点距离（任一端 is3D 计 z；2D 口径不变）
+            const double dz = (p1->is3D || p2->is3D) ? p2->z - p1->z : 0.0;
             double dx = p2->x - p1->x, dy = p2->y - p1->y;
-            return sqrt(dx * dx + dy * dy);
+            return sqrt(dx * dx + dy * dy + dz * dz);
         };
         n->cmd = "Distance(" + p1->label + ", " + p2->label + ")";
         n->cmdName = "Distance";
@@ -8049,6 +8250,9 @@ std::string Kernel::nextLabelFor(GeoType t)
     } else if (t == GeoType::Function) {
         pool = "fghjklmnpqrs";
         poolLen = 12;
+    } else if (t == GeoType::Surface) {
+        pool = "fghjklmnpqrs";   // 曲面与函数同池（GGB 同款：f(x,y) 记号）
+        poolLen = 12;
     } else if (t == GeoType::List) {
         for (int n = 1; n < 1000; ++n) {
             std::string cand = "L" + std::to_string(n);
@@ -8095,6 +8299,11 @@ void Kernel::algebraRows(std::vector<AlgebraRow> &out) const
         case GeoType::List: r.type = "list"; break;
         case GeoType::Text: r.type = "text"; break;
         case GeoType::Angle: r.type = "angle"; break;
+        // 1.0.8.1 三维对象（3D 视图一期；Line3 复用 "line" 行类型）
+        case GeoType::Surface: r.type = "surface"; break;
+        case GeoType::Sphere: r.type = "sphere"; break;
+        case GeoType::Cylinder: r.type = "cylinder"; break;
+        case GeoType::Line3: r.type = "line"; break;
         case GeoType::Numeric: {
             GeoNumeric *n = static_cast<GeoNumeric *>(g.get());
             r.type = n->isSlider ? "slider" : "numeric";
@@ -8171,6 +8380,7 @@ GeoPoint *Kernel::pickPoint(double px, double py, double *outD)
     for (auto &g : geos_) {
         if (g->type() != GeoType::Point) continue;
         GeoPoint *p = static_cast<GeoPoint *>(g.get());
+        if (p->is3D) continue;   // 1.0.8.1 三维点不在 2D 视图拾取
         double dx = view.px(p->x) - px;
         double dy = view.py(p->y) - py;
         double d = sqrt(dx * dx + dy * dy);
@@ -8198,6 +8408,45 @@ void Kernel::movePoint(GeoPoint *p, double wx, double wy)
     if (!p->isFree) return;
     p->x = wx;
     p->y = wy;
+    recomputeAll();
+}
+
+// 1.0.8.1 三维点拾取：3D 视图像素坐标 → 最近 is3D 自由点（投影距离）。
+// 依随点（Midpoint3D 等）不可拾取拖动（2D 口径一致）
+GeoPoint *Kernel::pickPoint3D(double px, double py, double *outD)
+{
+    GeoPoint *best = nullptr;
+    double bestD = 1e9;
+    const double grab = 18.0 * view3d.uiScale;
+    for (auto &g : geos_) {
+        if (g->type() != GeoType::Point) continue;
+        GeoPoint *p = static_cast<GeoPoint *>(g.get());
+        if (!p->is3D) continue;
+        double sx, sy;
+        view3d.project(p->x, p->y, p->z, sx, sy);
+        const double dx = sx - px, dy = sy - py;
+        const double d = sqrt(dx * dx + dy * dy);
+        if (d < grab && d < bestD) {
+            bestD = d;
+            best = p;
+        }
+    }
+    if (outD) *outD = bestD;
+    return best;
+}
+
+// 1.0.8.1 三维点拖动：屏幕位移 → 视平面内世界位移（dragDelta：垂直视向、
+// 过点自身的平面，深度不变）。仅自由三维点（依随/路径点拒绝）
+void Kernel::movePoint3D(GeoPoint *p, double dxPx, double dyPx)
+{
+    if (!p || !p->is3D) return;
+    if (!p->isFree || p->path) return;
+    double wx, wy, wz;
+    view3d.dragDelta(dxPx, dyPx, wx, wy, wz);
+    if (!std::isfinite(wx) || !std::isfinite(wy) || !std::isfinite(wz)) return;
+    p->x += wx;
+    p->y += wy;
+    p->z += wz;
     recomputeAll();
 }
 
@@ -8658,6 +8907,11 @@ std::string Kernel::propsOf(const std::string &label) const
     case GeoType::Text: ty = "text"; break;
     case GeoType::Angle: ty = "angle"; break;
     case GeoType::Numeric: ty = "numeric"; break;
+    // 1.0.8.1 三维对象属性快照（样式条显隐/颜色可调）
+    case GeoType::Surface: ty = "surface"; break;
+    case GeoType::Sphere: ty = "sphere"; break;
+    case GeoType::Cylinder: ty = "cylinder"; break;
+    case GeoType::Line3: ty = "line"; break;
     }
     add("type", ty);
     add("vis", g->visible ? "1" : "0");
@@ -8962,6 +9216,8 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             GeoPoint *s = static_cast<GeoPoint *>(src);
             d->x = s->x;
             d->y = s->y;
+            d->z = s->z;
+            d->is3D = s->is3D;
             d->isFree = s->isFree;
             d->calc = s->calc;
             d->pointSize = s->pointSize;
@@ -9111,6 +9367,44 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->anchor = s->anchor;
             d->segs = s->segs;
             d->refs = s->refs;
+            break;
+        }
+        // 1.0.8.1 三维对象重定义（同类型就地搬状态）
+        case GeoType::Surface: {
+            GeoSurface *d = static_cast<GeoSurface *>(dst);
+            GeoSurface *s = static_cast<GeoSurface *>(src);
+            d->src = s->src;
+            d->body = s->body;
+            d->fillAlpha = s->fillAlpha;
+            break;
+        }
+        case GeoType::Sphere: {
+            GeoSphere *d = static_cast<GeoSphere *>(dst);
+            GeoSphere *s = static_cast<GeoSphere *>(src);
+            d->center = s->center;
+            d->through = s->through;
+            d->radiusNum = s->radiusNum;
+            d->radius = s->radius;
+            d->calc = s->calc;
+            break;
+        }
+        case GeoType::Cylinder: {
+            GeoCylinder *d = static_cast<GeoCylinder *>(dst);
+            GeoCylinder *s = static_cast<GeoCylinder *>(src);
+            d->base = s->base;
+            d->topPt = s->topPt;
+            d->radiusNum = s->radiusNum;
+            d->heightNum = s->heightNum;
+            d->radius = s->radius;
+            d->height = s->height;
+            d->calc = s->calc;
+            break;
+        }
+        case GeoType::Line3: {
+            GeoLine3 *d = static_cast<GeoLine3 *>(dst);
+            GeoLine3 *s = static_cast<GeoLine3 *>(src);
+            d->p1 = s->p1;
+            d->p2 = s->p2;
             break;
         }
         }
@@ -11124,6 +11418,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
         switch (g->type()) {
         case GeoType::Point: {
             GeoPoint *p = static_cast<GeoPoint *>(g.get());
+            if (p->is3D) break;   // 1.0.8.1 三维点只在 3D 视图绘制
             double cx = view.px(p->x), cy = view.py(p->y);
             if (cx < -20 || cx > view.width + 20 || cy < -20 || cy > view.height + 20) break;
             if (p->selected) {
@@ -11152,6 +11447,8 @@ void Kernel::render(std::vector<DrawCmd> &out)
         }
         case GeoType::Segment: {
             GeoSegment *s = static_cast<GeoSegment *>(g.get());
+            // 1.0.8.1 三维端点线段只在 3D 视图绘制（像线段恒 2D）
+            if (!s->image && s->p1 && s->p2 && (s->p1->is3D || s->p2->is3D)) break;
             DrawCmd d;
             d.op = DrawOp::Segment;
             d.color = ObjectColor(s->color, darkTheme);
@@ -11268,6 +11565,8 @@ void Kernel::render(std::vector<DrawCmd> &out)
         }
         case GeoType::Ray: {
             GeoRay *r = static_cast<GeoRay *>(g.get());
+            // 1.0.8.1 三维端点射线 3D 一期不绘（2D/3D 视图都跳过）
+            if ((r->p1 && r->p1->is3D) || (r->p2 && r->p2->is3D)) break;
             double x1 = view.px(r->p1->x), y1 = view.py(r->p1->y);
             double dx = view.px(r->p2->x) - x1, dy = view.py(r->p2->y) - y1;
             double len = sqrt(dx * dx + dy * dy);
@@ -11299,6 +11598,8 @@ void Kernel::render(std::vector<DrawCmd> &out)
         }
         case GeoType::Vector: {
             GeoVector *v = static_cast<GeoVector *>(g.get());
+            // 1.0.8.1 三维端点向量只在 3D 视图绘制（相等向量像恒 2D）
+            if (!v->image && v->p1 && v->p2 && (v->p1->is3D || v->p2->is3D)) break;
             double x1 = view.px(v->ex1()), y1 = view.py(v->ey1());
             double x2 = view.px(v->ex2()), y2 = view.py(v->ey2());
             double dx = x2 - x1, dy = y2 - y1;
@@ -11537,11 +11838,562 @@ void Kernel::render(std::vector<DrawCmd> &out)
             out.push_back(d);
             break;
         }
+        // 1.0.8.1 三维对象只在 render3D 绘制（2D 帧显式跳过）
+        case GeoType::Surface:
+        case GeoType::Sphere:
+        case GeoType::Cylinder:
+        case GeoType::Line3:
+            break;
         }
     }
 
     // 1.0.7.1 函数值表「显示点」叠加层（对象层之上，不可拾取）
     appendTablePoints(out);
+}
+
+// ---------- 1.0.8.1 三维视图渲染（3D 一期） ----------
+
+namespace {
+
+// 曲面/网格着色：基色 × 亮度 → rgba()（8 位 hex 会被 ArkUI 误读为 #AARRGGBB，
+// 与 2D 多边形填充同口径走 rgba()）
+std::string ShadeRgba(int r, int g, int b, double shade, double alpha)
+{
+    if (shade < 0.30) shade = 0.30;
+    if (shade > 1.15) shade = 1.15;
+    char buf[64];
+    snprintf(buf, sizeof(buf), "rgba(%d,%d,%d,%.3f)",
+             (int)std::min(255.0, r * shade), (int)std::min(255.0, g * shade),
+             (int)std::min(255.0, b * shade), alpha);
+    return std::string(buf);
+}
+
+} // namespace
+
+void Kernel::render3D(std::vector<DrawCmd> &out)
+{
+    out.clear();
+    DrawCmd clear;
+    clear.op = DrawOp::Clear;
+    out.push_back(clear);
+    if (view3d.width <= 1 || view3d.height <= 1) return;
+
+    EuclidianView3D &V = view3d;
+    auto proj = [&V](double x, double y, double z, double &px, double &py) -> double {
+        return V.project(x, y, z, px, py);
+    };
+    // 相机前向（光照用）：f = (cosα·cosβ, sinα·cosβ, sinβ)
+    const double sa = std::sin(V.yaw * M_PI / 180.0);
+    const double ca = std::cos(V.yaw * M_PI / 180.0);
+    const double sb = std::sin(V.pitch * M_PI / 180.0);
+    const double cb = std::cos(V.pitch * M_PI / 180.0);
+    const double fx = ca * cb, fy = sa * cb, fz = sb;
+
+    const std::string axisC = darkTheme ? "#C9CDD4" : "#000000";
+    const std::string gridC = darkTheme ? "#3A3D42" : "#B8BCC2";
+    const std::string textC = darkTheme ? "#9AA0A8" : "#555555";
+    const std::string selRing = darkTheme ? "#8FB6FF" : "#007DFF";
+    const double us = V.uiScale;
+
+    // 视口裁剪矩形（外扩 24px 缓冲）
+    const double xmn = -24, ymn = -24, xmx = V.width + 24, ymx = V.height + 24;
+
+    // ---- 底面网格（z=0 平面，[-5,5]²，步长 1） ----
+    if (showGrid) {
+        DrawCmd gm;
+        gm.op = DrawOp::MultiSeg;
+        gm.color = gridC;
+        gm.lineWidth = 0.9f * (float)us;
+        gm.pts.reserve(88 * 4);
+        for (int i = -5; i <= 5; ++i) {
+            double x1, y1, x2, y2;
+            proj((double)i, -5.0, 0.0, x1, y1);
+            proj((double)i, 5.0, 0.0, x2, y2);
+            gm.pts.insert(gm.pts.end(),
+                          { (float)x1, (float)y1, (float)x2, (float)y2 });
+            proj(-5.0, (double)i, 0.0, x1, y1);
+            proj(5.0, (double)i, 0.0, x2, y2);
+            gm.pts.insert(gm.pts.end(),
+                          { (float)x1, (float)y1, (float)x2, (float)y2 });
+        }
+        out.push_back(gm);
+    }
+
+    // ---- 三轴（贯穿 [-R-0.6, R+0.6]）+ 刻度 + 端部箭头 + 轴名 ----
+    struct AxisDef { double dx, dy, dz; const char *name; };
+    const AxisDef axes[3] = { {1, 0, 0, "x"}, {0, 1, 0, "y"}, {0, 0, 1, "z"} };
+    for (const AxisDef &ad : axes) {
+        const double L = 5.6;
+        double x1, y1, x2, y2;
+        proj(-ad.dx * L, -ad.dy * L, -ad.dz * L, x1, y1);
+        proj(ad.dx * L, ad.dy * L, ad.dz * L, x2, y2);
+        DrawCmd ax;
+        ax.op = DrawOp::Segment;
+        ax.color = axisC;
+        ax.lineWidth = 1.5f;
+        ax.pts = { (float)x1, (float)y1, (float)x2, (float)y2 };
+        out.push_back(ax);
+        // 箭头：正端向前延伸方向 ±25° 两条短划（投影方向按轴末端两近点求）
+        double xm, ym;
+        proj(ad.dx * (L - 0.12), ad.dy * (L - 0.12), ad.dz * (L - 0.12), xm, ym);
+        double dirx = x2 - xm, diry = y2 - ym;
+        double dl = sqrt(dirx * dirx + diry * diry);
+        if (dl > 1e-9) {
+            dirx /= dl; diry /= dl;
+            const double hl = 9.0 * us;
+            const double a1 = atan2(diry, dirx) + 2.85, a2 = atan2(diry, dirx) - 2.85;
+            DrawCmd ha;
+            ha.op = DrawOp::MultiSeg;
+            ha.color = axisC;
+            ha.lineWidth = 1.5f;
+            ha.pts = { (float)x2, (float)y2,
+                       (float)(x2 + hl * std::cos(a1)), (float)(y2 + hl * std::sin(a1)),
+                       (float)x2, (float)y2,
+                       (float)(x2 + hl * std::cos(a2)), (float)(y2 + hl * std::sin(a2)) };
+            out.push_back(ha);
+        }
+        // 刻度：x/y 轴在 z=0 面内垂直于轴；z 轴沿 x 方向（-5..5 步 1，0 略）
+        DrawCmd tk;
+        tk.op = DrawOp::MultiSeg;
+        tk.color = axisC;
+        tk.lineWidth = 1.0f;
+        for (int i = -5; i <= 5; ++i) {
+            if (i == 0) continue;
+            const double d = (double)i;
+            double t1x, t1y, t2x, t2y;
+            if (ad.dz == 0 && ad.dy == 0) {        // x 轴：刻度沿 y
+                proj(d, -0.13, 0, t1x, t1y);
+                proj(d, 0.13, 0, t2x, t2y);
+            } else if (ad.dz == 0 && ad.dx == 0) { // y 轴：刻度沿 x
+                proj(-0.13, d, 0, t1x, t1y);
+                proj(0.13, d, 0, t2x, t2y);
+            } else {                               // z 轴：刻度沿 x
+                proj(-0.13, 0, d, t1x, t1y);
+                proj(0.13, 0, d, t2x, t2y);
+            }
+            tk.pts.insert(tk.pts.end(),
+                          { (float)t1x, (float)t1y, (float)t2x, (float)t2y });
+        }
+        if (!tk.pts.empty()) out.push_back(tk);
+        // 刻度数字（每 2）与轴名
+        for (int i = -4; i <= 4; i += 2) {
+            if (i == 0) continue;
+            const double d = (double)i;
+            double nx = 0, ny = 0, nz = 0;
+            if (ad.dy == 0 && ad.dz == 0) { nx = d; ny = -0.62; }
+            else if (ad.dx == 0 && ad.dz == 0) { nx = -0.62; ny = d; }
+            else { nx = -0.62; nz = d; }
+            double px, py;
+            proj(nx, ny, nz, px, py);
+            DrawCmd t;
+            t.op = DrawOp::Text;
+            t.color = textC;
+            t.pts = { (float)px, (float)py };
+            t.text = std::to_string(i);
+            out.push_back(t);
+        }
+        double lpx, lpy;
+        proj(ad.dx * (L + 0.55), ad.dy * (L + 0.55), ad.dz * (L + 0.55), lpx, lpy);
+        DrawCmd lb;
+        lb.op = DrawOp::Text;
+        lb.color = axisC;
+        lb.pts = { (float)(lpx + 4 * us), (float)lpy };
+        lb.text = ad.name;
+        out.push_back(lb);
+    }
+
+    // 曲面（画家算法逐对象内排序）→ 线框体 → 线/线段/向量 → 点。
+    // 对象间不做全局深度排序（一期取舍：对象交互少，视觉可接受）
+    for (auto &g : geos_) {
+        if (!g->visible) continue;
+        switch (g->type()) {
+        case GeoType::Surface: {
+            GeoSurface *sf = static_cast<GeoSurface *>(g.get());
+            if (!sf->definable()) break;
+            const int N = 20;
+            const double D = 5.0;
+            const int W = N + 1;
+            std::vector<double> zx((size_t)W * W, NAN);
+            std::vector<double> zy((size_t)W * W), zz((size_t)W * W);
+            std::vector<double> sx((size_t)W * W), sy((size_t)W * W);
+            for (int i = 0; i <= N; ++i) {
+                for (int j = 0; j <= N; ++j) {
+                    const double wx = -D + 2 * D * i / N;
+                    const double wy = -D + 2 * D * j / N;
+                    const double vz = sf->evalAt(wx, wy);
+                    const size_t k = (size_t)i * W + j;
+                    zy[k] = wx; zz[k] = wy;   // zy 存世界 x、zz 存世界 y（列主序语义仅内部）
+                    if (std::isfinite(vz)) {
+                        zx[k] = vz;
+                        double ppx, ppy;
+                        proj(wx, wy, vz, ppx, ppy);
+                        sx[k] = ppx; sy[k] = ppy;
+                    } else {
+                        sx[k] = sy[k] = NAN;
+                    }
+                }
+            }
+            // 四边形深度排序（远→近画家序）+ 法向光照
+            struct Quad { float pts[8]; double depth; std::string color; };
+            std::vector<Quad> quads;
+            quads.reserve((size_t)N * N);
+            for (int i = 0; i < N; ++i) {
+                for (int j = 0; j < N; ++j) {
+                    const size_t k00 = (size_t)i * W + j;
+                    const size_t k10 = (size_t)(i + 1) * W + j;
+                    const size_t k11 = (size_t)(i + 1) * W + j + 1;
+                    const size_t k01 = (size_t)i * W + j + 1;
+                    if (std::isnan(sx[k00]) || std::isnan(sx[k10])
+                        || std::isnan(sx[k11]) || std::isnan(sx[k01])) continue;
+                    // 法向（对角线叉积）· 光照方向
+                    const double ax = zy[k11] - zy[k00], ay = zz[k11] - zz[k00], az = zx[k11] - zx[k00];
+                    const double bx = zy[k01] - zy[k10], by = zz[k01] - zz[k10], bz = zx[k01] - zx[k10];
+                    double nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+                    const double nl = sqrt(nx * nx + ny * ny + nz * nz);
+                    double shade = 0.85;
+                    if (nl > 1e-12) {
+                        shade = 0.55 + 0.45 * fabs((nx * fx + ny * fy + nz * fz) / nl);
+                    }
+                    Quad q;
+                    q.pts[0] = (float)sx[k00]; q.pts[1] = (float)sy[k00];
+                    q.pts[2] = (float)sx[k10]; q.pts[3] = (float)sy[k10];
+                    q.pts[4] = (float)sx[k11]; q.pts[5] = (float)sy[k11];
+                    q.pts[6] = (float)sx[k01]; q.pts[7] = (float)sy[k01];
+                    double dsum = 0;
+                    const size_t ks[4] = { k00, k10, k11, k01 };
+                    for (int c = 0; c < 4; ++c) {
+                        double ppx, ppy;
+                        dsum += V.project(zy[ks[c]], zz[ks[c]], zx[ks[c]], ppx, ppy);
+                        q.pts[c * 2] = (float)ppx;
+                        q.pts[c * 2 + 1] = (float)ppy;
+                    }
+                    q.depth = dsum / 4.0;
+                    q.color = ShadeRgba(sf->color.r, sf->color.g, sf->color.b,
+                                        shade, sf->fillAlpha);
+                    quads.push_back(q);
+                }
+            }
+            std::sort(quads.begin(), quads.end(),
+                      [](const Quad &a, const Quad &b) { return a.depth > b.depth; });
+            for (const Quad &q : quads) {
+                DrawCmd d;
+                d.op = DrawOp::FillPoly;
+                d.color = q.color;
+                d.pts.assign(std::begin(q.pts), std::end(q.pts));
+                out.push_back(d);
+            }
+            // 边界描线（曲面包络，暗一档实线）
+            if (sf->fillAlpha > 0.003) {
+                DrawCmd edge;
+                edge.op = DrawOp::Polyline;
+                edge.color = ObjectColor(sf->color, darkTheme);
+                edge.lineWidth = 1.0f * (float)us;
+                bool open = false;
+                for (int i = 0; i <= N; ++i) {
+                    const size_t k = (size_t)i * W;
+                    if (std::isnan(sx[k])) { open = false; continue; }
+                    if (!open) { edge.pts.push_back((float)sx[k]); edge.pts.push_back((float)sy[k]); open = true; }
+                    else { edge.pts.push_back((float)sx[k]); edge.pts.push_back((float)sy[k]); }
+                }
+                if (edge.pts.size() >= 4) out.push_back(edge);
+                edge.pts.clear();
+                open = false;
+                for (int i = 0; i <= N; ++i) {
+                    const size_t k = (size_t)i * W + N;
+                    if (std::isnan(sx[k])) { open = false; continue; }
+                    edge.pts.push_back((float)sx[k]); edge.pts.push_back((float)sy[k]);
+                }
+                if (edge.pts.size() >= 4) out.push_back(edge);
+                edge.pts.clear();
+                for (int j = 0; j <= N; ++j) {
+                    const size_t k = (size_t)j;
+                    if (std::isnan(sx[k])) continue;
+                    edge.pts.push_back((float)sx[k]); edge.pts.push_back((float)sy[k]);
+                }
+                if (edge.pts.size() >= 4) out.push_back(edge);
+                edge.pts.clear();
+                for (int j = 0; j <= N; ++j) {
+                    const size_t k = (size_t)N * W + j;
+                    if (std::isnan(sx[k])) continue;
+                    edge.pts.push_back((float)sx[k]); edge.pts.push_back((float)sy[k]);
+                }
+                if (edge.pts.size() >= 4) out.push_back(edge);
+            }
+            DrawCmd lb;
+            lb.op = DrawOp::Text;
+            lb.color = ObjectColor(sf->color, darkTheme);
+            double lpx, lpy;
+            const double lvz = sf->evalAt(D, D);
+            proj(D, D, std::isfinite(lvz) ? lvz : 0.0, lpx, lpy);
+            lb.pts = { (float)(lpx + 6 * us), (float)lpy };
+            lb.text = sf->label;
+            out.push_back(lb);
+            break;
+        }
+        case GeoType::Sphere: {
+            GeoSphere *sp = static_cast<GeoSphere *>(g.get());
+            if (!sp->center) break;
+            double r = sp->radius;
+            if (sp->radiusNum) r = sp->radiusNum->value;
+            else if (sp->through) {
+                const double dx = sp->through->x - sp->center->x;
+                const double dy = sp->through->y - sp->center->y;
+                const double dz = sp->through->z - sp->center->z;
+                r = sqrt(dx * dx + dy * dy + dz * dz);
+            }
+            if (!(r > 0) || !std::isfinite(r)) break;
+            const double cx = sp->center->x, cy = sp->center->y, cz = sp->center->z;
+            const std::string col = ObjectColor(sp->color, darkTheme);
+            // 经线 6 条（每 30°，含极点大圆）+ 纬线 5 条（-60..60 每 30°）
+            const int SEG = 36;
+            auto emitCircle = [&](const std::function<void(int, double &, double &, double &)> &at,
+                                  int n) {
+                DrawCmd d;
+                d.op = DrawOp::Polyline;
+                d.color = col;
+                d.lineWidth = sp->lineThickness / 3.0f;
+                d.pts.reserve((size_t)(n + 1) * 2);
+                for (int k = 0; k <= n; ++k) {
+                    double wx, wy, wz;
+                    at(k, wx, wy, wz);
+                    double ppx, ppy;
+                    proj(wx, wy, wz, ppx, ppy);
+                    d.pts.push_back((float)ppx);
+                    d.pts.push_back((float)ppy);
+                }
+                out.push_back(d);
+            };
+            for (int m = 0; m < 6; ++m) {
+                const double phi = m * M_PI / 6.0;
+                emitCircle([&](int k, double &wx, double &wy, double &wz) {
+                    const double t = 2 * M_PI * k / SEG;
+                    wx = cx + r * std::cos(t) * std::cos(phi);
+                    wy = cy + r * std::cos(t) * std::sin(phi);
+                    wz = cz + r * std::sin(t);
+                }, SEG);
+            }
+            for (int lat = -60; lat <= 60; lat += 30) {
+                const double la = lat * M_PI / 180.0;
+                const double rr = r * std::cos(la);
+                const double zoff = cz + r * std::sin(la);
+                emitCircle([&](int k, double &wx, double &wy, double &wz) {
+                    const double t = 2 * M_PI * k / SEG;
+                    wx = cx + rr * std::cos(t);
+                    wy = cy + rr * std::sin(t);
+                    wz = zoff;
+                }, SEG);
+            }
+            DrawCmd lb;
+            lb.op = DrawOp::Text;
+            lb.color = col;
+            double lpx, lpy;
+            proj(cx, cy, cz + r, lpx, lpy);
+            lb.pts = { (float)(lpx + 6 * us), (float)(lpy - 6 * us) };
+            lb.text = sp->label;
+            out.push_back(lb);
+            break;
+        }
+        case GeoType::Cylinder: {
+            GeoCylinder *cy = static_cast<GeoCylinder *>(g.get());
+            if (!cy->base) break;
+            double r = cy->radiusNum ? cy->radiusNum->value : cy->radius;
+            if (!(r > 0) || !std::isfinite(r)) break;
+            double ax = cy->base->x, ay = cy->base->y, az = cy->base->z;
+            double bx, by, bz;
+            if (cy->topPt) {
+                bx = cy->topPt->x; by = cy->topPt->y; bz = cy->topPt->z;
+            } else {
+                bx = ax; by = ay;
+                bz = az + (cy->heightNum ? cy->heightNum->value : cy->height);
+            }
+            double ux = bx - ax, uy = by - ay, uz = bz - az;
+            const double L = sqrt(ux * ux + uy * uy + uz * uz);
+            if (!(L > 1e-12)) break;
+            ux /= L; uy /= L; uz /= L;
+            // 轴的正交基：e1 = normalize(u × k)（u 平行 k 时取 x 向）
+            double e1x = uy * 1.0 - uz * 0.0, e1y = uz * 0.0 - ux * 1.0, e1z = ux * 0.0 - uy * 0.0;
+            double e1l = sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+            if (e1l < 1e-9) { e1x = 1; e1y = 0; e1z = 0; }
+            else { e1x /= e1l; e1y /= e1l; e1z /= e1l; }
+            double e2x = uy * e1z - uz * e1y, e2y = uz * e1x - ux * e1z, e2z = ux * e1y - uy * e1x;
+            const std::string col = ObjectColor(cy->color, darkTheme);
+            const int SEG = 36;
+            auto ringAt = [&](double px0, double py0, double pz0) {
+                DrawCmd d;
+                d.op = DrawOp::Polyline;
+                d.color = col;
+                d.lineWidth = cy->lineThickness / 3.0f;
+                for (int k = 0; k <= SEG; ++k) {
+                    const double t = 2 * M_PI * k / SEG;
+                    const double cr = r * std::cos(t), sr2 = r * std::sin(t);
+                    double ppx, ppy;
+                    proj(px0 + cr * e1x + sr2 * e2x,
+                         py0 + cr * e1y + sr2 * e2y,
+                         pz0 + cr * e1z + sr2 * e2z, ppx, ppy);
+                    d.pts.push_back((float)ppx);
+                    d.pts.push_back((float)ppy);
+                }
+                out.push_back(d);
+            };
+            ringAt(ax, ay, az);
+            ringAt(bx, by, bz);
+            // 母线 8 条
+            DrawCmd sd;
+            sd.op = DrawOp::MultiSeg;
+            sd.color = col;
+            sd.lineWidth = cy->lineThickness / 3.0f;
+            for (int k = 0; k < 8; ++k) {
+                const double t = 2 * M_PI * k / 8.0;
+                const double cr = r * std::cos(t), sr2 = r * std::sin(t);
+                const double ox = cr * e1x + sr2 * e2x, oy = cr * e1y + sr2 * e2y,
+                             oz = cr * e1z + sr2 * e2z;
+                double p1x, p1y, p2x, p2y;
+                proj(ax + ox, ay + oy, az + oz, p1x, p1y);
+                proj(bx + ox, by + oy, bz + oz, p2x, p2y);
+                sd.pts.insert(sd.pts.end(),
+                              { (float)p1x, (float)p1y, (float)p2x, (float)p2y });
+            }
+            out.push_back(sd);
+            DrawCmd lb;
+            lb.op = DrawOp::Text;
+            lb.color = col;
+            double lpx, lpy;
+            proj((ax + bx) / 2 + r, (ay + by) / 2, (az + bz) / 2, lpx, lpy);
+            lb.pts = { (float)(lpx + 6 * us), (float)lpy };
+            lb.text = cy->label;
+            out.push_back(lb);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    // 线/线段/向量/点（画在线框体之上）
+    for (auto &g : geos_) {
+        if (!g->visible) continue;
+        switch (g->type()) {
+        case GeoType::Line3: {
+            GeoLine3 *l3 = static_cast<GeoLine3 *>(g.get());
+            if (!l3->p1 || !l3->p2) break;
+            double x1, y1, x2, y2;
+            proj(l3->p1->x, l3->p1->y, l3->p1->z, x1, y1);
+            proj(l3->p2->x, l3->p2->y, l3->p2->z, x2, y2);
+            double dx = x2 - x1, dy = y2 - y1;
+            double len = sqrt(dx * dx + dy * dy);
+            if (len < 1e-9) break;
+            // 向两端延伸覆盖视口（射线同款），再矩形裁剪
+            double diag = sqrt((double)V.width * V.width + (double)V.height * V.height);
+            double Lx = sqrt(x1 * x1 + y1 * y1) + 2 * diag + 20;
+            double ex1 = x1 - dx / len * Lx, ey1 = y1 - dy / len * Lx;
+            double ex2 = x1 + dx / len * Lx, ey2 = y1 + dy / len * Lx;
+            if (!ClipSegRect(ex1, ey1, ex2, ey2, xmn, ymn, xmx, ymx)) break;
+            DrawCmd d;
+            d.op = DrawOp::Segment;
+            d.color = ObjectColor(l3->color, darkTheme);
+            d.lineWidth = l3->lineThickness / 3.0f;
+            d.pts = { (float)ex1, (float)ey1, (float)ex2, (float)ey2 };
+            out.push_back(d);
+            DrawCmd lb;
+            lb.op = DrawOp::Text;
+            lb.color = ObjectColor(l3->color, darkTheme);
+            lb.pts = { (float)(x1 + 6 * us), (float)(y1 - 6 * us) };
+            lb.text = l3->label;
+            out.push_back(lb);
+            break;
+        }
+        case GeoType::Segment: {
+            GeoSegment *s = static_cast<GeoSegment *>(g.get());
+            if (s->image || !s->p1 || !s->p2
+                || !(s->p1->is3D || s->p2->is3D)) break;
+            double x1, y1, x2, y2;
+            proj(s->p1->x, s->p1->y, s->p1->z, x1, y1);
+            proj(s->p2->x, s->p2->y, s->p2->z, x2, y2);
+            if (!ClipSegRect(x1, y1, x2, y2, xmn, ymn, xmx, ymx)) break;
+            DrawCmd d;
+            d.op = DrawOp::Segment;
+            d.color = ObjectColor(s->color, darkTheme);
+            d.lineWidth = s->lineThickness / 3.0f;
+            d.pts = { (float)x1, (float)y1, (float)x2, (float)y2 };
+            out.push_back(d);
+            DrawCmd lb;
+            lb.op = DrawOp::Text;
+            lb.color = ObjectColor(s->color, darkTheme);
+            lb.pts = { (float)(0.5 * (x1 + x2) + 6 * us), (float)(0.5 * (y1 + y2) - 6 * us) };
+            lb.text = s->label;
+            out.push_back(lb);
+            break;
+        }
+        case GeoType::Vector: {
+            GeoVector *v = static_cast<GeoVector *>(g.get());
+            if (v->image || !v->p1 || !v->p2
+                || !(v->p1->is3D || v->p2->is3D)) break;
+            double x1, y1, x2, y2;
+            proj(v->p1->x, v->p1->y, v->p1->z, x1, y1);
+            proj(v->p2->x, v->p2->y, v->p2->z, x2, y2);
+            double dx = x2 - x1, dy = y2 - y1;
+            if (sqrt(dx * dx + dy * dy) < 1e-9) break;
+            double cx1 = x1, cy1 = y1, cx2 = x2, cy2 = y2;
+            if (!ClipSegRect(cx1, cy1, cx2, cy2, xmn, ymn, xmx, ymx)) break;
+            DrawCmd d;
+            d.op = DrawOp::Segment;
+            d.color = ObjectColor(v->color, darkTheme);
+            d.lineWidth = v->lineThickness / 3.0f;
+            d.pts = { (float)cx1, (float)cy1, (float)cx2, (float)cy2 };
+            out.push_back(d);
+            // 箭头（投影平面内按屏幕方向）
+            const double hl = 12.0 * us;
+            const double base = atan2(dy, dx);
+            const double a1 = base + 2.70, a2 = base - 2.70;
+            DrawCmd h;
+            h.op = DrawOp::MultiSeg;
+            h.color = d.color;
+            h.lineWidth = d.lineWidth;
+            h.pts = { (float)x2, (float)y2,
+                      (float)(x2 + hl * std::cos(a1)), (float)(y2 + hl * std::sin(a1)),
+                      (float)x2, (float)y2,
+                      (float)(x2 + hl * std::cos(a2)), (float)(y2 + hl * std::sin(a2)) };
+            out.push_back(h);
+            DrawCmd lb;
+            lb.op = DrawOp::Text;
+            lb.color = d.color;
+            lb.pts = { (float)(0.5 * (x1 + x2) + 6 * us), (float)(0.5 * (y1 + y2) - 6 * us) };
+            lb.text = v->label;
+            out.push_back(lb);
+            break;
+        }
+        case GeoType::Point: {
+            GeoPoint *p = static_cast<GeoPoint *>(g.get());
+            if (!p->is3D) break;
+            double px, py;
+            proj(p->x, p->y, p->z, px, py);
+            if (px < -20 || px > V.width + 20 || py < -20 || py > V.height + 20) break;
+            if (p->selected) {
+                DrawCmd ring;
+                ring.op = DrawOp::CirclePix;
+                ring.color = selRing;
+                ring.lineWidth = 2.5f * (float)us;
+                ring.pts = { (float)px, (float)py,
+                             (float)((p->pointSize + 6) * us) };
+                out.push_back(ring);
+            }
+            DrawCmd d;
+            d.op = DrawOp::FillCircle;
+            d.color = ObjectColor(p->color, darkTheme);
+            d.pts = { (float)px, (float)py, (float)(p->pointSize * us) };
+            out.push_back(d);
+            DrawCmd lb;
+            lb.op = DrawOp::Text;
+            lb.color = ObjectColor(p->color, darkTheme);
+            lb.pts = { (float)(px + 4 * us), (float)(py - 2 * p->pointSize * us - 2 * us) };
+            lb.text = p->label;
+            out.push_back(lb);
+            break;
+        }
+        default:
+            break;
+        }
+    }
 }
 
 } // namespace dreamember
@@ -11614,7 +12466,14 @@ std::string Kernel::getXml() const
             GeoPoint *p = static_cast<GeoPoint *>(g);
             AppendCommandXml(o, *p);   // Midpoint/Intersect/变换像等依随点
             AppendElementHead(o, *p, "point");
-            o += "<coords x=\"" + NumA(p->x) + "\" y=\"" + NumA(p->y) + "\" z=\"1\"/>\n";
+            // 1.0.8.1 三维点 z 实存（官方 GGB 同位：2D 点 z=1 齐次权，z≠1 即
+            // 三维；z 恰为 1 的三维点往返丢标记——官方文件同限，可接受）
+            if (p->is3D) {
+                o += "<coords x=\"" + NumA(p->x) + "\" y=\"" + NumA(p->y)
+                   + "\" z=\"" + NumA(p->z) + "\"/>\n";
+            } else {
+                o += "<coords x=\"" + NumA(p->x) + "\" y=\"" + NumA(p->y) + "\" z=\"1\"/>\n";
+            }
             o += "<pointSize val=\"" + std::to_string(p->pointSize) + "\"/>\n</element>\n";
             break;
         }
@@ -11757,6 +12616,39 @@ std::string Kernel::getXml() const
             AppendCommandXml(o, *t);   // Text("...", P) 按命令重放
             AppendElementHead(o, *t, "text");
             o += "</element>\n";
+            break;
+        }
+        case GeoType::Surface: {
+            // 1.0.8.1 曲面：按 f(x,y)=src 表达式重放（input 直通曲面分支）；
+            // 元素类型取官方 surfacecartesian3d 同位
+            GeoSurface *sf = static_cast<GeoSurface *>(g);
+            o += "<expression label=\"" + XmlEsc(sf->label) + "\" exp=\""
+               + XmlEsc(sf->label + "(x,y)=" + sf->src) + "\"/>\n";
+            AppendElementHead(o, *sf, "surfacecartesian3d", sf->fillAlpha);
+            o += "</element>\n";
+            break;
+        }
+        // Sphere/Cylinder/Line3：命令产物（cmdName/cmdArgs 已填），
+        // AppendCommandXml 通用写出，读侧 xmlCommand → input 重放重建
+        case GeoType::Sphere: {
+            GeoSphere *sp = static_cast<GeoSphere *>(g);
+            AppendCommandXml(o, *sp);
+            AppendElementHead(o, *sp, "sphere");
+            AppendLineStyle(o, sp->lineThickness);
+            break;
+        }
+        case GeoType::Cylinder: {
+            GeoCylinder *cy = static_cast<GeoCylinder *>(g);
+            AppendCommandXml(o, *cy);
+            AppendElementHead(o, *cy, "cylinder");
+            AppendLineStyle(o, cy->lineThickness);
+            break;
+        }
+        case GeoType::Line3: {
+            GeoLine3 *l3 = static_cast<GeoLine3 *>(g);
+            AppendCommandXml(o, *l3);
+            AppendElementHead(o, *l3, "line3d");
+            AppendLineStyle(o, l3->lineThickness);
             break;
         }
         }
@@ -11975,7 +12867,13 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
         const std::string t = inner.substr(c, end - c);
         const double x = AttrNum(t, "x", 0.0);
         const double y = AttrNum(t, "y", 0.0);
-        if (!input(label + "=(" + NumA(x) + "," + NumA(y) + ")")) { ++*skipped; return; }
+        // 1.0.8.1 三维点：z≠1（齐次权 1 = 2D）→ (x,y,z) 重建
+        const double z = AttrNum(t, "z", 1.0);
+        const bool is3D = z != 1.0;
+        const std::string src = is3D
+            ? label + "=(" + NumA(x) + "," + NumA(y) + "," + NumA(z) + ")"
+            : label + "=(" + NumA(x) + "," + NumA(y) + ")";
+        if (!input(src)) { ++*skipped; return; }
     } else if (type == "numeric" && !label.empty()) {
         const size_t v = inner.find("<value");
         if (v == std::string::npos) { ++*skipped; return; }

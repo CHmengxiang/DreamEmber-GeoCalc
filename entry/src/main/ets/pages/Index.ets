@@ -52,6 +52,8 @@ struct Index {
   // 垫高（宽/窄屏）整体收进 CanvasView 运行时实测，Index 不再掺和键盘几何
   // 深色模式：跟随系统（EntryAbility 同步）
   @StorageProp('ui.dark') private dark: boolean = false;
+  // 1.0.8.1 3D 视图开关（CanvasView 同键 @StorageProp 监听切换画布）
+  @StorageProp('view3dOn') private view3dOn: boolean = false;
   // 外观模式：0=跟随系统 1=浅色 2=深色（持久化，Ability 启动时恢复）
   @StorageLink('ui.themeMode') private themeMode: number = 0;
   // 默认输入方式：0=系统键盘 1=自带键盘（持久化，Ability 启动时恢复；
@@ -520,6 +522,12 @@ struct Index {
             .fontColor(this.cFaint())
             .width('100%')
             .padding({ left: 20, top: 10, bottom: 2 })
+          // 1.0.8.1 3D 视图开关（真源 AppStorage view3dOn，CanvasView 切画布）
+          this.MenuRow(this.view3dOn ? '退出 3D 视图' : '3D 视图',
+            '三维点 / 曲面 / 球柱 · 拖动旋转视角', () => {
+              this.menuOpen = false;
+              AppStorage.setOrCreate('view3dOn', !this.view3dOn);
+            })
           this.MenuRow('CAS 视图', '符号计算：解方程 / 化简 / 微积分', () => {
             this.menuOpen = false;
             this.fireEvt('evt.openCas');

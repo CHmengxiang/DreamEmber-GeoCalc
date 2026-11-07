@@ -66,19 +66,25 @@ void GeoPoint::update()
         calc(this);
         return;
     }
-    // 旧语义兜底：inputs 恰为两个点时按 Midpoint 取中点
+    // 旧语义兜底：inputs 恰为两个点时按 Midpoint 取中点（1.0.8.1：任一端
+    // 为三维点时出三维中点，z 同取均值）
     if (inputs.size() == 2) {
         GeoPoint *p1 = dynamic_cast<GeoPoint *>(inputs[0]);
         GeoPoint *p2 = dynamic_cast<GeoPoint *>(inputs[1]);
         if (p1 && p2) {
             x = 0.5 * (p1->x + p2->x);
             y = 0.5 * (p1->y + p2->y);
+            if (p1->is3D || p2->is3D) {
+                z = 0.5 * (p1->z + p2->z);
+                is3D = true;
+            }
         }
     }
 }
 
 std::string GeoPoint::valueText() const
 {
+    if (is3D) return "(" + FormatNum(x) + ", " + FormatNum(y) + ", " + FormatNum(z) + ")";
     return "(" + FormatNum(x) + ", " + FormatNum(y) + ")";
 }
 
@@ -89,6 +95,7 @@ std::string GeoPoint::definitionText() const
     if (inputs.size() == 2) {
         return "Midpoint(" + inputs[0]->label + ", " + inputs[1]->label + ")";
     }
+    if (is3D) return "(" + FormatNum(x) + ", " + FormatNum(y) + ", " + FormatNum(z) + ")";
     return "(" + FormatNum(x) + ", " + FormatNum(y) + ")";
 }
 
@@ -427,6 +434,69 @@ std::string GeoPolygon::definitionText() const
         return s + ")";
     }
     return "Polygon";
+}
+
+// ---- 1.0.8.1 三维对象族 ----
+
+std::string GeoSurface::valueText() const
+{
+    return "z = " + src;
+}
+
+std::string GeoSurface::definitionText() const
+{
+    if (!cmdName.empty()) return cmdDefText();
+    return label + "(x, y) = " + src;
+}
+
+std::string GeoSphere::valueText() const
+{
+    double r = radius;
+    if (radiusNum) r = radiusNum->value;
+    else if (through) {
+        const double dx = through->x - (center ? center->x : 0);
+        const double dy = through->y - (center ? center->y : 0);
+        const double dz = through->z - (center ? center->z : 0);
+        r = sqrt(dx * dx + dy * dy + dz * dz);
+    }
+    return "x² + y² + z² = " + FormatNum(r * r)
+         + "（半径 " + FormatNum(r) + "）";
+}
+
+std::string GeoSphere::definitionText() const
+{
+    std::string d = cmdDefText();
+    return d.empty() ? "Sphere" : d;
+}
+
+std::string GeoCylinder::valueText() const
+{
+    double r = radiusNum ? radiusNum->value : radius;
+    double h = heightNum ? heightNum->value : height;
+    return "r=" + FormatNum(r) + "，h=" + FormatNum(h);
+}
+
+std::string GeoCylinder::definitionText() const
+{
+    std::string d = cmdDefText();
+    return d.empty() ? "Cylinder" : d;
+}
+
+std::string GeoLine3::valueText() const
+{
+    if (!p1 || !p2) return "直线";
+    const double dx = p2->x - p1->x, dy = p2->y - p1->y, dz = p2->z - p1->z;
+    return "X = (" + FormatNum(p1->x) + ", " + FormatNum(p1->y) + ", "
+         + FormatNum(p1->z) + ") + t·(" + FormatNum(dx) + ", "
+         + FormatNum(dy) + ", " + FormatNum(dz) + ")";
+}
+
+std::string GeoLine3::definitionText() const
+{
+    std::string d = cmdDefText();
+    if (!d.empty()) return d;
+    if (p1 && p2) return std::string("Line(") + p1->label + ", " + p2->label + ")";
+    return "Line";
 }
 
 } // namespace dreamember

@@ -2,6 +2,8 @@
 #ifndef DREAMEMBER_KERNEL_VIEW_H
 #define DREAMEMBER_KERNEL_VIEW_H
 
+#include <cmath>
+
 namespace dreamember {
 
 // xZero/yZero：世界原点在画布上的像素位置；xscale/yscale：每世界单位的像素数。
@@ -36,6 +38,87 @@ public:
 
 private:
     bool sizedOnce_ = false;
+};
+
+// 1.0.8.1 三维视图坐标系统（1.0.8.X 3D 一期；上游 Ggb3D 的正交轨道相机子集）。
+// 世界系 z 朝上。相机由方位角 yaw（绕 z）与仰角 pitch 定义，正交投影：
+//   right r = (−sinα, cosα, 0)
+//   up    u = (−cosα·sinβ, −sinα·sinβ, cosβ)
+//   fwd   f = (cosα·cosβ, sinα·cosβ, sinβ)
+// 屏幕坐标（像素系左上原点 y 向下，与 EuclidianView 同约定）：
+//   px = cx + (p·r − r0)·scale
+//   py = cy − (p·u − u0)·scale
+// 深度 depth = p·f（越大越远，供画家算法排序）。
+// 视窗世界范围固定 [−5,5]³（上游 3D 视图默认 x/y/z 范围），缩放改 scale、
+// 拖动改 yaw/pitch（轨道旋转：拖 x 转方位、拖 y 转仰角，仰角钳位 ±89.9°）。
+// r0/u0 为视图中心的世界投影（恒 0,0：相机始终看向原点，平移后补）。
+class EuclidianView3D {
+public:
+    int width = 0, height = 0;
+    double uiScale = 1.0;       // 位图px/vp（点大小/线宽等物理尺寸）
+    double yaw = 30.0;          // 方位角（度）：绕 z，30° 时 x 轴朝左下、y 朝右下
+    double pitch = 20.0;        // 仰角（度）：>0 自上往下看
+    double scale = 50.0;        // 每世界单位像素数（上游 SCALE_STANDARD 同值）
+
+    void setCanvasSize(int w, int h, double uiScale2 = 1.0)
+    {
+        width = w;
+        height = h;
+        uiScale = uiScale2;
+    }
+    // 屏幕中心像素（世界原点投影处）
+    double cx() const { return width / 2.0; }
+    double cy() const { return height / 2.0; }
+
+    // 投影：世界 (x,y,z) → 屏幕 (px,py) + 深度（返回值）
+    double project(double x, double y, double z, double &px, double &py) const
+    {
+        const double sa = std::sin(yaw * M_PI / 180.0);
+        const double ca = std::cos(yaw * M_PI / 180.0);
+        const double sb = std::sin(pitch * M_PI / 180.0);
+        const double cb = std::cos(pitch * M_PI / 180.0);
+        const double X = -sa * x + ca * y;                 // p·r
+        const double Y = -ca * sb * x - sa * sb * y + cb * z;   // p·u
+        const double D = ca * cb * x + sa * cb * y + sb * z;    // p·f
+        px = cx() + X * scale;
+        py = cy() - Y * scale;
+        return D;
+    }
+    // 视平面拖动 → 世界位移（屏幕 dx,dy 像素 → 世界 dx·r − dy·u 方向）：
+    // 拖 3D 点用（点在垂直视向、过点自身的平面内移动，深度不变）
+    void dragDelta(double dxPx, double dyPx, double &wx, double &wy, double &wz) const
+    {
+        const double sa = std::sin(yaw * M_PI / 180.0);
+        const double ca = std::cos(yaw * M_PI / 180.0);
+        const double sb = std::sin(pitch * M_PI / 180.0);
+        const double cb = std::cos(pitch * M_PI / 180.0);
+        // world = (dx/scale)·r + (dy/scale)·u（py 向下，dy 已按屏幕增量传入）
+        wx = (-sa * dxPx + -ca * sb * dyPx) / scale;
+        wy = (ca * dxPx + -sa * sb * dyPx) / scale;
+        wz = (cb * dyPx) / scale;
+    }
+    // 轨道旋转：拖像素增量（dx 转方位、dy 转仰角，仰角钳位防翻转）
+    void rotateBy(double dxPx, double dyPx)
+    {
+        yaw += dxPx * 0.4;
+        pitch += dyPx * 0.4;
+        if (pitch > 89.9) pitch = 89.9;
+        if (pitch < -89.9) pitch = -89.9;
+        while (yaw >= 360.0) yaw -= 360.0;
+        while (yaw < 0.0) yaw += 360.0;
+    }
+    void zoomBy(double factor)
+    {
+        if (factor <= 0.0) return;
+        const double ns = scale * factor;
+        scale = ns < 4.0 ? 4.0 : (ns > 2000.0 ? 2000.0 : ns);   // 钳位 [4,2000]
+    }
+    void reset()
+    {
+        yaw = 30.0;
+        pitch = 20.0;
+        scale = 50.0;
+    }
 };
 
 } // namespace dreamember

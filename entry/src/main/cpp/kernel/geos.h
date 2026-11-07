@@ -11,7 +11,8 @@
 
 namespace dreamember {
 
-enum class GeoType { Point, Segment, Line, Ray, Vector, Circle, Polygon, Function, Numeric, Angle, List, Text };
+enum class GeoType { Point, Segment, Line, Ray, Vector, Circle, Polygon, Function, Numeric, Angle, List, Text,
+                     Surface, Sphere, Cylinder, Line3 };
 
 struct GeoColor {
     int r = 0, g = 0, b = 0;
@@ -67,10 +68,14 @@ private:
 };
 
 // 自由点（或 Midpoint/Intersect/变换像等依随点）。默认色 = 上游 自由点 (77,77,255)。
+// 1.0.8.1：z + is3D 扩展三维点（(x,y,z) 元组/3D 命令产物）；is3D=false 时
+// z 恒 0，2D 渲染/命中不受影响，3D 视图按 z 绘制
 class GeoPoint : public GeoElement {
 public:
     GeoPoint() : GeoElement(GeoType::Point) { color = {77, 77, 255}; }
     double x = 0, y = 0;
+    double z = 0;                   // 1.0.8.1 三维 z（is3D=false 恒 0）
+    bool is3D = false;              // 三维点标记（(x,y,z) 解析/Sphere 等命令置位）
     int pointSize = 5;              // 上游 DEFAULT_POINT_SIZE
     bool isFree = true;
     // 依随点重算闭包（Intersect/变换像等；calc 为空时退回 Midpoint 语义）
@@ -360,6 +365,76 @@ public:
     double ex2() const { return image ? ix2 : p2->x; }
     double ey2() const { return image ? iy2 : p2->y; }
     void update() override { if (calc) calc(this); }
+    std::string valueText() const override;
+    std::string definitionText() const override;
+};
+
+// ---------- 1.0.8.1 三维对象族（3D 视图一期） ----------
+// 曲面 z = f(x,y)（f(x,y)=expr / z=expr 定义）。y 是表达式层原生第二变量
+//（批次⑥ 已支持 evalXY），曲面求值直接走 evalXY。网格分辨率在渲染端。
+class GeoSurface : public GeoElement {
+public:
+    GeoSurface() : GeoElement(GeoType::Surface) { color = {0x2C, 0x6B, 0xD4}; }
+    std::string src;            // 规范化后的表达式原文（定义列回填用）
+    Expr body;
+    // 填充不透明度（曲面网格四边形填充；上游 3D 曲面默认较淡）
+    double fillAlpha = 0.45;
+    // 滑条/数值引用（refs 模式解析；inputs 同步注册保证级联删除与重算，
+    // 渲染/求值按现值随动——1.0.7.1 滑条动态联动同机制）
+    std::vector<std::pair<std::string, GeoNumeric *>> refDeps;
+    double evalAt(double x, double y) const
+    {
+        if (refDeps.empty()) return body.evalXY(x, y);
+        return body.evalXYResolved(x, y,
+            [this](const std::string &nm) -> double {
+                for (const auto &d : refDeps) {
+                    if (d.first == nm) return d.second->value;
+                }
+                return NAN;
+            });
+    }
+    bool definable() const { return !body.empty(); }
+    std::string valueText() const override;
+    std::string definitionText() const override;
+};
+
+// 球面（Sphere(M, r) / Sphere(M, A)）：M 为三维中心点（引用），半径取
+// 数值/数值引用或过第二点距离。渲染 lat/long 线框。
+class GeoSphere : public GeoElement {
+public:
+    GeoSphere() : GeoElement(GeoType::Sphere) { color = {0x2C, 0x6B, 0xD4}; }
+    GeoPoint *center = nullptr;         // 三维中心（inputs 注册，级联删除保护）
+    GeoPoint *through = nullptr;        // 过点形式（与 radius/radiusNum 三选一）
+    GeoNumeric *radiusNum = nullptr;    // 半径引用数值对象（随其重算）
+    double radius = 0;
+    std::function<void(GeoSphere *)> calc;   // 依随重算（中心/过点/半径引用变动）
+    void update() override { if (calc) calc(this); }
+    std::string valueText() const override;
+    std::string definitionText() const override;
+};
+
+// 圆柱（Cylinder(M, r, h)：底面中心 M、半径 r、沿 z 高 h；Cylinder(A, B, r)：
+// 轴线 A→B 半径 r）。渲染 = 底/顶圆线框 + 母线。top 缓存依随重算。
+class GeoCylinder : public GeoElement {
+public:
+    GeoCylinder() : GeoElement(GeoType::Cylinder) { color = {0x2C, 0x6B, 0xD4}; }
+    GeoPoint *base = nullptr;           // 底面中心（三维点）
+    GeoPoint *topPt = nullptr;          // 轴线形式顶心（可空）
+    GeoNumeric *radiusNum = nullptr;    // 半径引用（可空）
+    GeoNumeric *heightNum = nullptr;    // 高引用（可空）
+    double radius = 0, height = 0;      // 静态值（顶心形式下 height=|AB|）
+    std::function<void(GeoCylinder *)> calc;
+    void update() override { if (calc) calc(this); }
+    std::string valueText() const override;
+    std::string definitionText() const override;
+};
+
+// 空间直线（Line(A,B) 两端为三维点时产物）：参数式 P = p0 + t·d，渲染按
+// 屏幕范围裁剪（t 端点由投影反向解出）。与 2D GeoLine 方程式并存互不影响。
+class GeoLine3 : public GeoElement {
+public:
+    GeoLine3() : GeoElement(GeoType::Line3) { color = {0, 0, 0}; }
+    GeoPoint *p1 = nullptr, *p2 = nullptr;
     std::string valueText() const override;
     std::string definitionText() const override;
 };
