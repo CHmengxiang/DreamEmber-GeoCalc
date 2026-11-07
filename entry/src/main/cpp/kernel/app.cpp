@@ -775,6 +775,55 @@ static bool VerticalFromCond(const GeoFunction::IneqCond &c, double &vx, int &op
     return true;
 }
 
+// 1.0.7.6 区域布尔运算（Intersection/Union 收不等式区域）：任意区域对象
+// 归一为规范 DNF（句内 AND、句间 OR；cond 为 s=L−R 符号条件、lt=true 区域
+// 在 s<0 侧，同 IneqComboG 口径）。链式/组合原样搬运（Expr 不可变共享）；
+// 两变量/竖直半平面/曲线半平面各归一为单条件句。非区域（曲线等）返回 false
+static std::string PolyCoeffSrc(const std::vector<double> &p);
+static std::string FitNum(double v);
+static bool RegionToDnf(const GeoFunction &f,
+                        std::vector<std::vector<GeoFunction::IneqCond>> &cls)
+{
+    cls.clear();
+    if (!f.ineqDNF.empty()) {
+        cls = f.ineqDNF;
+        return true;
+    }
+    if (!f.ineqChain.empty()) {
+        cls.push_back(f.ineqChain);
+        return true;
+    }
+    auto mk = [](Expr l, Expr r, bool lt, bool strict) {
+        GeoFunction::IneqCond c;
+        c.l = std::move(l);
+        c.r = std::move(r);
+        c.lt = lt;
+        c.strict = strict;
+        return c;
+    };
+    const bool ltOp = f.ineqOp == 1 || f.ineqOp == 2;      // '<' '<=' 在 s<0 侧
+    const bool strictOp = f.ineqOp == 1 || f.ineqOp == 3;  // '<' '>' 边界虚线
+    if (f.ineqTwoVar) {
+        cls.push_back({ mk(f.ineqL, f.ineqR, ltOp, strictOp) });
+        return true;
+    }
+    if (f.ineqVertical) {
+        Expr lx, rc;
+        std::string e1, e2;
+        if (!lx.parse("x", e1) || !rc.parse(PolyCoeffSrc({ f.ineqX }), e2)) return false;
+        cls.push_back({ mk(std::move(lx), std::move(rc), ltOp, strictOp) });
+        return true;
+    }
+    if (f.ineqOp) {
+        Expr ly;
+        std::string e1;
+        if (!ly.parse("y", e1)) return false;
+        cls.push_back({ mk(std::move(ly), f.body, ltOp, strictOp) });
+        return true;
+    }
+    return false;   // 非区域
+}
+
 bool Kernel::input(const std::string &srcRaw)
 {
     if (undoSuspend_ > 0) return inputImpl(srcRaw);
@@ -2180,6 +2229,156 @@ static bool SolveNormalEquations(std::vector<std::vector<double>> M,
         if (!std::isfinite(p[r])) return false;
     }
     return true;
+}
+
+// 1.0.7.6 Fit(pts, f(x)) 自定义模型：LM（Levenberg–Marquardt 阻尼最小二乘）
+// + 中心差分数值雅可比。resid(i, p) 回第 i 点残差（模型(x_i;p)−y_i）。
+// 返回 false 仅当初始点即无有限残差；迭代收敛/停滞按当前 p 返回 true
+//（解的质量由调用方按 SSE 复判）。np 为参数数、n 为点数（n ≥ np 由调用方
+// 把关）；w 维阻尼方程用列主元消元就地解（np ≤ 8，量级极小）
+static bool NlsLm(int np, int n,
+                  const std::function<double(int, const std::vector<double> &)> &resid,
+                  std::vector<double> &p, int maxIt)
+{
+    auto sseOf = [&](const std::vector<double> &pv, double &out) -> bool {
+        double s = 0;
+        for (int i = 0; i < n; ++i) {
+            const double r = resid(i, pv);
+            if (!std::isfinite(r)) return false;
+            s += r * r;
+            if (s > 1e300) return false;   // 发散防护
+        }
+        out = s;
+        return true;
+    };
+    double s0;
+    if (!sseOf(p, s0)) return false;
+    double lam = 1e-3;
+    for (int it = 0; it < maxIt; ++it) {
+        std::vector<double> r0(n);
+        for (int i = 0; i < n; ++i) r0[i] = resid(i, p);
+        // 雅可比（中心差分）
+        std::vector<std::vector<double>> J(n, std::vector<double>(np, 0.0));
+        for (int j = 0; j < np; ++j) {
+            const double h = 1e-6 * (1.0 + fabs(p[j]));
+            std::vector<double> pp = p, pm = p;
+            pp[j] += h;
+            pm[j] -= h;
+            for (int i = 0; i < n; ++i) {
+                const double rp = resid(i, pp), rm = resid(i, pm);
+                if (std::isfinite(rp) && std::isfinite(rm)) J[i][j] = (rp - rm) / (2.0 * h);
+            }
+        }
+        // JTJ / JTr
+        std::vector<std::vector<double>> A(np, std::vector<double>(np, 0.0));
+        std::vector<double> b(np, 0.0);
+        for (int j = 0; j < np; ++j) {
+            for (int k = j; k < np; ++k) {
+                double s = 0;
+                for (int i = 0; i < n; ++i) s += J[i][j] * J[i][k];
+                A[j][k] = A[k][j] = s;
+            }
+            double s = 0;
+            for (int i = 0; i < n; ++i) s += J[i][j] * r0[i];
+            b[j] = -s;
+        }
+        bool improved = false;
+        for (int tries = 0; tries < 24 && !improved; ++tries) {
+            // (JTJ + λ·diag(JTJ)) δ = −JTr（Marquardt 缩放；全零对角退化 λI）
+            std::vector<std::vector<double>> M = A;
+            double dmax = 0;
+            for (int j = 0; j < np; ++j) dmax = std::max(dmax, A[j][j]);
+            for (int j = 0; j < np; ++j) M[j][j] += lam * (A[j][j] > 0 ? A[j][j] : dmax + 1e-12);
+            // 列主元消元解 δ
+            std::vector<std::vector<double>> G = M;
+            std::vector<double> rhs = b, delta;
+            bool ok = true;
+            for (int col = 0; col < np && ok; ++col) {
+                int piv = col;
+                for (int r = col + 1; r < np; ++r) {
+                    if (fabs(G[r][col]) > fabs(G[piv][col])) piv = r;
+                }
+                if (fabs(G[piv][col]) < 1e-300) { ok = false; break; }
+                if (piv != col) {
+                    std::swap(G[piv], G[col]);
+                    std::swap(rhs[piv], rhs[col]);
+                }
+                for (int r = col + 1; r < np; ++r) {
+                    const double fq = G[r][col] / G[col][col];
+                    if (fq == 0.0) continue;
+                    for (int c2 = col; c2 < np; ++c2) G[r][c2] -= fq * G[col][c2];
+                    rhs[r] -= fq * rhs[col];
+                }
+            }
+            if (ok) {
+                delta.assign(np, 0.0);
+                for (int r = np - 1; r >= 0; --r) {
+                    double s = rhs[r];
+                    for (int c2 = r + 1; c2 < np; ++c2) s -= G[r][c2] * delta[c2];
+                    delta[r] = s / G[r][r];
+                    if (!std::isfinite(delta[r])) { ok = false; break; }
+                }
+            }
+            if (!ok) { lam *= 5.0; continue; }
+            std::vector<double> p2(np);
+            for (int j = 0; j < np; ++j) p2[j] = p[j] + delta[j];
+            double s1;
+            if (!sseOf(p2, s1) || !(s1 < s0)) { lam *= 5.0; continue; }
+            double dd = 0;
+            for (int j = 0; j < np; ++j) dd += delta[j] * delta[j];
+            dd = std::sqrt(dd);
+            p = std::move(p2);
+            const bool conv = dd < 1e-12 * (1.0 + std::sqrt(s0))
+                           || s0 - s1 <= 1e-14 * (s0 + 1e-300);
+            s0 = s1;
+            lam = std::max(lam / 3.0, 1e-12);
+            improved = true;
+            if (conv) return true;
+        }
+        if (!improved) return true;   // 阻尼穷尽仍无改进：当前 p 即局部最优
+    }
+    return true;
+}
+
+// 拟合产物显示源文：模型规范化文本按词边界（[A-Za-z][A-Za-z0-9_]*）把参数
+// 标识符替换为 "(FitNum(值))"（恒加括号——隐式乘法 2a 替换裸负数/多位数字
+// 会变减法/数字拼接）。替换后须能重解析，失败（罕见）回退原文，求值仍走
+// alt 闭包不受影响
+static std::string FitModelSrc(const Expr &model, const std::vector<std::string> &params,
+                               const std::vector<double> &pv)
+{
+    const std::string &base = model.text();
+    std::string o;
+    size_t i = 0;
+    bool subst = false;
+    while (i < base.size()) {
+        const unsigned char c = (unsigned char)base[i];
+        if (isalpha(c)) {
+            size_t j = i + 1;
+            while (j < base.size()
+                   && (isalnum((unsigned char)base[j]) || base[j] == '_')) ++j;
+            const std::string name = base.substr(i, j - i);
+            bool hit = false;
+            for (size_t k = 0; k < params.size(); ++k) {
+                if (params[k] == name && k < pv.size() && std::isfinite(pv[k])) {
+                    o += "(" + FitNum(pv[k]) + ")";
+                    hit = true;
+                    subst = true;
+                    break;
+                }
+            }
+            if (!hit) o += name;
+            i = j;
+        } else {
+            o += base[i];
+            ++i;
+        }
+    }
+    if (!subst) return base;
+    Expr chk;
+    std::string err;
+    if (!chk.parse(o, err)) return base;   // 重解析失败回退原文（显示用）
+    return o;
 }
 
 // 多项式系数（p[0]=常数项 … p[k]=x^k 项）→ 内核函数源文（"c0 + c1*x + …"）。
@@ -4027,6 +4226,42 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         return true;
     }
 
+    // Element(M, i, j)（1.0.7.6 二维寻址）：矩阵第 i 行 j 列元素 → 数值
+    //（依随矩阵；越界/非矩阵拒绝。1 起下标口径同单参 Element，序号收数或
+    // 数值对象现值）
+    if (cmdLower == "element" && a.size() == 3) {
+        GeoList *L = dynamic_cast<GeoList *>(lookup(a[0]));
+        if (!L) { lastError = "未找到列表 " + a[0]; made = nullptr; return true; }
+        if (!L->isMatrix) {
+            lastError = "Element 二维寻址需要矩阵（如 M={{1,2},{3,4}}）";
+            made = nullptr;
+            return true;
+        }
+        double ri = 0, ci = 0;
+        if (!numArg(a[1], ri) || !numArg(a[2], ci)) {
+            lastError = "矩阵下标须为数或数值对象";
+            made = nullptr;
+            return true;
+        }
+        auto n = std::make_unique<GeoNumeric>();
+        n->isFree = false;
+        GeoList *src = L;
+        const long long ri0 = llround(ri), ci0 = llround(ci);
+        n->cmdName = "Element";
+        n->cmdArgs = a;
+        n->cmd = "Element(" + a[0] + ", " + a[1] + ", " + a[2] + ")";
+        n->calc = [src, ri0, ci0]() -> double {
+            if (!src->isMatrix || src->mcols <= 0) return NAN;
+            if (ri0 < 1 || ci0 < 1 || ri0 > src->mrows || ci0 > src->mcols) return NAN;
+            const size_t idx = (size_t)((ri0 - 1) * (long long)src->mcols + (ci0 - 1));
+            return idx < src->values.size() ? src->values[idx] : NAN;
+        };
+        n->update();
+        n->inputs = { L };
+        made = std::move(n);
+        return true;
+    }
+
     // Element(list, k) / First(list) / Last(list) → 数值（依随列表；k 为 1 起；
     // 1.0.6.6 列表实参收 {…} 字面量，静态定型）。1.0.7.3 点列表 → 依随点
     //（字面量静态定型；标签引用 calc 取现值，越界保持原坐标）
@@ -4105,6 +4340,60 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             n->inputs = { L };
         }
         made = std::move(n);
+        return true;
+    }
+
+    // Sort(L, K)（1.0.7.6 排序键，GGB 同款双列表形式）：按 K 的数值序重排 L
+    // 的元素（K 须数值列表，等长；同键保持 L 原序稳定）。数值/点列表都收；
+    // 点产物为计算坐标（pointRefs 清空），动态性经列表级 calc 依随两列表。
+    // 须先于一元 Sort/Unique/Reverse 块（后者 a.size()≠1 即拒）
+    if (cmdLower == "sort" && a.size() == 2) {
+        bool litL = false, litK = false;
+        GeoList *L = listArg(a[0], litL, true);
+        GeoList *K = L ? listArg(a[1], litK) : nullptr;
+        if (!L || !K) { made = nullptr; return true; }
+        const size_t nL = L->isPointList() ? L->points.size() : L->values.size();
+        if (nL != K->values.size() || nL == 0) {
+            lastError = "Sort 两列表长度须一致";
+            made = nullptr;
+            return true;
+        }
+        auto out = std::make_unique<GeoList>();
+        out->cmdName = "Sort";
+        out->cmdArgs = a;
+        GeoList *src = L, *ks = K;
+        auto bake = [src, ks](GeoList *g) {
+            g->values.clear();
+            g->points.clear();
+            g->pointRefs.clear();
+            g->isMatrix = false;
+            g->mrows = g->mcols = 0;
+            const bool pts = src->isPointList();
+            const size_t n = pts ? src->points.size() : src->values.size();
+            if (ks->values.size() != n || n == 0) {
+                // 动态漂移防御：键长不符按原序复制
+                if (pts) g->points = src->points;
+                else g->values = src->values;
+                return;
+            }
+            std::vector<size_t> idx(n);
+            for (size_t i = 0; i < n; ++i) idx[i] = i;
+            std::stable_sort(idx.begin(), idx.end(), [ks](size_t x, size_t y) {
+                return ks->values[x] < ks->values[y];
+            });
+            for (size_t i : idx) {
+                if (pts) g->points.push_back(src->points[i]);
+                else g->values.push_back(src->values[i]);
+            }
+        };
+        if (L->isPointList()) out->visible = true;   // 点结果画布可见
+        bake(out.get());
+        if (!(litL || litK)) {
+            out->calc = bake;
+            out->inputs = { L, K };
+            out->update();
+        }
+        made = std::move(out);
         return true;
     }
 
@@ -4519,8 +4808,63 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
 
     // Intersection(L1, L2) / Union(L1, L2)（1.0.7.5，GGB 列表语义）：交集/
     // 并集，数值与点列表都收（混型拒绝）。相等按值/坐标精确判；结果按 L1
-    // 首现序，Union 追加 L2 中 L1 没有的元素
+    // 首现序，Union 追加 L2 中 L1 没有的元素。
+    // 1.0.7.6 区域交并：两实参均为不等式区域对象 → 组合区域（交 = 句笛卡尔
+    // 积 AND，并 = 句拼接 OR；渲染/拾取/竖直描线走既有 combo 机制）。源区域
+    // 的滑条引用经 Expr 按名现值解析随动；挂 inputs 级联删除；持久化经
+    // exp="label=Intersection(...)" 命令重放重建
     if ((cmdLower == "intersection" || cmdLower == "union") && a.size() == 2) {
+        GeoFunction *r1 = dynamic_cast<GeoFunction *>(lookup(a[0]));
+        GeoFunction *r2 = r1 ? dynamic_cast<GeoFunction *>(lookup(a[1])) : nullptr;
+        if (r1 && r2) {
+            std::vector<std::vector<GeoFunction::IneqCond>> d1, d2;
+            if (RegionToDnf(*r1, d1) && RegionToDnf(*r2, d2)) {
+                const bool isU = cmdLower == "union";
+                std::vector<std::vector<GeoFunction::IneqCond>> cls;
+                if (isU) {
+                    cls = std::move(d1);
+                    cls.insert(cls.end(), std::make_move_iterator(d2.begin()),
+                               std::make_move_iterator(d2.end()));
+                } else {
+                    for (const auto &c1 : d1) {
+                        for (const auto &c2 : d2) {
+                            std::vector<GeoFunction::IneqCond> m = c1;
+                            m.insert(m.end(), c2.begin(), c2.end());
+                            cls.push_back(std::move(m));
+                        }
+                    }
+                }
+                if (cls.empty() || cls.size() > 32) {
+                    lastError = "组合区域过复杂（条件句 ≤32）";
+                    made = nullptr;
+                    return true;
+                }
+                auto f2 = std::make_unique<GeoFunction>();
+                f2->cmdName = isU ? "Union" : "Intersection";
+                f2->cmdArgs = a;
+                f2->src = f2->cmdName + "(" + a[0] + ", " + a[1] + ")";
+                if (cls.size() == 1 && cls[0].size() == 1) {
+                    // 单条件退化：x 线性走竖直半平面（边界绘制/虚实完整），
+                    // 其余单句写 ineqChain（下游零改动）
+                    double vx2 = 0;
+                    int vop = 0;
+                    if (VerticalFromCond(cls[0][0], vx2, vop)) {
+                        f2->ineqOp = vop;
+                        f2->ineqVertical = true;
+                        f2->ineqX = vx2;
+                    } else {
+                        f2->ineqChain = std::move(cls[0]);
+                    }
+                } else if (cls.size() == 1) {
+                    f2->ineqChain = std::move(cls[0]);
+                } else {
+                    f2->ineqDNF = std::move(cls);
+                }
+                f2->inputs = { r1, r2 };
+                made = std::move(f2);
+                return true;
+            }
+        }
         bool lit1 = false, lit2 = false;
         GeoList *L1 = listArg(a[0], lit1, true);
         GeoList *L2 = L1 ? listArg(a[1], lit2, true) : nullptr;
@@ -4805,10 +5149,11 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         return true;
     }
 
-    // Frequency(L)：与 Unique(L) 同序（首现序）的各值出现次数
+    // Frequency(L)：与 Unique(L) 同序（首现序）的各值出现次数。
+    // 1.0.7.6 收点列表（x 坐标为数据）
     if (cmdLower == "frequency" && a.size() == 1) {
         bool lit = false;
-        GeoList *L = listArg(a[0], lit);
+        GeoList *L = listArg(a[0], lit, true);
         if (!L) { made = nullptr; return true; }
         auto out = std::make_unique<GeoList>();
         out->cmdName = "Frequency";
@@ -4818,8 +5163,14 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             g->values.clear();
             g->isMatrix = false;
             g->mrows = g->mcols = 0;
+            std::vector<double> dv;
+            if (src->isPointList()) {
+                for (const auto &q : src->points) dv.push_back(q.first);
+            } else {
+                dv = src->values;
+            }
             std::vector<double> uniq;
-            for (double x : src->values) {
+            for (double x : dv) {
                 bool seen = false;
                 for (double y : uniq) {
                     if (y == x) { seen = true; break; }
@@ -4828,7 +5179,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             }
             for (double u : uniq) {
                 long long c = 0;
-                for (double x : src->values) {
+                for (double x : dv) {
                     if (x == u) ++c;
                 }
                 g->values.push_back((double)c);
@@ -4849,10 +5200,11 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
     };
 
     // BarChart(数据) / BarChart(横坐标, 高度[, 条宽])：单列表形式按 1..n
-    // 定位；条宽缺省 0.8（chartB 存）
+    // 定位；条宽缺省 0.8（chartB 存）。1.0.7.6 单参点列表形式：x 坐标定位、
+    // y 坐标定高（同双列表形式）
     if (cmdLower == "barchart" && (a.size() == 1 || a.size() == 2 || a.size() == 3)) {
         bool lit = false;
-        GeoList *Lx = listArg(a[0], lit);
+        GeoList *Lx = listArg(a[0], lit, a.size() == 1);
         if (!Lx) { made = nullptr; return true; }
         bool anyLit = lit;
         GeoList *Lh = nullptr;
@@ -4879,12 +5231,22 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         out->cmdArgs = a;
         GeoList *xs = Lx, *hs = Lh ? Lh : Lx;
         const bool twoLists = Lh != nullptr;
-        auto bake = [xs, hs, twoLists, bw, hasW](GeoList *g) {
+        const bool ptForm = a.size() == 1 && Lx->isPointList();
+        auto bake = [xs, hs, twoLists, bw, hasW, ptForm](GeoList *g) {
             g->isMatrix = false;
             g->mrows = g->mcols = 0;
             if (hasW) {
                 const double w = bw.evalNow();
                 g->chartB = (std::isfinite(w) && w > 0) ? w : 0.8;
+            }
+            if (ptForm) {
+                g->chartX.clear();
+                g->values.clear();
+                for (const auto &q : xs->points) {
+                    g->chartX.push_back(q.first);
+                    g->values.push_back(q.second);
+                }
+                return;
             }
             if (twoLists) {
                 const size_t n = std::min(xs->values.size(), hs->values.size());
@@ -4905,7 +5267,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
 
     // Histogram(数据, 组数) / Histogram(组界, 数据)：前者等宽自动分组
     //（第二参可解析为数即此形式）；后者按组界 [b_i, b_{i+1}) 计数（末组
-    // 含右端点），界外数据忽略
+    // 含右端点），界外数据忽略。1.0.7.6 数据槽收点列表（x 坐标为数据）
     if (cmdLower == "histogram" && a.size() == 2) {
         NumRefExpr bn;
         std::vector<GeoNumeric *> ndeps;
@@ -4920,12 +5282,12 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                 made = nullptr;
                 return true;
             }
-            Ld = listArg(a[0], lit);
+            Ld = listArg(a[0], lit, true);
             if (!Ld) { made = nullptr; return true; }
         } else {
             Lb = listArg(a[0], lit);
             if (!Lb) { made = nullptr; return true; }
-            Ld = listArg(a[1], litD);
+            Ld = listArg(a[1], litD, true);
             if (!Ld) { made = nullptr; return true; }
             for (size_t k = 0; k + 1 < Lb->values.size(); ++k) {
                 if (Lb->values[k + 1] < Lb->values[k]) {
@@ -4950,7 +5312,13 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             g->chartX.clear();
             g->isMatrix = false;
             g->mrows = g->mcols = 0;
-            const auto &d = sd->values;
+            std::vector<double> dv;
+            if (sd->isPointList()) {
+                for (const auto &q : sd->points) dv.push_back(q.first);
+            } else {
+                dv = sd->values;
+            }
+            const std::vector<double> &d = dv;
             if (d.empty()) return;
             if (binsForm) {
                 const double nraw = bn.evalNow();
@@ -5042,7 +5410,8 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
     }
 
     // BoxPlot(y 中心[, 箱高], 数据)：五数概括（线性插值分位数），values 存
-    // {min, Q1, 中位数, Q3, max}，chartA/chartB 存中心 y 与箱高（缺省 1）
+    // {min, Q1, 中位数, Q3, max}，chartA/chartB 存中心 y 与箱高（缺省 1）。
+    // 1.0.7.6 数据槽收点列表（x 坐标为数据）
     if (cmdLower == "boxplot" && (a.size() == 2 || a.size() == 3)) {
         NumRefExpr bo, bs;
         std::vector<GeoNumeric *> ndeps;
@@ -5058,7 +5427,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             return true;
         }
         bool lit = false;
-        GeoList *L = listArg(a[hasScale ? 2 : 1], lit);
+        GeoList *L = listArg(a[hasScale ? 2 : 1], lit, true);
         if (!L) { made = nullptr; return true; }
         auto out = std::make_unique<GeoList>();
         out->chart = "box";
@@ -5077,8 +5446,14 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                 const double s = bs.evalNow();
                 g->chartB = (std::isfinite(s) && s > 0) ? s : 1.0;
             }
-            if (src->values.empty()) return;
-            std::vector<double> s2(src->values);
+            std::vector<double> dv;
+            if (src->isPointList()) {
+                for (const auto &q : src->points) dv.push_back(q.first);
+            } else {
+                dv = src->values;
+            }
+            if (dv.empty()) return;
+            std::vector<double> s2(dv);
             std::sort(s2.begin(), s2.end());
             auto quant = [&s2](double p) -> double {
                 const double pos = p * (double)(s2.size() - 1);
@@ -5109,7 +5484,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             return true;
         }
         bool lit = false;
-        GeoList *L = listArg(a[0], lit);
+        GeoList *L = listArg(a[0], lit, true);
         if (!L) { made = nullptr; return true; }
         auto out = std::make_unique<GeoList>();
         out->chart = "stem";
@@ -5130,7 +5505,11 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             g->chartA = adj;
             const double mul = pow(10.0, adj);
             g->values.clear();
-            for (double v : src->values) g->values.push_back(v * mul);
+            if (src->isPointList()) {
+                for (const auto &q : src->points) g->values.push_back(q.first * mul);
+            } else {
+                for (double v : src->values) g->values.push_back(v * mul);
+            }
             std::sort(g->values.begin(), g->values.end());
         };
         std::vector<GeoElement *> inputs;
@@ -5980,6 +6359,205 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         else if (!fs.litX && !fs.litY) n->inputs = { fs.Lx, fs.Ly };
         n->update();
         made = std::move(n);
+        return true;
+    }
+
+    // Fit(点列表, 模型)（1.0.7.6，GGB 自定义模型拟合）：模型含 x 与 ≥1 个
+    // 自由参数（未定义变量，如 a*x^2+b；已定义数值对象按常量现值参与）。
+    // LM 阻尼最小二乘 + 中心差分数值雅可比，初值扫描（np≤2 全参数网格、
+    // ≥3 确定性采样）取 SSE 最小解。产物函数：求值走 alt 闭包（内容键去抖
+    // 重解，FitPoly 同款；重解失败沿用旧拟合），代数区显示参数替换后的
+    // 拟合式；字面量点列表冻结静态，标签形式挂 inputs 联动
+    if (cmdLower == "fit" && a.size() == 2) {
+        FitSrc fs;
+        if (!a[0].empty() && a[0].front() == '{') {
+            bool litP = false;
+            GeoList *cand = listArg(a[0], litP, true);
+            if (!cand) { made = nullptr; return true; }
+            if (!cand->isPointList()) {
+                lastError = "Fit 需要（点列表, 模型）实参";
+                made = nullptr;
+                return true;
+            }
+            fs.fx = std::make_shared<std::vector<double>>();
+            fs.fy = std::make_shared<std::vector<double>>();
+            for (const auto &q : cand->points) {
+                fs.fx->push_back(q.first);
+                fs.fy->push_back(q.second);
+            }
+            fs.litX = fs.litY = true;   // 冻结副本转静态
+        } else {
+            GeoList *lab = dynamic_cast<GeoList *>(lookup(a[0]));
+            if (!lab || !lab->isPointList()) {
+                lastError = "Fit 第一参数须为点列表: " + a[0];
+                made = nullptr;
+                return true;
+            }
+            fs.Lp = lab;
+        }
+        // 模型解析：x 绑定主元，未知标识符进 refs——已定义数值对象按常量
+        // 现值参与，未定义者为拟合参数
+        Expr model;
+        std::string merr;
+        if (!model.parse(a[1], merr, "x", true)) {
+            lastError = "Fit 模型无法解析: " + a[1];
+            made = nullptr;
+            return true;
+        }
+        if (!model.containsX()) { lastError = "Fit 模型须含 x"; made = nullptr; return true; }
+        if (model.containsY()) { lastError = "Fit 模型不能含 y"; made = nullptr; return true; }
+        std::vector<std::string> params, refNames;
+        std::vector<GeoNumeric *> refObjs;
+        for (const std::string &rn : model.refs()) {
+            if (GeoNumeric *dn = dynamic_cast<GeoNumeric *>(lookup(rn))) {
+                refNames.push_back(rn);
+                refObjs.push_back(dn);
+            } else if (lookup(rn)) {
+                lastError = "Fit 模型引用须为数值对象: " + rn;
+                made = nullptr;
+                return true;
+            } else {
+                params.push_back(rn);
+            }
+        }
+        if (params.empty()) {
+            lastError = "Fit 模型须含自由参数（未定义变量，如 Fit(L, a*x+b)）";
+            made = nullptr;
+            return true;
+        }
+        if (params.size() > 8) {
+            lastError = "Fit 模型参数过多（≤8）";
+            made = nullptr;
+            return true;
+        }
+        const int np = (int)params.size();
+        auto xvals = [fs]() -> const std::vector<double> & { return fs.X(); };
+        auto yvals = [fs]() -> const std::vector<double> & { return fs.Y(); };
+        const size_t n0 = std::min(xvals().size(), yvals().size());
+        if (n0 < 2 || (size_t)np > n0) {
+            lastError = "Fit 数据点数须不少于参数个数（且 ≥2）";
+            made = nullptr;
+            return true;
+        }
+        // 单轮求解：数据快照（LM 内每点取数，避免逐点刷缓冲）→ 初值扫描
+        // 多起点 LM（80 迭代）取 SSE 最小 → 200 迭代精化
+        auto solve = [xvals, yvals, model, params, refNames, refObjs, np, n0](
+                std::vector<double> &outP) -> bool {
+            const std::vector<double> &XV0 = xvals();
+            const std::vector<double> &YV0 = yvals();
+            const size_t n = std::min(XV0.size(), YV0.size());
+            if (n < 2 || (size_t)np > n) return false;
+            std::vector<double> XV(XV0.begin(), XV0.begin() + (long)n);
+            std::vector<double> YV(YV0.begin(), YV0.begin() + (long)n);
+            auto resid = [&](int i, const std::vector<double> &pv) -> double {
+                const double mx = model.evalResolved(XV[(size_t)i],
+                    [&](const std::string &nm) -> double {
+                        for (int j = 0; j < np; ++j) {
+                            if (params[(size_t)j] == nm) return pv[(size_t)j];
+                        }
+                        for (size_t j = 0; j < refNames.size(); ++j) {
+                            if (refNames[j] == nm) return refObjs[j]->value;
+                        }
+                        return NAN;
+                    });
+                return mx - YV[(size_t)i];
+            };
+            static const double kGrid[] = { 1.0, 0.5, 2.0, 0.1, 10.0, -1.0 };
+            std::vector<std::vector<double>> starts;
+            if (np <= 2) {
+                for (double v1 : kGrid) {
+                    if (np == 1) { starts.push_back({ v1 }); continue; }
+                    for (double v2 : kGrid) starts.push_back({ v1, v2 });
+                }
+            } else {
+                // np≥3：确定性 xorshift 格点池采样 64 起点，另附全 1 向量
+                static const double kPool[] = { 0.1, 0.5, 1.0, 2.0, 10.0, -0.1, -0.5, -10.0 };
+                unsigned long long seed = 88172645463325252ULL;
+                for (int si = 0; si < 64; ++si) {
+                    std::vector<double> s((size_t)np);
+                    for (int j = 0; j < np; ++j) {
+                        seed ^= seed << 13;
+                        seed ^= seed >> 7;
+                        seed ^= seed << 17;
+                        s[(size_t)j] = kPool[(seed >> 33) % 8];
+                    }
+                    starts.push_back(std::move(s));
+                }
+                starts.push_back(std::vector<double>((size_t)np, 1.0));
+            }
+            double bestS = 1e300;
+            bool got = false;
+            for (const std::vector<double> &st : starts) {
+                std::vector<double> p = st;
+                if (!NlsLm(np, (int)n, resid, p, 80)) continue;
+                double s = 0;
+                bool fin = true;
+                for (int i = 0; i < (int)n; ++i) {
+                    const double r = resid(i, p);
+                    if (!std::isfinite(r)) { fin = false; break; }
+                    s += r * r;
+                }
+                if (!fin) continue;
+                if (!got || s < bestS) {
+                    bestS = s;
+                    outP = p;
+                    got = true;
+                }
+            }
+            if (got) NlsLm(np, (int)n, resid, outP, 200);
+            return got;
+        };
+        std::vector<double> p0;
+        if (!solve(p0)) {
+            lastError = "Fit 求解失败（初值扫描无有限解）";
+            made = nullptr;
+            return true;
+        }
+        auto d = std::make_unique<GeoFunction>();
+        d->color = { 0x8B, 0x45, 0x13 };
+        auto fp = std::make_shared<std::vector<double>>(p0);
+        auto key = std::make_shared<std::vector<double>>();
+        GeoFunction *self = d.get();
+        d->src = FitModelSrc(model, params, *fp);
+        {
+            std::string perr;
+            d->body.parse(d->src, perr);
+        }
+        d->alt = [xvals, yvals, model, params, refNames, refObjs, np, fp, key, self,
+                  solve](double x) -> double {
+            const std::vector<double> &XV = xvals();
+            const std::vector<double> &YV = yvals();
+            std::vector<double> nk;
+            nk.reserve(XV.size() + YV.size());
+            nk.insert(nk.end(), XV.begin(), XV.end());
+            nk.insert(nk.end(), YV.begin(), YV.end());
+            if (fp->empty() || *key != nk) {
+                std::vector<double> p;
+                if (solve(p)) {
+                    *fp = p;
+                    // 重解成功同步代数区显示（FitPoly 同款）
+                    self->src = FitModelSrc(model, params, *fp);
+                    std::string perr;
+                    self->body.parse(self->src, perr);
+                }
+                *key = nk;
+            }
+            if (fp->empty()) return NAN;
+            return model.evalResolved(x, [&](const std::string &nm) -> double {
+                for (int j = 0; j < np; ++j) {
+                    if (params[(size_t)j] == nm) return (*fp)[(size_t)j];
+                }
+                for (size_t j = 0; j < refNames.size(); ++j) {
+                    if (refNames[j] == nm) return refObjs[j]->value;
+                }
+                return NAN;
+            });
+        };
+        d->cmdName = "Fit";
+        d->cmdArgs = a;
+        if (fs.Lp) d->inputs = { fs.Lp };
+        d->update();
+        made = std::move(d);
         return true;
     }
 
@@ -7477,7 +8055,9 @@ GeoElement *Kernel::pickObject(double px, double py)
         } else {
             continue;   // 点/数值不参与对象拾取
         }
-        if (d < grab && d < bestD) {
+        // 同距平局后建胜出（GGB 置顶语义；1.0.7.6 区域交并产物叠在源区域
+        // 之上，点按应选中它而非先建的源区域）
+        if (d < grab && d <= bestD) {
             bestD = d;
             best = g.get();
         }
