@@ -3523,30 +3523,57 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                 made = nullptr;
                 return true;
             }
-            // 1.0.8.7 2D 方向直线：GeoLine calc 闭包（点/向量均随动）；
-            // 字面量 2D 点与 2D Ray 方向不接管（缺口记录 HANDOFF）
+            // 1.0.8.8 2D 方向直线/射线：GeoLine calc 闭包 / GeoRay image
+            //（点标签或字面量、向量均随动；GGB Line/Ray(Point, Vector) 2D 同
+            // 口径）
             if (!p0.is3D && !dis3D) {
-                if (cmdLower == "line" && p0.ref && dep) {
+                if (cmdLower == "line") {
                     auto l = std::make_unique<GeoLine>();
                     const CmdPt P0 = p0;
                     GeoElement *DEP = dep;
-                    l->inputs = { p0.ref, dep };
+                    if (p0.ref) l->inputs.push_back(p0.ref);
+                    l->inputs.push_back(dep);
                     l->cmdName = "Line";
                     l->cmdArgs = { a[0], a[1] };
                     l->calc = [P0, DEP](GeoLine *L) {
                         GeoVector *v = dynamic_cast<GeoVector *>(DEP);
                         const double dx = v->ex2() - v->ex1();
                         const double dy = v->ey2() - v->ey1();
+                        const double px = P0.ref ? P0.ref->x : P0.x;
+                        const double py = P0.ref ? P0.ref->y : P0.y;
                         L->a = -dy;
                         L->b = dx;
-                        L->c = L->a * P0.ref->x + L->b * P0.ref->y;
+                        L->c = L->a * px + L->b * py;
                         L->verticalConst = false;
                     };
                     l->update();
                     made = std::move(l);
                     return true;
                 }
-                // 其余 2D 组合放行两点路径（向量实参报原错误文案）
+                auto ry = std::make_unique<GeoRay>();
+                const CmdPt P0 = p0;
+                GeoElement *DEP = dep;
+                if (p0.ref) ry->inputs.push_back(p0.ref);
+                ry->inputs.push_back(dep);
+                ry->image = true;
+                ry->cmdName = "Ray";
+                ry->cmdArgs = { a[0], a[1] };
+                ry->calc = [P0, DEP](GeoRay *R) {
+                    GeoVector *v = dynamic_cast<GeoVector *>(DEP);
+                    const double dx = v->ex2() - v->ex1();
+                    const double dy = v->ey2() - v->ey1();
+                    const double px = P0.ref ? P0.ref->x : P0.x;
+                    const double py = P0.ref ? P0.ref->y : P0.y;
+                    R->ix1 = px;
+                    R->iy1 = py;
+                    R->ix2 = px + dx;
+                    R->iy2 = py + dy;
+                    R->iz1 = 0;
+                    R->iz2 = 0;
+                };
+                ry->update();
+                made = std::move(ry);
+                return true;
             } else {
             const CmdPt P0 = p0;
             GeoElement *DEP = dep;
@@ -4220,6 +4247,122 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             return true;
         }
         made = std::move(l);
+        return true;
+    }
+    // 1.0.8.8 Angle(平面, 平面) / Angle(空间直线, 平面) / Angle(直线, 直线)：
+    // 两对象夹角（度数值 0..90，GGB 同口径取锐角侧；线面角 asin(|d·n|)）。
+    // 系数现值实时读取（滑条/依随重算随动）。数值产物不画弧（GGB 弧在交线
+    // 处——记录候选）
+    if (cmdLower == "angle" && a.size() == 2) {
+        GeoElement *o1 = lookup(a[0]);
+        GeoElement *o2 = lookup(a[1]);
+        if (!o1 || !o2) {
+            lastError = "未找到对象 " + (o1 ? a[1] : a[0]);
+            made = nullptr;
+            return true;
+        }
+        GeoPlane *pa1 = dynamic_cast<GeoPlane *>(o1);
+        GeoPlane *pa2 = dynamic_cast<GeoPlane *>(o2);
+        GeoLine3 *l3a = dynamic_cast<GeoLine3 *>(o1);
+        GeoLine3 *l3b = dynamic_cast<GeoLine3 *>(o2);
+        GeoLine *ln1 = dynamic_cast<GeoLine *>(o1);
+        GeoLine *ln2 = dynamic_cast<GeoLine *>(o2);
+        int form = 0;   // 1=面面 2=线面 3=线线
+        GeoPlane *f1 = nullptr, *f2 = nullptr;
+        GeoElement *s1 = nullptr, *s2 = nullptr;
+        if (pa1 && pa2) {
+            form = 1;
+            f1 = pa1;
+            f2 = pa2;
+        } else if ((pa1 && l3b) || (l3a && pa2)) {
+            form = 2;
+            f1 = pa1 ? pa1 : pa2;
+            s1 = l3a ? l3a : l3b;
+        } else if (l3a && l3b) {
+            form = 3;
+            s1 = l3a;
+            s2 = l3b;
+        } else if (ln1 && ln2) {
+            form = 3;
+            s1 = ln1;
+            s2 = ln2;
+        } else if (l3a && ln2) {
+            form = 3;
+            s1 = l3a;
+            s2 = ln2;
+        } else if (ln1 && l3b) {
+            form = 3;
+            s1 = ln1;
+            s2 = l3b;
+        }
+        if (form == 0) {
+            lastError = "Angle 需要（点, 顶点, 点）或（平面/直线, 平面/直线）";
+            made = nullptr;
+            return true;
+        }
+        auto n = std::make_unique<GeoNumeric>();
+        GeoPlane *F1 = f1, *F2 = f2;
+        GeoElement *S1 = s1, *S2 = s2;
+        const int FORM = form;
+        n->calc = [FORM, F1, F2, S1, S2]() {
+            auto unit3 = [](double x, double y, double z, double &ux, double &uy,
+                            double &uz) -> bool {
+                const double l = sqrt(x * x + y * y + z * z);
+                if (!(l > 1e-12)) return false;
+                ux = x / l;
+                uy = y / l;
+                uz = z / l;
+                return true;
+            };
+            auto dirOfEl = [](GeoElement *e, double &dx, double &dy,
+                              double &dz) -> bool {
+                if (GeoLine3 *l = dynamic_cast<GeoLine3 *>(e)) {
+                    if (!l->defined()) return false;
+                    dx = l->ex2() - l->ex1();
+                    dy = l->ey2() - l->ey1();
+                    dz = l->ez2() - l->ez1();
+                    return true;
+                }
+                if (GeoLine *l = dynamic_cast<GeoLine *>(e)) {
+                    dx = l->b;
+                    dy = -l->a;
+                    dz = 0;
+                    return true;
+                }
+                return false;
+            };
+            double u1x = 0, u1y = 0, u1z = 0, u2x = 0, u2y = 0, u2z = 0;
+            if (FORM == 1) {
+                u1x = F1->a; u1y = F1->b; u1z = F1->c;
+                u2x = F2->a; u2y = F2->b; u2z = F2->c;
+                if (!unit3(u1x, u1y, u1z, u1x, u1y, u1z)
+                    || !unit3(u2x, u2y, u2z, u2x, u2y, u2z)) return 0.0;
+                const double c = fabs(u1x * u2x + u1y * u2y + u1z * u2z);
+                return acos(std::min(1.0, c)) * 180.0 / M_PI;
+            }
+            if (FORM == 2) {
+                u1x = F1->a; u1y = F1->b; u1z = F1->c;
+                if (!dirOfEl(S1, u2x, u2y, u2z)) return 0.0;
+                if (!unit3(u1x, u1y, u1z, u1x, u1y, u1z)
+                    || !unit3(u2x, u2y, u2z, u2x, u2y, u2z)) return 0.0;
+                // 线面角：sin θ = |d·n|
+                const double s = fabs(u1x * u2x + u1y * u2y + u1z * u2z);
+                return asin(std::min(1.0, s)) * 180.0 / M_PI;
+            }
+            if (!dirOfEl(S1, u1x, u1y, u1z)) return 0.0;
+            if (!dirOfEl(S2, u2x, u2y, u2z)) return 0.0;
+            if (!unit3(u1x, u1y, u1z, u1x, u1y, u1z)
+                || !unit3(u2x, u2y, u2z, u2x, u2y, u2z)) return 0.0;
+            const double c = fabs(u1x * u2x + u1y * u2y + u1z * u2z);
+            return acos(std::min(1.0, c)) * 180.0 / M_PI;
+        };
+        n->cmd = "Angle(" + o1->label + ", " + o2->label + ")";
+        n->cmdName = "Angle";
+        n->cmdArgs = { a[0], a[1] };
+        n->inputs = { o1, o2 };
+        n->isAngleVal = true;   // 角语义（度）
+        n->update();
+        made = std::move(n);
         return true;
     }
     if (cmdLower == "angle" && a.size() == 3) {
