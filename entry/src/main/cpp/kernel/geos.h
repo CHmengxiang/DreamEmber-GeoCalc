@@ -477,10 +477,17 @@ class GeoSphere : public GeoElement {
 public:
     GeoSphere() : GeoElement(GeoType::Sphere) { color = {0x2C, 0x6B, 0xD4}; }
     GeoPoint *center = nullptr;         // 三维中心（inputs 注册，级联删除保护）
+    // 1.0.8.6 字面量中心 Sphere((x,y,z), …)：image 缓存（center 空时生效）；
+    // 读取一律走 ccx/ccy/ccz
+    bool cImage = false;
+    double icx = 0, icy = 0, icz = 0;
     GeoPoint *through = nullptr;        // 过点形式（与 radius/radiusNum 三选一）
     GeoNumeric *radiusNum = nullptr;    // 半径引用数值对象（随其重算）
     double radius = 0;
     std::function<void(GeoSphere *)> calc;   // 依随重算（中心/过点/半径引用变动）
+    double ccx() const { return cImage ? icx : (center ? center->x : 0.0); }
+    double ccy() const { return cImage ? icy : (center ? center->y : 0.0); }
+    double ccz() const { return cImage ? icz : (center ? center->z : 0.0); }
     void update() override { if (calc) calc(this); }
     std::string valueText() const override;
     std::string definitionText() const override;
@@ -492,10 +499,27 @@ class GeoCylinder : public GeoElement {
 public:
     GeoCylinder() : GeoElement(GeoType::Cylinder) { color = {0x2C, 0x6B, 0xD4}; }
     GeoPoint *base = nullptr;           // 底面中心（三维点）
+    // 1.0.8.6 字面量底心/顶心（Cylinder((x,y,z), …)）：image 缓存（指针空时
+    // 生效）；读取一律走 bcx/bcy/bcz、tcx/tty/tcz
+    bool bImage = false;
+    double ibx = 0, iby = 0, ibz = 0;
+    bool tImage = false;
+    double itx = 0, ity = 0, itz = 0;
     GeoPoint *topPt = nullptr;          // 轴线形式顶心（可空）
     GeoNumeric *radiusNum = nullptr;    // 半径引用（可空）
     GeoNumeric *heightNum = nullptr;    // 高引用（可空）
     double radius = 0, height = 0;      // 静态值（顶心形式下 height=|AB|）
+    double bcx() const { return bImage ? ibx : (base ? base->x : 0.0); }
+    double bcy() const { return bImage ? iby : (base ? base->y : 0.0); }
+    double bcz() const { return bImage ? ibz : (base ? base->z : 0.0); }
+    double tcx() const { return tImage ? itx : (topPt ? topPt->x : bcx()); }
+    double tcy() const { return tImage ? ity : (topPt ? topPt->y : bcy()); }
+    double tcz() const
+    {
+        return tImage ? itz
+                      : (topPt ? topPt->z
+                               : bcz() + (heightNum ? heightNum->value : height));
+    }
     std::function<void(GeoCylinder *)> calc;
     void update() override { if (calc) calc(this); }
     std::string valueText() const override;

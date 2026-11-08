@@ -3494,6 +3494,117 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         made = std::move(pp);
         return true;
     }
+    // 1.0.8.6 Line(点, 向量) / Ray(点, 向量)（GGB Line/Ray(Point, Vector) 同
+    // 口径）：过点沿方向的空间直线/射线。方向=向量对象标签端点差（image 感
+    // 知）——裸元组按 GGB 口径是点（走两点直线，probe_1083 R18 口径），点标
+    // 签第二参亦不接管；2D 方向形式不接管（2D 无方向 Mode，缺口记录 HANDOFF）
+    auto dirFromArg = [&](const std::string &s, double &dx, double &dy,
+                          double &dz, GeoElement *&dep, bool &dis3D) -> bool {
+        GeoVector *v = dynamic_cast<GeoVector *>(lookup(s));
+        if (!v) return false;
+        dx = v->ex2() - v->ex1();
+        dy = v->ey2() - v->ey1();
+        dz = v->ez2() - v->ez1();
+        dep = v;
+        dis3D = (v->p1 && v->p1->is3D) || (v->p2 && v->p2->is3D)
+            || v->ez1() != 0.0 || v->ez2() != 0.0;
+        return true;
+    };
+    if ((cmdLower == "line" || cmdLower == "ray") && a.size() == 2) {
+        CmdPt p0;
+        double dxx = 0, dyy = 0, dzz = 0;
+        GeoElement *dep = nullptr;
+        bool dis3D = false;
+        if (cmdPointArg(a[0], p0)
+            && dirFromArg(a[1], dxx, dyy, dzz, dep, dis3D)
+            && (p0.is3D || dis3D)) {
+            const double dl0 = sqrt(dxx * dxx + dyy * dyy + dzz * dzz);
+            if (!(dl0 > 1e-12)) {
+                lastError = "方向为零向量";
+                made = nullptr;
+                return true;
+            }
+            const CmdPt P0 = p0;
+            GeoElement *DEP = dep;
+            const double ux = dxx / dl0, uy = dyy / dl0, uz = dzz / dl0;
+            if (cmdLower == "ray") {
+                // 射线：GeoRay image（起点 + 单位方向第二点），render3D 画
+                // t≥0 半线
+                auto ry = std::make_unique<GeoRay>();
+                ry->image = true;
+                if (p0.ref) ry->inputs.push_back(p0.ref);
+                if (dep) ry->inputs.push_back(dep);
+                ry->cmdName = "Ray";
+                ry->cmdArgs = { a[0], a[1] };
+                ry->calc = [P0, DEP, ux, uy, uz](GeoRay *R) {
+                    const double px = P0.ref ? P0.ref->x : P0.x;
+                    const double py = P0.ref ? P0.ref->y : P0.y;
+                    const double pz = P0.ref ? P0.ref->z : P0.z;
+                    double ddx = ux, ddy = uy, ddz = uz;
+                    if (DEP) {
+                        GeoVector *v = dynamic_cast<GeoVector *>(DEP);
+                        const double vx = v->ex2() - v->ex1();
+                        const double vy = v->ey2() - v->ey1();
+                        const double vz = v->ez2() - v->ez1();
+                        const double vl = sqrt(vx * vx + vy * vy + vz * vz);
+                        if (!(vl > 1e-12)) {
+                            R->ix1 = R->iy1 = R->iz1 = R->ix2 = R->iy2
+                                = R->iz2 = NAN;
+                            return;
+                        }
+                        ddx = vx / vl;
+                        ddy = vy / vl;
+                        ddz = vz / vl;
+                    }
+                    R->ix1 = px;
+                    R->iy1 = py;
+                    R->iz1 = pz;
+                    R->ix2 = px + ddx;
+                    R->iy2 = py + ddy;
+                    R->iz2 = pz + ddz;
+                };
+                ry->update();
+                made = std::move(ry);
+                return true;
+            }
+            auto l3 = std::make_unique<GeoLine3>();
+            l3->image = true;
+            if (p0.ref) l3->inputs.push_back(p0.ref);
+            if (dep) l3->inputs.push_back(dep);
+            l3->cmdName = "Line";
+            l3->cmdArgs = { a[0], a[1] };
+            l3->calc = [P0, DEP, ux, uy, uz](GeoLine3 *L) {
+                const double px = P0.ref ? P0.ref->x : P0.x;
+                const double py = P0.ref ? P0.ref->y : P0.y;
+                const double pz = P0.ref ? P0.ref->z : P0.z;
+                double ddx = ux, ddy = uy, ddz = uz;
+                if (DEP) {
+                    GeoVector *v = dynamic_cast<GeoVector *>(DEP);
+                    const double vx = v->ex2() - v->ex1();
+                    const double vy = v->ey2() - v->ey1();
+                    const double vz = v->ez2() - v->ez1();
+                    const double vl = sqrt(vx * vx + vy * vy + vz * vz);
+                    if (!(vl > 1e-12)) {
+                        L->ix1 = L->iy1 = L->iz1 = L->ix2 = L->iy2 = L->iz2
+                            = NAN;
+                        return;
+                    }
+                    ddx = vx / vl;
+                    ddy = vy / vl;
+                    ddz = vz / vl;
+                }
+                L->ix1 = px;
+                L->iy1 = py;
+                L->iz1 = pz;
+                L->ix2 = px + ddx;
+                L->iy2 = py + ddy;
+                L->iz2 = pz + ddz;
+            };
+            l3->update();
+            made = std::move(l3);
+            return true;
+        }
+    }
     if ((cmdLower == "line" || cmdLower == "segment") && a.size() == 2) {
         // 1.0.8.3 端点收字面量元组：(a,b)/(a,b,c) 直填（GGB 同款）。字面量
         // 端点走 image 缓存 + calc 闭包（标签端随动、字面端定值；全字面量
@@ -3728,18 +3839,46 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         return true;
     }
     // 1.0.8.1 Sphere(M, r | A)：球心 M（2D 点按 z=0 允许），半径取数值/
-    // 数值引用或过点距离。渲染 lat/long 线框（render3D）
+    // 数值引用或过点距离。渲染 lat/long 线框（render3D）。1.0.8.6 球心/过点
+    // 收字面量元组（Sphere((x,y,z), r)：image 缓存中心，inputs 只挂标签端）
     if (cmdLower == "sphere" && a.size() == 2) {
-        GeoPoint *center = lookupPoint(a[0]);
-        if (!center) { lastError = "未找到点 " + a[0]; made = nullptr; return true; }
+        CmdPt c0;
+        if (!cmdPointArg(a[0], c0)) {
+            lastError = "未找到点 " + a[0];
+            made = nullptr;
+            return true;
+        }
         auto sp = std::make_unique<GeoSphere>();
-        sp->center = center;
-        if (GeoPoint *through = lookupPoint(a[1])) {
-            sp->through = through;
-            sp->inputs = { center, through };
+        if (c0.lit) {
+            sp->cImage = true;
+            sp->icx = c0.x;
+            sp->icy = c0.y;
+            sp->icz = c0.z;
+        } else {
+            sp->center = c0.ref;
+        }
+        CmdPt t0;
+        const bool t0ok = cmdPointArg(a[1], t0);
+        if (t0ok && (t0.ref || t0.lit)) {
+            if (t0.lit) {
+                // 过点字面量：半径=字面量距离快照（静态球）
+                sp->radius = sqrt(pow(t0.x - c0.x, 2) + pow(t0.y - c0.y, 2)
+                                  + pow(t0.z - c0.z, 2));
+                if (!(sp->radius > 1e-12)) {
+                    lastError = "半径必须为正数";
+                    made = nullptr;
+                    return true;
+                }
+            } else {
+                sp->through = t0.ref;
+            }
+            if (c0.ref) sp->inputs.push_back(c0.ref);
+            if (t0.ref) sp->inputs.push_back(t0.ref);
         } else if (GeoNumeric *rn = dynamic_cast<GeoNumeric *>(lookup(a[1]))) {
             sp->radiusNum = rn;
-            sp->inputs = { center, rn };
+            sp->inputs = { };
+            if (c0.ref) sp->inputs.push_back(c0.ref);
+            sp->inputs.push_back(rn);
         } else {
             Expr re;
             std::string err;
@@ -3750,7 +3889,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             }
             sp->radius = re.eval(0.0);
             if (!(sp->radius > 0)) { lastError = "半径必须为正数"; made = nullptr; return true; }
-            sp->inputs = { center };
+            if (c0.ref) sp->inputs.push_back(c0.ref);
         }
         sp->cmdName = "Sphere";
         sp->cmdArgs = { a[0], a[1] };
@@ -3758,18 +3897,37 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         return true;
     }
     // 1.0.8.1 Cylinder 两种形式：Cylinder(M, r, h) 底心 M + 半径 r + 沿 z 高
-    // h；Cylinder(A, B, r) 轴线 A→B 半径 r（一般方向轴，圆面⊥轴）
+    // h；Cylinder(A, B, r) 轴线 A→B 半径 r（一般方向轴，圆面⊥轴）。
+    // 1.0.8.6 底心/顶心收字面量元组（image 缓存，inputs 只挂标签端）
     if (cmdLower == "cylinder" && (a.size() == 3)) {
-        GeoPoint *p0 = lookupPoint(a[0]);
-        if (!p0) { lastError = "未找到点 " + a[0]; made = nullptr; return true; }
+        CmdPt b0;
+        if (!cmdPointArg(a[0], b0)) {
+            lastError = "未找到点 " + a[0];
+            made = nullptr;
+            return true;
+        }
         auto cy = std::make_unique<GeoCylinder>();
-        cy->base = p0;
-        if (GeoPoint *p1 = lookupPoint(a[1])) {
+        if (b0.lit) {
+            cy->bImage = true;
+            cy->ibx = b0.x;
+            cy->iby = b0.y;
+            cy->ibz = b0.z;
+        } else {
+            cy->base = b0.ref;
+        }
+        CmdPt t0;
+        if (cmdPointArg(a[1], t0) && (t0.ref || t0.lit)) {
             // 轴线形式 (A, B, r)
-            cy->topPt = p1;
+            if (t0.lit) {
+                cy->tImage = true;
+                cy->itx = t0.x;
+                cy->ity = t0.y;
+                cy->itz = t0.z;
+            } else {
+                cy->topPt = t0.ref;
+            }
             if (GeoNumeric *rn = dynamic_cast<GeoNumeric *>(lookup(a[2]))) {
                 cy->radiusNum = rn;
-                cy->inputs = { p0, p1, rn };
             } else {
                 Expr re;
                 std::string err;
@@ -3780,8 +3938,10 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                 }
                 cy->radius = re.eval(0.0);
                 if (!(cy->radius > 0)) { lastError = "半径必须为正数"; made = nullptr; return true; }
-                cy->inputs = { p0, p1 };
             }
+            if (b0.ref) cy->inputs.push_back(b0.ref);
+            if (t0.ref) cy->inputs.push_back(t0.ref);
+            if (cy->radiusNum) cy->inputs.push_back(cy->radiusNum);
         } else if (lookup(a[1]) != nullptr
                    && dynamic_cast<GeoNumeric *>(lookup(a[1])) == nullptr) {
             lastError = "Cylinder 需要（点, 数, 数）或（点, 点, 数）";
@@ -3813,7 +3973,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                 }
                 cy->height = re.eval(0.0);
             }
-            cy->inputs = { p0 };
+            if (b0.ref) cy->inputs.push_back(b0.ref);
             if (cy->radiusNum) cy->inputs.push_back(cy->radiusNum);
             if (cy->heightNum) cy->inputs.push_back(cy->heightNum);
         }
@@ -4653,27 +4813,28 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                                        + P2->c * P2->c);
                 double R = S2->radius;
                 if (S2->radiusNum) R = S2->radiusNum->value;
-                else if (S2->through && S2->center) {
-                    R = sqrt(pow(S2->through->x - S2->center->x, 2)
-                             + pow(S2->through->y - S2->center->y, 2)
-                             + pow(S2->through->z - S2->center->z, 2));
+                else if (S2->through) {
+                    R = sqrt(pow(S2->through->x - S2->ccx(), 2)
+                             + pow(S2->through->y - S2->ccy(), 2)
+                             + pow(S2->through->z - S2->ccz(), 2));
                 }
-                if (!(nl > 1e-12) || !S2->center || !std::isfinite(R) || R < 0) {
+                if (!(nl > 1e-12) || (S2->center == nullptr && !S2->cImage)
+                    || !std::isfinite(R) || R < 0) {
                     C->cx = C->cy = C->cz = C->r = NAN;
                     return;
                 }
                 const double nx2 = P2->a / nl, ny2 = P2->b / nl, nz2 = P2->c / nl;
                 const double dd = P2->d / nl;
-                const double dist = nx2 * S2->center->x + ny2 * S2->center->y
-                                  + nz2 * S2->center->z - dd;
+                const double dist = nx2 * S2->ccx() + ny2 * S2->ccy()
+                                  + nz2 * S2->ccz() - dd;
                 const double h2 = R * R - dist * dist;
                 if (!(h2 > 0.0)) {
                     C->cx = C->cy = C->cz = C->r = NAN;
                     return;
                 }
-                C->cx = S2->center->x - dist * nx2;
-                C->cy = S2->center->y - dist * ny2;
-                C->cz = S2->center->z - dist * nz2;
+                C->cx = S2->ccx() - dist * nx2;
+                C->cy = S2->ccy() - dist * ny2;
+                C->cz = S2->ccz() - dist * nz2;
                 C->r = sqrt(h2);
                 C->nx = nx2;
                 C->ny = ny2;
@@ -4693,21 +4854,22 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             c3->calc = [S1, S2](GeoCircle3 *C) {
                 auto radOf = [](GeoSphere *S) -> double {
                     if (S->radiusNum) return S->radiusNum->value;
-                    if (S->through && S->center) {
-                        return sqrt(pow(S->through->x - S->center->x, 2)
-                                    + pow(S->through->y - S->center->y, 2)
-                                    + pow(S->through->z - S->center->z, 2));
+                    if (S->through) {
+                        return sqrt(pow(S->through->x - S->ccx(), 2)
+                                    + pow(S->through->y - S->ccy(), 2)
+                                    + pow(S->through->z - S->ccz(), 2));
                     }
                     return S->radius;
                 };
-                if (!S1->center || !S2->center) {
+                if ((S1->center == nullptr && !S1->cImage)
+                    || (S2->center == nullptr && !S2->cImage)) {
                     C->cx = C->cy = C->cz = C->r = NAN;
                     return;
                 }
                 const double R1 = radOf(S1), R2 = radOf(S2);
-                const double dx = S2->center->x - S1->center->x;
-                const double dy = S2->center->y - S1->center->y;
-                const double dz = S2->center->z - S1->center->z;
+                const double dx = S2->ccx() - S1->ccx();
+                const double dy = S2->ccy() - S1->ccy();
+                const double dz = S2->ccz() - S1->ccz();
                 const double d = sqrt(dx * dx + dy * dy + dz * dz);
                 // 相离/内含/同心 → 无实交
                 if (!std::isfinite(R1) || !std::isfinite(R2) || d < 1e-12
@@ -4721,9 +4883,9 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                     C->cx = C->cy = C->cz = C->r = NAN;
                     return;
                 }
-                C->cx = S1->center->x + dx / d * ax;
-                C->cy = S1->center->y + dy / d * ax;
-                C->cz = S1->center->z + dz / d * ax;
+                C->cx = S1->ccx() + dx / d * ax;
+                C->cy = S1->ccy() + dy / d * ax;
+                C->cz = S1->ccz() + dz / d * ax;
                 C->r = sqrt(h2);
                 C->nx = dx / d;
                 C->ny = dy / d;
@@ -10439,6 +10601,10 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             GeoSphere *d = static_cast<GeoSphere *>(dst);
             GeoSphere *s = static_cast<GeoSphere *>(src);
             d->center = s->center;
+            d->cImage = s->cImage;
+            d->icx = s->icx;
+            d->icy = s->icy;
+            d->icz = s->icz;
             d->through = s->through;
             d->radiusNum = s->radiusNum;
             d->radius = s->radius;
@@ -10449,6 +10615,14 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             GeoCylinder *d = static_cast<GeoCylinder *>(dst);
             GeoCylinder *s = static_cast<GeoCylinder *>(src);
             d->base = s->base;
+            d->bImage = s->bImage;
+            d->ibx = s->ibx;
+            d->iby = s->iby;
+            d->ibz = s->ibz;
+            d->tImage = s->tImage;
+            d->itx = s->itx;
+            d->ity = s->ity;
+            d->itz = s->itz;
             d->topPt = s->topPt;
             d->radiusNum = s->radiusNum;
             d->heightNum = s->heightNum;
@@ -13635,17 +13809,17 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         }
         case GeoType::Sphere: {
             GeoSphere *sp = static_cast<GeoSphere *>(g.get());
-            if (!sp->center) break;
+            if (!sp->center && !sp->cImage) break;
             double r = sp->radius;
             if (sp->radiusNum) r = sp->radiusNum->value;
             else if (sp->through) {
-                const double dx = sp->through->x - sp->center->x;
-                const double dy = sp->through->y - sp->center->y;
-                const double dz = sp->through->z - sp->center->z;
+                const double dx = sp->through->x - sp->ccx();
+                const double dy = sp->through->y - sp->ccy();
+                const double dz = sp->through->z - sp->ccz();
                 r = sqrt(dx * dx + dy * dy + dz * dz);
             }
             if (!(r > 0) || !std::isfinite(r)) break;
-            const double cx = sp->center->x, cy = sp->center->y, cz = sp->center->z;
+            const double cx = sp->ccx(), cy = sp->ccy(), cz = sp->ccz();
             const std::string col = ObjectColor(sp->color, darkTheme);
             // 经线 6 条（每 30°，含极点大圆）+ 纬线 5 条（-60..60 每 30°）
             const int SEG = 36;
@@ -13698,17 +13872,11 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         }
         case GeoType::Cylinder: {
             GeoCylinder *cy = static_cast<GeoCylinder *>(g.get());
-            if (!cy->base) break;
+            if (!cy->base && !cy->bImage) break;
             double r = cy->radiusNum ? cy->radiusNum->value : cy->radius;
             if (!(r > 0) || !std::isfinite(r)) break;
-            double ax = cy->base->x, ay = cy->base->y, az = cy->base->z;
-            double bx, by, bz;
-            if (cy->topPt) {
-                bx = cy->topPt->x; by = cy->topPt->y; bz = cy->topPt->z;
-            } else {
-                bx = ax; by = ay;
-                bz = az + (cy->heightNum ? cy->heightNum->value : cy->height);
-            }
+            const double ax = cy->bcx(), ay = cy->bcy(), az = cy->bcz();
+            const double bx = cy->tcx(), by = cy->tcy(), bz = cy->tcz();
             double ux = bx - ax, uy = by - ay, uz = bz - az;
             const double L = sqrt(ux * ux + uy * uy + uz * uz);
             if (!(L > 1e-12)) break;
@@ -13776,6 +13944,44 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
     for (auto &g : geos_) {
         if (!g->visible) continue;
         switch (g->type()) {
+        case GeoType::Ray: {
+            // 1.0.8.6 空间射线渲染（一期缺口补齐）：起点沿方向 t≥0 半线，
+            // 遮挡拆段与 Line3 同口径；2D 射线不进 3D
+            GeoRay *ry = static_cast<GeoRay *>(g.get());
+            const bool ray3D = ry->image
+                ? ((ry->p1 && ry->p1->is3D) || (ry->p2 && ry->p2->is3D)
+                   || ry->ez1() != 0.0 || ry->ez2() != 0.0)
+                : (ry->p1 && ry->p2 && (ry->p1->is3D || ry->p2->is3D));
+            if (!ray3D) break;
+            if (ry->image && !(std::isfinite(ry->ix1) && std::isfinite(ry->ix2))) {
+                break;
+            }
+            const double wx1 = ry->ex1(), wy1 = ry->ey1(), wz1 = ry->ez1();
+            double dwx = ry->ex2() - wx1, dwy = ry->ey2() - wy1,
+                   dwz = ry->ez2() - wz1;
+            const double wlen = sqrt(dwx * dwx + dwy * dwy + dwz * dwz);
+            if (!(wlen > 1e-12)) break;
+            dwx /= wlen; dwy /= wlen; dwz /= wlen;
+            double x1, y1, x2, y2;
+            proj(wx1, wy1, wz1, x1, y1);
+            proj(wx1 + dwx, wy1 + dwy, wz1 + dwz, x2, y2);
+            if (sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)) < 1e-9) break;
+            double diag =
+                sqrt((double)V.width * V.width + (double)V.height * V.height);
+            double Lx = sqrt(x1 * x1 + y1 * y1) + 2 * diag + 20;
+            const double tExt = Lx / V.scale + 1.0;
+            drawSplitSeg(wx1, wy1, wz1,
+                         wx1 + tExt * dwx, wy1 + tExt * dwy, wz1 + tExt * dwz,
+                         ObjectColor(ry->color, darkTheme),
+                         ry->lineThickness / 3.0f);
+            DrawCmd lb;
+            lb.op = DrawOp::Text;
+            lb.color = ObjectColor(ry->color, darkTheme);
+            lb.pts = { (float)(x1 + 6 * us), (float)(y1 - 6 * us) };
+            lb.text = ry->label;
+            out.push_back(lb);
+            break;
+        }
         case GeoType::Line3: {
             GeoLine3 *l3 = static_cast<GeoLine3 *>(g.get());
             // 1.0.8.3 image 缓存感知（交线/字面量端点直线）；未定义跳绘。

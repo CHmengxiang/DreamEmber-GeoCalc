@@ -524,9 +524,9 @@ std::string GeoSphere::valueText() const
     double r = radius;
     if (radiusNum) r = radiusNum->value;
     else if (through) {
-        const double dx = through->x - (center ? center->x : 0);
-        const double dy = through->y - (center ? center->y : 0);
-        const double dz = through->z - (center ? center->z : 0);
+        const double dx = through->x - ccx();
+        const double dy = through->y - ccy();
+        const double dz = through->z - ccz();
         r = sqrt(dx * dx + dy * dy + dz * dz);
     }
     return "x² + y² + z² = " + FormatNum(r * r)
