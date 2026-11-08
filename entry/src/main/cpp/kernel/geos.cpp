@@ -506,6 +506,19 @@ std::string GeoPlane::definitionText() const
     return src.empty() ? "Plane" : src;
 }
 
+std::string GeoCircle3::valueText() const
+{
+    if (!defined()) return "未定义";
+    return "圆心 (" + FormatNum(cx) + ", " + FormatNum(cy) + ", "
+         + FormatNum(cz) + ")，半径 " + FormatNum(r);
+}
+
+std::string GeoCircle3::definitionText() const
+{
+    std::string d = cmdDefText();
+    return d.empty() ? "Circle3" : d;
+}
+
 std::string GeoSphere::valueText() const
 {
     double r = radius;

@@ -4633,6 +4633,106 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             made = std::move(p);
             return true;
         }
+        // 1.0.8.5 交圆（GGB AlgoIntersectPlaneSphere / AlgoIntersectSphere2 同
+        // 口径）：Intersect(平面, 球)→圆（圆心=球心在平面投影，半径
+        // √(R²−dist²)，法向=平面法向）；Intersect(球, 球)→圆（根轴圆，圆心
+        // =C1+(C2−C1)·(R1²−R2²+d²)/(2d²)，法向=轴向）。无实交 → 未定义
+        GeoSphere *sp1 = dynamic_cast<GeoSphere *>(o1);
+        GeoSphere *sp2 = dynamic_cast<GeoSphere *>(o2);
+        if ((pa1 && sp2) || (sp1 && pa2)) {
+            GeoPlane *PP = pa1 ? pa1 : pa2;
+            GeoSphere *SP = sp1 ? sp1 : sp2;
+            auto c3 = std::make_unique<GeoCircle3>();
+            c3->inputs = { PP, SP };
+            c3->cmdName = "Intersect";
+            c3->cmdArgs = { a[0], a[1] };
+            GeoPlane *P2 = PP;
+            GeoSphere *S2 = SP;
+            c3->calc = [P2, S2](GeoCircle3 *C) {
+                const double nl = sqrt(P2->a * P2->a + P2->b * P2->b
+                                       + P2->c * P2->c);
+                double R = S2->radius;
+                if (S2->radiusNum) R = S2->radiusNum->value;
+                else if (S2->through && S2->center) {
+                    R = sqrt(pow(S2->through->x - S2->center->x, 2)
+                             + pow(S2->through->y - S2->center->y, 2)
+                             + pow(S2->through->z - S2->center->z, 2));
+                }
+                if (!(nl > 1e-12) || !S2->center || !std::isfinite(R) || R < 0) {
+                    C->cx = C->cy = C->cz = C->r = NAN;
+                    return;
+                }
+                const double nx2 = P2->a / nl, ny2 = P2->b / nl, nz2 = P2->c / nl;
+                const double dd = P2->d / nl;
+                const double dist = nx2 * S2->center->x + ny2 * S2->center->y
+                                  + nz2 * S2->center->z - dd;
+                const double h2 = R * R - dist * dist;
+                if (!(h2 > 0.0)) {
+                    C->cx = C->cy = C->cz = C->r = NAN;
+                    return;
+                }
+                C->cx = S2->center->x - dist * nx2;
+                C->cy = S2->center->y - dist * ny2;
+                C->cz = S2->center->z - dist * nz2;
+                C->r = sqrt(h2);
+                C->nx = nx2;
+                C->ny = ny2;
+                C->nz = nz2;
+            };
+            c3->update();
+            made = std::move(c3);
+            return true;
+        }
+        if (sp1 && sp2) {
+            GeoSphere *S1 = sp1;
+            GeoSphere *S2 = sp2;
+            auto c3 = std::make_unique<GeoCircle3>();
+            c3->inputs = { S1, S2 };
+            c3->cmdName = "Intersect";
+            c3->cmdArgs = { a[0], a[1] };
+            c3->calc = [S1, S2](GeoCircle3 *C) {
+                auto radOf = [](GeoSphere *S) -> double {
+                    if (S->radiusNum) return S->radiusNum->value;
+                    if (S->through && S->center) {
+                        return sqrt(pow(S->through->x - S->center->x, 2)
+                                    + pow(S->through->y - S->center->y, 2)
+                                    + pow(S->through->z - S->center->z, 2));
+                    }
+                    return S->radius;
+                };
+                if (!S1->center || !S2->center) {
+                    C->cx = C->cy = C->cz = C->r = NAN;
+                    return;
+                }
+                const double R1 = radOf(S1), R2 = radOf(S2);
+                const double dx = S2->center->x - S1->center->x;
+                const double dy = S2->center->y - S1->center->y;
+                const double dz = S2->center->z - S1->center->z;
+                const double d = sqrt(dx * dx + dy * dy + dz * dz);
+                // 相离/内含/同心 → 无实交
+                if (!std::isfinite(R1) || !std::isfinite(R2) || d < 1e-12
+                    || d > R1 + R2 || d < fabs(R1 - R2)) {
+                    C->cx = C->cy = C->cz = C->r = NAN;
+                    return;
+                }
+                const double ax = (R1 * R1 - R2 * R2 + d * d) / (2.0 * d);
+                const double h2 = R1 * R1 - ax * ax;
+                if (!(h2 > 0.0)) {
+                    C->cx = C->cy = C->cz = C->r = NAN;
+                    return;
+                }
+                C->cx = S1->center->x + dx / d * ax;
+                C->cy = S1->center->y + dy / d * ax;
+                C->cz = S1->center->z + dz / d * ax;
+                C->r = sqrt(h2);
+                C->nx = dx / d;
+                C->ny = dy / d;
+                C->nz = dz / d;
+            };
+            c3->update();
+            made = std::move(c3);
+            return true;
+        }
         auto mkPt = [&](int idx) -> std::unique_ptr<GeoPoint> {
             auto p = std::make_unique<GeoPoint>();
             p->isFree = false;
@@ -9209,6 +9309,8 @@ void Kernel::algebraRows(std::vector<AlgebraRow> &out) const
         case GeoType::Cylinder: r.type = "cylinder"; break;
         case GeoType::Line3: r.type = "line"; break;
         case GeoType::Plane: r.type = "plane"; break;
+        // 1.0.8.5 交圆复用 "circle" 行类型（入「圆」分组，Line3 同款口径）
+        case GeoType::Circle3: r.type = "circle"; break;
         case GeoType::Numeric: {
             GeoNumeric *n = static_cast<GeoNumeric *>(g.get());
             r.type = n->isSlider ? "slider" : "numeric";
@@ -9825,6 +9927,7 @@ std::string Kernel::propsOf(const std::string &label) const
     case GeoType::Cylinder: ty = "cylinder"; break;
     case GeoType::Line3: ty = "line"; break;
     case GeoType::Plane: ty = "plane"; break;
+    case GeoType::Circle3: ty = "circle"; break;
     }
     add("type", ty);
     add("vis", g->visible ? "1" : "0");
@@ -10351,6 +10454,20 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->heightNum = s->heightNum;
             d->radius = s->radius;
             d->height = s->height;
+            d->calc = s->calc;
+            break;
+        }
+        case GeoType::Circle3: {
+            // 1.0.8.5 交圆重定义搬运（纯值缓存 + 闭包，无对象指针）
+            GeoCircle3 *d = static_cast<GeoCircle3 *>(dst);
+            GeoCircle3 *s = static_cast<GeoCircle3 *>(src);
+            d->cx = s->cx;
+            d->cy = s->cy;
+            d->cz = s->cz;
+            d->r = s->r;
+            d->nx = s->nx;
+            d->ny = s->ny;
+            d->nz = s->nz;
             d->calc = s->calc;
             break;
         }
@@ -12837,6 +12954,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
         case GeoType::Cylinder:
         case GeoType::Line3:
         case GeoType::Plane:
+        case GeoType::Circle3:
             break;
         }
     }
@@ -13402,6 +13520,59 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             proj(cx2 / npts, cy2 / npts, cz2 / npts, lpx2, lpy2);
             lb.pts = { (float)(lpx2 + 6 * us), (float)lpy2 };
             lb.text = pl->label;
+            out.push_back(lb);
+            break;
+        }
+        case GeoType::Circle3: {
+            // 1.0.8.5 交圆：64 段参数采样闭合折线，逐段走 A4 遮挡拆段
+            //（与线同口径）；标签锚在圆周 +r·e1 投影处
+            GeoCircle3 *c3 = static_cast<GeoCircle3 *>(g.get());
+            if (!c3->defined()) break;
+            const double anl = sqrt(c3->nx * c3->nx + c3->ny * c3->ny
+                                    + c3->nz * c3->nz);
+            if (!(anl > 1e-12)) break;
+            const double axn = c3->nx / anl, ayn = c3->ny / anl,
+                         azn = c3->nz / anl;
+            double e1x, e1y, e1z;
+            if (fabs(axn) <= fabs(ayn) && fabs(axn) <= fabs(azn)) {
+                e1x = 0; e1y = azn; e1z = -ayn;          // n × x̂
+            } else if (fabs(ayn) <= fabs(azn)) {
+                e1x = -azn; e1y = 0; e1z = axn;          // n × ŷ
+            } else {
+                e1x = ayn; e1y = -axn; e1z = 0;          // n × ẑ
+            }
+            const double el = sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+            e1x /= el; e1y /= el; e1z /= el;
+            const double e2x = ayn * e1z - azn * e1y;
+            const double e2y = azn * e1x - axn * e1z;
+            const double e2z = axn * e1y - ayn * e1x;
+            const int NC = 64;
+            const std::string cCol = ObjectColor(c3->color, darkTheme);
+            double labX = 0, labY = 0;
+            {
+                double ppx, ppy;
+                proj(c3->cx + c3->r * e1x, c3->cy + c3->r * e1y,
+                     c3->cz + c3->r * e1z, ppx, ppy);
+                labX = ppx;
+                labY = ppy;
+            }
+            for (int i = 0; i < NC; ++i) {
+                const double t0 = 2.0 * M_PI * i / NC;
+                const double t1 = 2.0 * M_PI * (i + 1) / NC;
+                drawSplitSeg(
+                    c3->cx + c3->r * (std::cos(t0) * e1x + std::sin(t0) * e2x),
+                    c3->cy + c3->r * (std::cos(t0) * e1y + std::sin(t0) * e2y),
+                    c3->cz + c3->r * (std::cos(t0) * e1z + std::sin(t0) * e2z),
+                    c3->cx + c3->r * (std::cos(t1) * e1x + std::sin(t1) * e2x),
+                    c3->cy + c3->r * (std::cos(t1) * e1y + std::sin(t1) * e2y),
+                    c3->cz + c3->r * (std::cos(t1) * e1z + std::sin(t1) * e2z),
+                    cCol, c3->lineThickness / 3.0f);
+            }
+            DrawCmd lb;
+            lb.op = DrawOp::Text;
+            lb.color = cCol;
+            lb.pts = { (float)(labX + 6 * us), (float)(labY - 6 * us) };
+            lb.text = c3->label;
             out.push_back(lb);
             break;
         }
@@ -14027,6 +14198,14 @@ std::string Kernel::getXml() const
             AppendLineStyle(o, pl->lineThickness);
             break;
         }
+        case GeoType::Circle3: {
+            // 1.0.8.5 交圆：命令产物走通用重放
+            GeoCircle3 *c3 = static_cast<GeoCircle3 *>(g);
+            AppendCommandXml(o, *c3);
+            AppendElementHead(o, *c3, "circle3");
+            AppendLineStyle(o, c3->lineThickness);
+            break;
+        }
         }
     }
     o += "</construction>\n</geogebra>\n";
@@ -14396,7 +14575,64 @@ bool Kernel::setXml(const std::string &xml, int *skippedOut)
     size_t cEnd = xml.find("</construction>");
     if (cEnd == std::string::npos) cEnd = xml.size();
 
-    // 顺序扫描：command / expression / element 三类节点，其余跳过
+    // 顺序扫描：command / expression / element 三类节点，其余跳过。
+    // 1.0.8.5 重试队列：redefine 就地保位后其定义可引用构造序靠后的对象，
+    // XML 按序重放出现前向引用（§47 候选⑤）——首轮失败不计数进重试队列，
+    // 全部节点扫完后重试一轮；element（样式 + 自由对象创建）统一在所有
+    // command/expression 落位后应用
+    std::vector<std::pair<std::string, std::string>> deferredCmds;
+    std::vector<std::string> deferredExprs;
+    std::vector<std::pair<std::string, std::string>> elementNodes;
+    // 预扫描：全部 command 输出标签——这些 element 仅样式（延后应用）；
+    // 其余 element 是自由对象（无引用依赖），先行创建供 command 引用
+    std::vector<std::string> cmdOuts;
+    {
+        size_t scan = cStart;
+        while (scan < cEnd) {
+            const size_t a = xml.find("<command", scan);
+            if (a == std::string::npos || a >= cEnd) break;
+            const size_t o = xml.find("<output", a);
+            const size_t next = xml.find("<command", a + 8);
+            if (o != std::string::npos && (next == std::string::npos || o < next)) {
+                const size_t oe = xml.find('>', o);
+                const size_t eEnd = xml.find("</command>", a);
+                if (oe != std::string::npos
+                    && (eEnd == std::string::npos || o < eEnd)) {
+                    cmdOuts.push_back(AttrVal(xml.substr(o, oe - o), "a0"));
+                }
+            }
+            if (next == std::string::npos) break;
+            scan = next;
+        }
+    }
+    auto replayExpression = [&](const std::string &tagText) -> bool {
+        const std::string exp = AttrVal(tagText, "exp");
+        const std::string label = AttrVal(tagText, "label");
+        if (exp.empty()) return true;
+        // 1.0.6.5：无 '=' 的自由对象（官方自由列表/文本串）优先带
+        // label 落名——裸 input 会落成匿名对象，后续 <element> 对不上号
+        const bool textLit = exp.size() >= 2
+            && exp.front() == '"' && exp.back() == '"';
+        std::string src = exp;
+        if (!label.empty() && exp.find('=') == std::string::npos) {
+            if (textLit) {
+                // 字符串字面量：表达式层无字符串，经 Text() 命令重建
+                std::string lit;
+                for (char ch : exp.substr(1, exp.size() - 2)) {
+                    lit += ch == '"' ? '\'' : ch;
+                }
+                src = label + "=Text(\"" + lit + "\")";
+            } else {
+                src = label + "=" + exp;
+            }
+        }
+        const bool ok = input(src);
+        if (!ok && !label.empty() && exp.find('=') == std::string::npos
+            && !textLit) {
+            input(exp);   // 带 label 仍失败才退回匿名
+        }
+        return !label.empty() ? lookup(label) != nullptr : ok;
+    };
     size_t pos = cStart;
     while (pos < cEnd) {
         const size_t lt = xml.find('<', pos);
@@ -14430,33 +14666,32 @@ bool Kernel::setXml(const std::string &xml, int *skippedOut)
         if (tag == "command" && !selfClose) {
             size_t endC = xml.find("</command>", pos);
             if (endC == std::string::npos || endC > cEnd) endC = cEnd;
-            xmlCommand(tagText, xml.substr(pos, endC - pos), &skipped);
+            const std::string body = xml.substr(pos, endC - pos);
             pos = endC + 10;
+            // 输出标签：<output ... a0=".."
+            std::string outLabel;
+            {
+                const size_t o = body.find("<output");
+                if (o != std::string::npos) {
+                    const size_t oe = body.find('>', o);
+                    outLabel = AttrVal(body.substr(o, oe - o), "a0");
+                }
+            }
+            int cskip = 0;
+            xmlCommand(tagText, body, &cskip);
+            if (!outLabel.empty() && lookup(outLabel) == nullptr) {
+                deferredCmds.emplace_back(tagText, body);   // 前向引用：稍后重试
+            } else {
+                skipped += cskip;
+            }
         } else if (tag == "expression" && selfClose) {
-            const std::string exp = AttrVal(tagText, "exp");
             const std::string label = AttrVal(tagText, "label");
-            if (!exp.empty()) {
-                // 1.0.6.5：无 '=' 的自由对象（官方自由列表/文本串）优先带
-                // label 落名——裸 input 会落成匿名对象，后续 <element> 对不上号
-                const bool textLit = exp.size() >= 2
-                    && exp.front() == '"' && exp.back() == '"';
-                std::string src = exp;
-                if (!label.empty() && exp.find('=') == std::string::npos) {
-                    if (textLit) {
-                        // 字符串字面量：表达式层无字符串，经 Text() 命令重建
-                        std::string lit;
-                        for (char ch : exp.substr(1, exp.size() - 2)) {
-                            lit += ch == '"' ? '\'' : ch;
-                        }
-                        src = label + "=Text(\"" + lit + "\")";
-                    } else {
-                        src = label + "=" + exp;
-                    }
+            if (!label.empty()) {
+                if (!replayExpression(tagText)) {
+                    deferredExprs.push_back(tagText);
                 }
-                if (!input(src) && !label.empty() && exp.find('=') == std::string::npos
-                    && !textLit) {
-                    input(exp);   // 带 label 仍失败才退回匿名
-                }
+            } else {
+                replayExpression(tagText);
             }
         } else if (tag == "element") {
             size_t endE = xml.find("</element>", pos);
@@ -14468,9 +14703,34 @@ bool Kernel::setXml(const std::string &xml, int *skippedOut)
                 inner = xml.substr(pos, endE - pos);
                 pos = endE + 10;
             }
-            xmlElement(AttrVal(tagText, "type"), AttrVal(tagText, "label"), inner, &skipped);
+            const std::string elabel = AttrVal(tagText, "label");
+            bool isCmdProduct = false;
+            for (const std::string &ol : cmdOuts) {
+                if (ol == elabel) { isCmdProduct = true; break; }
+            }
+            if (isCmdProduct) {
+                elementNodes.emplace_back(tagText, inner);   // 仅样式，延后
+            } else {
+                // 自由对象（点/数值/角/布尔/文本）：先行创建（command 可能
+                // 引用它们），样式随创建一并应用
+                xmlElement(AttrVal(tagText, "type"), elabel, inner, &skipped);
+            }
         }
         // 其它标签：pos 已推进过该标签
+    }
+
+    // 1.0.8.5 重试队列：前向引用的 command / expression 再来一轮（重定义
+    // 引用构造序靠后对象时首轮按序重放失败；一轮重试覆盖一层前向引用）
+    for (const auto &dc : deferredCmds) {
+        xmlCommand(dc.first, dc.second, &skipped);
+    }
+    for (const auto &de : deferredExprs) {
+        if (!replayExpression(de)) ++skipped;
+    }
+    // element：样式应用与自由对象创建，统一在全部创建完成后处理
+    for (const auto &en : elementNodes) {
+        xmlElement(AttrVal(en.first, "type"), AttrVal(en.first, "label"),
+                   en.second, &skipped);
     }
 
     // 1.0.6.6 滑条范围对象引用：构造重放完成后统一解析（引用对象可能定义

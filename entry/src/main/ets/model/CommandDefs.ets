@@ -142,7 +142,7 @@ export const COMMANDS: CommandMeta[] = [
     sig: 'Tangent( <点>, <圆|函数> )', desc: '过点作圆/函数的切线',
     keys: 'tangent 切线' },
   { name: 'Intersect', category: 'geometry', ins: 'Intersect(,)', back: 2,
-    sig: 'Intersect( <对象>, <对象> [, <序号>] )', desc: '两对象的交点',
+    sig: 'Intersect( <对象>, <对象> [, <序号>] )', desc: '两对象的交点（平面∩平面出交线、平面/球∩球出圆，3D 视图）',
     keys: 'intersect 交点 相交' },
   { name: 'Distance', category: 'geometry', ins: 'Distance(,)', back: 2,
     sig: 'Distance( <点|线|平面>, <点|线|平面> )', desc: '两点（或点线/点平面）间距离',

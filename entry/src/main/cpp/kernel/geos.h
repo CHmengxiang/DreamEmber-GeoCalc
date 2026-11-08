@@ -12,7 +12,7 @@
 namespace dreamember {
 
 enum class GeoType { Point, Segment, Line, Ray, Vector, Circle, Polygon, Function, Numeric, Angle, List, Text,
-                     Surface, Sphere, Cylinder, Line3, Plane };
+                     Surface, Sphere, Cylinder, Line3, Plane, Circle3 };
 
 struct GeoColor {
     int r = 0, g = 0, b = 0;
@@ -541,6 +541,27 @@ public:
     std::string src;                     // 隐式/常数式定义原文（定义列回填用）
     GeoPoint *pa = nullptr, *pb = nullptr, *pc = nullptr;   // 三点式
     std::function<void(GeoPlane *)> calc;  // 依随重算（点/向量/滑条变动）
+    void update() override { if (calc) calc(this); }
+    std::string valueText() const override;
+    std::string definitionText() const override;
+};
+
+// 3D 圆（1.0.8.5）：Intersect(平面, 球)→圆（圆心=球心在平面投影，半径
+// √(R²−dist²)）与 Intersect(球, 球)→圆（根轴圆）产物；calc 闭包依随球半径
+// 滑条/平面/球心重算。无实交（dist>R / 两球相离或内含）→ 各分量 NaN，值列
+// 「未定义」。渲染仅 3D（参数采样折线，遮挡拆段口径与线一致）。
+class GeoCircle3 : public GeoElement {
+public:
+    GeoCircle3() : GeoElement(GeoType::Circle3) { color = {0, 0, 0}; }
+    double cx = 0, cy = 0, cz = 0;   // 圆心
+    double r = 0;                    // 半径
+    double nx = 0, ny = 0, nz = 1;   // 单位法向（所在平面/根轴方向）
+    std::function<void(GeoCircle3 *)> calc;
+    bool defined() const
+    {
+        return std::isfinite(cx) && std::isfinite(cy) && std::isfinite(cz)
+            && std::isfinite(r) && r > 0.0;
+    }
     void update() override { if (calc) calc(this); }
     std::string valueText() const override;
     std::string definitionText() const override;
