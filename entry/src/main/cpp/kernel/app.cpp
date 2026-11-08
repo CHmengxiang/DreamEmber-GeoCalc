@@ -3837,12 +3837,40 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         GeoLine *baseLine = dynamic_cast<GeoLine *>(baseArg);
         GeoSegment *baseSeg = dynamic_cast<GeoSegment *>(baseArg);
         GeoFunction *baseFn = dynamic_cast<GeoFunction *>(baseArg);
+        GeoPlane *basePl = dynamic_cast<GeoPlane *>(baseArg);
         bool fnLinear = baseFn && baseFn->body.linearCoef();
+        // 1.0.8.4 平面基准（GGB PerpendicularLine(点, 平面) 同口径）：过点沿
+        // 平面法向的空间直线（GeoLine3 image 缓存，法向单位化，随平面重算）
+        if (pt && basePl) {
+            auto l3 = std::make_unique<GeoLine3>();
+            l3->image = true;
+            l3->inputs = { pt, basePl };
+            l3->cmdName = "PerpendicularLine";
+            l3->cmdArgs = { a[pi], a[bi] };
+            GeoPoint *P0 = pt;
+            GeoPlane *PL = basePl;
+            l3->calc = [P0, PL](GeoLine3 *L) {
+                const double nl = sqrt(PL->a * PL->a + PL->b * PL->b + PL->c * PL->c);
+                if (!(nl > 1e-12)) {
+                    L->ix1 = L->iy1 = L->iz1 = L->ix2 = L->iy2 = L->iz2 = NAN;
+                    return;
+                }
+                L->ix1 = P0->x;
+                L->iy1 = P0->y;
+                L->iz1 = P0->z;
+                L->ix2 = P0->x + PL->a / nl;
+                L->iy2 = P0->y + PL->b / nl;
+                L->iz2 = P0->z + PL->c / nl;
+            };
+            l3->update();
+            made = std::move(l3);
+            return true;
+        }
         if (!pt || (!baseLine && !baseSeg && !fnLinear)) {
             if (baseFn && !fnLinear) {
                 lastError = "PerpendicularLine 的函数基准须为一次式（如 f(x)=2x+1）";
             } else {
-                lastError = "PerpendicularLine 需要（点, 直线/线段/一次函数）且对象须已存在";
+                lastError = "PerpendicularLine 需要（点, 直线/线段/一次函数/平面）且对象须已存在";
             }
             made = nullptr;
             return true;
@@ -3896,6 +3924,36 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                     dp = dp2;
                     dl = dl2;
                     dlOk = true;
+                }
+            }
+            // 1.0.8.4 Distance(点, 平面) = 点到平面距离（法向单位化投影；
+            // GGB Distance 点+面同口径，两参序容错）
+            if (!dlOk) {
+                GeoPoint *dp3 = lookupPoint(a[0]);
+                GeoPlane *dpl3 = dp3 ? dynamic_cast<GeoPlane *>(lookup(a[1])) : nullptr;
+                if (!dp3 || !dpl3) {
+                    dp3 = lookupPoint(a[1]);
+                    dpl3 = dp3 ? dynamic_cast<GeoPlane *>(lookup(a[0])) : nullptr;
+                }
+                if (dp3 && dpl3) {
+                    lastError.clear();
+                    GeoPoint *P = dp3;
+                    GeoPlane *PL = dpl3;
+                    auto n = std::make_unique<GeoNumeric>();
+                    n->calc = [P, PL]() {
+                        const double h = sqrt(PL->a * PL->a + PL->b * PL->b
+                                              + PL->c * PL->c);
+                        if (!(h > 1e-15)) return 0.0;
+                        return fabs(PL->a * P->x + PL->b * P->y + PL->c * P->z
+                                    - PL->d) / h;
+                    };
+                    n->cmd = "Distance(" + dp3->label + ", " + dpl3->label + ")";
+                    n->cmdName = "Distance";
+                    n->cmdArgs = { dp3->label, dpl3->label };
+                    n->inputs = { dp3, dpl3 };
+                    n->update();
+                    made = std::move(n);
+                    return true;
                 }
             }
             if (dlOk) {
@@ -4169,6 +4227,97 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         GeoPlane *plm = static_cast<GeoPlane *>(made.get());
         plm->cmdName = "Plane";
         plm->cmdArgs = a;
+        return true;
+    }
+    // 1.0.8.4 平面族一：PerpendicularPlane(点, 直线) 过点作直线垂直平面
+    //（法向=直线方向；GGB AlgoPerpendicularPlane 点+线同口径）。方向源：
+    // 2D 直线（(b,−a,0)）、线段/射线（端点差，image 感知）、空间直线；两参
+    // 序容错（点在后亦可）。法向零向量 → 报基准无法确定方向
+    if (cmdLower == "perpendicularplane" && a.size() == 2) {
+        size_t pi2 = 0, li2 = 1;
+        GeoPoint *pp = lookupPoint(a[0]);
+        GeoElement *ln = lookup(a[1]);
+        if (!pp) {
+            pp = lookupPoint(a[1]);
+            ln = lookup(a[0]);
+            pi2 = 1;
+            li2 = 0;
+        }
+        if (!pp || !ln) {
+            lastError = "PerpendicularPlane 需要（点, 直线/线段/射线/空间直线）且对象须已存在";
+            made = nullptr;
+            return true;
+        }
+        auto pl = std::make_unique<GeoPlane>();
+        pl->inputs = { pp, ln };
+        pl->cmdName = "PerpendicularPlane";
+        pl->cmdArgs = { a[pi2], a[li2] };
+        GeoPoint *P0 = pp;
+        GeoElement *LN = ln;
+        pl->calc = [P0, LN](GeoPlane *P) {
+            double nx = 0, ny = 0, nz = 0;
+            if (GeoLine *l = dynamic_cast<GeoLine *>(LN)) {
+                nx = l->b;
+                ny = -l->a;
+            } else if (GeoSegment *s = dynamic_cast<GeoSegment *>(LN)) {
+                nx = s->ex2() - s->ex1();
+                ny = s->ey2() - s->ey1();
+                nz = s->ez2() - s->ez1();
+            } else if (GeoRay *r = dynamic_cast<GeoRay *>(LN)) {
+                nx = r->ex2() - r->ex1();
+                ny = r->ey2() - r->ey1();
+                nz = r->ez2() - r->ez1();
+            } else if (GeoLine3 *l3 = dynamic_cast<GeoLine3 *>(LN)) {
+                nx = l3->ex2() - l3->ex1();
+                ny = l3->ey2() - l3->ey1();
+                nz = l3->ez2() - l3->ez1();
+            }
+            P->a = nx;
+            P->b = ny;
+            P->c = nz;
+            P->d = nx * P0->x + ny * P0->y + nz * P0->z;
+        };
+        pl->update();
+        if (fabs(pl->a) < 1e-15 && fabs(pl->b) < 1e-15 && fabs(pl->c) < 1e-15) {
+            lastError = "基准对象无法确定方向";
+            made = nullptr;
+            return true;
+        }
+        made = std::move(pl);
+        return true;
+    }
+    // 1.0.8.4 平面族二：ParallelPlane(平面, 点) 过点作平行平面（系数照抄、
+    // d 随点重算，GGB AlgoParallelPlane 同口径；两参序容错）
+    if (cmdLower == "parallelplane" && a.size() == 2) {
+        GeoPlane *bp = dynamic_cast<GeoPlane *>(lookup(a[0]));
+        GeoPoint *pp = lookupPoint(a[1]);
+        if (!bp || !pp) {
+            GeoPlane *bp2 = dynamic_cast<GeoPlane *>(lookup(a[1]));
+            GeoPoint *pp2 = lookupPoint(a[0]);
+            if (bp2 && pp2) {
+                bp = bp2;
+                pp = pp2;
+            }
+        }
+        if (!bp || !pp) {
+            lastError = "ParallelPlane 需要（平面, 点）且对象须已存在";
+            made = nullptr;
+            return true;
+        }
+        auto pl = std::make_unique<GeoPlane>();
+        pl->inputs = { bp, pp };
+        pl->cmdName = "ParallelPlane";
+        pl->cmdArgs = a;
+        GeoPlane *BP = bp;
+        GeoPoint *P0 = pp;
+        pl->calc = [BP, P0](GeoPlane *P) {
+            P->a = BP->a;
+            P->b = BP->b;
+            P->c = BP->c;
+            P->d = BP->a * P0->x + BP->b * P0->y + BP->c * P0->z;
+        };
+        pl->update();
+        made = std::move(pl);
         return true;
     }
     // 1.0.8.2 Surface(X,Y,Z,u,u1,u2,v,v1,v2) 参数曲面：分量 refs 模式解析
@@ -12849,6 +12998,214 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
 
     // 曲面（画家算法逐对象内排序）→ 线框体 → 线/线段/向量 → 点。
     // 对象间不做全局深度排序（一期取舍：对象交互少，视觉可接受）
+    // 1.0.8.4 A4 半空间遮挡：可见平面（fillAlpha≥0.02 且非侧棱目视）先裁剪
+    // 到视图立方体作为遮挡体；其后线/线段/向量/点按平面穿越拆段，被遮挡段
+    //（平面远侧 + 投影落填充多边形内）以剩余可见率 Π(1−fillAlpha) 透视绘制，
+    // 与曲面四边形远→近深度口径一致（相机位于 −f 侧）
+    auto cubeClipPlane = [](double nx, double ny, double nz, double dd,
+                            std::vector<double> &vx, std::vector<double> &vy,
+                            std::vector<double> &vz) {
+        const double C = 5.0;
+        const double corners[8][3] = {
+            { -C, -C, -C }, { C, -C, -C }, { C, C, -C }, { -C, C, -C },
+            { -C, -C, C }, { C, -C, C }, { C, C, C }, { -C, C, C },
+        };
+        const int edges[12][2] = {
+            { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 },
+            { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 },
+            { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 },
+        };
+        std::vector<double> ix, iy, iz;
+        for (const auto &ed : edges) {
+            const double *P = corners[ed[0]];
+            const double *Q = corners[ed[1]];
+            const double s1 = nx * P[0] + ny * P[1] + nz * P[2] - dd;
+            const double s2 = nx * Q[0] + ny * Q[1] + nz * Q[2] - dd;
+            if ((s1 > 1e-12) == (s2 > 1e-12)) continue;
+            const double t = s1 / (s1 - s2);
+            const double px2 = P[0] + t * (Q[0] - P[0]);
+            const double py2 = P[1] + t * (Q[1] - P[1]);
+            const double pz2 = P[2] + t * (Q[2] - P[2]);
+            bool dup = false;
+            for (size_t q = 0; q < ix.size(); ++q) {
+                if (fabs(ix[q] - px2) < 1e-9 && fabs(iy[q] - py2) < 1e-9
+                    && fabs(iz[q] - pz2) < 1e-9) { dup = true; break; }
+            }
+            if (!dup) {
+                ix.push_back(px2);
+                iy.push_back(py2);
+                iz.push_back(pz2);
+            }
+        }
+        if (ix.size() < 3) return;
+        // 平面内正交基（n 最小分量轴的叉积）→ 质心角向排序
+        double e1x, e1y, e1z;
+        if (fabs(nx) <= fabs(ny) && fabs(nx) <= fabs(nz)) {
+            e1x = 0; e1y = nz; e1z = -ny;          // n × x̂
+        } else if (fabs(ny) <= fabs(nz)) {
+            e1x = -nz; e1y = 0; e1z = nx;          // n × ŷ
+        } else {
+            e1x = ny; e1y = -nx; e1z = 0;          // n × ẑ
+        }
+        const double el = sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+        e1x /= el; e1y /= el; e1z /= el;
+        const double e2x = ny * e1z - nz * e1y;
+        const double e2y = nz * e1x - nx * e1z;
+        const double e2z = nx * e1y - ny * e1x;
+        double gx = 0, gy = 0, gz = 0;
+        for (size_t q = 0; q < ix.size(); ++q) {
+            gx += ix[q]; gy += iy[q]; gz += iz[q];
+        }
+        const double n3 = (double)ix.size();
+        gx /= n3; gy /= n3; gz /= n3;
+        std::vector<size_t> order(ix.size());
+        for (size_t q = 0; q < order.size(); ++q) order[q] = q;
+        std::sort(order.begin(), order.end(),
+                  [&](size_t a, size_t b) {
+                      const double rx = ix[a] - gx, ry = iy[a] - gy, rz = iz[a] - gz;
+                      const double sx2 = ix[b] - gx, sy2 = iy[b] - gy, sz2 = iz[b] - gz;
+                      return atan2(rx * e2x + ry * e2y + rz * e2z,
+                                   rx * e1x + ry * e1y + rz * e1z)
+                           < atan2(sx2 * e2x + sy2 * e2y + sz2 * e2z,
+                                   sx2 * e1x + sy2 * e1y + sz2 * e1z);
+                  });
+        for (size_t q : order) {
+            vx.push_back(ix[q]);
+            vy.push_back(iy[q]);
+            vz.push_back(iz[q]);
+        }
+    };
+    struct Occ3 {
+        double nx, ny, nz, dd, alpha;
+        std::vector<float> poly;   // 裁剪多边形投影像素（x,y 对）
+    };
+    std::vector<Occ3> occs;
+    for (auto &g : geos_) {
+        if (!g->visible || g->type() != GeoType::Plane) continue;
+        GeoPlane *pl = static_cast<GeoPlane *>(g.get());
+        const double nl = sqrt(pl->a * pl->a + pl->b * pl->b + pl->c * pl->c);
+        if (!(nl > 1e-12) || pl->fillAlpha < 0.02) continue;
+        Occ3 oc;
+        oc.nx = pl->a / nl;
+        oc.ny = pl->b / nl;
+        oc.nz = pl->c / nl;
+        oc.dd = pl->d / nl;
+        oc.alpha = pl->fillAlpha;
+        if (fabs(oc.nx * fx + oc.ny * fy + oc.nz * fz) < 1e-9) continue;
+        std::vector<double> cx3, cy3, cz3;
+        cubeClipPlane(oc.nx, oc.ny, oc.nz, oc.dd, cx3, cy3, cz3);
+        if (cx3.size() < 3) continue;
+        oc.poly.reserve(cx3.size() * 2);
+        for (size_t q = 0; q < cx3.size(); ++q) {
+            double ppx, ppy;
+            proj(cx3[q], cy3[q], cz3[q], ppx, ppy);
+            oc.poly.push_back((float)ppx);
+            oc.poly.push_back((float)ppy);
+        }
+        occs.push_back(std::move(oc));
+    }
+    // 投影像素点是否落在多边形内（射线交叉法）
+    auto polyHit = [](const std::vector<float> &poly, double px, double py) -> bool {
+        const size_t n = poly.size() / 2;
+        if (n < 3) return false;
+        bool inside = false;
+        for (size_t i = 0, j = n - 1; i < n; j = i++) {
+            const double xi = poly[2 * i], yi = poly[2 * i + 1];
+            const double xj = poly[2 * j], yj = poly[2 * j + 1];
+            if ((yi > py) != (yj > py)
+                && px < (xj - xi) * (py - yi) / (yj - yi) + xi) {
+                inside = !inside;
+            }
+        }
+        return inside;
+    };
+    // 点在世界 P 的剩余可见率：1=完全可见；<1 = 落在遮挡体远侧且投影入
+    // 填充多边形（值 = Π(1−fillAlpha)，半透明平面后透视变淡）
+    auto veilAt = [&](double wx2, double wy2, double wz2) -> double {
+        double vis = 1.0;
+        for (const Occ3 &oc : occs) {
+            const double s = oc.nx * wx2 + oc.ny * wy2 + oc.nz * wz2 - oc.dd;
+            if (s * (oc.nx * fx + oc.ny * fy + oc.nz * fz) <= 0) continue;
+            double px, py;
+            proj(wx2, wy2, wz2, px, py);
+            if (!polyHit(oc.poly, px, py)) continue;
+            vis *= 1.0 - oc.alpha;
+        }
+        return vis;
+    };
+    auto rgbaOfHex = [](const std::string &hex, double alpha) -> std::string {
+        if (hex.size() == 7 && hex[0] == '#') {
+            char buf[48];
+            snprintf(buf, sizeof(buf), "rgba(%d,%d,%d,%.3f)",
+                     (int)strtol(hex.substr(1, 2).c_str(), nullptr, 16),
+                     (int)strtol(hex.substr(3, 2).c_str(), nullptr, 16),
+                     (int)strtol(hex.substr(5, 2).c_str(), nullptr, 16), alpha);
+            return std::string(buf);
+        }
+        return hex;
+    };
+    // 世界段拆段绘制：按遮挡体平面穿越 + 填充多边形投影边界（2D 线段求交）
+    // 排序拆子段，逐子段按中点可见率出 Segment（可见率 1 用原色，否则 rgba
+    // 透视）。投影对世界参量线性（正交），拆全边界后中点判类精确。
+    // 返回是否出了内容
+    auto drawSplitSeg = [&](double wx1, double wy1, double wz1,
+                            double wx2, double wy2, double wz2,
+                            const std::string &col, float lw) -> bool {
+        const double dx3 = wx2 - wx1, dy3 = wy2 - wy1, dz3 = wz2 - wz1;
+        double ppx1, ppy1, ppx2, ppy2;
+        proj(wx1, wy1, wz1, ppx1, ppy1);
+        proj(wx2, wy2, wz2, ppx2, ppy2);
+        const double sdx = ppx2 - ppx1, sdy = ppy2 - ppy1;
+        std::vector<double> ts;
+        ts.reserve(occs.size() * 3 + 2);
+        ts.push_back(0.0);
+        ts.push_back(1.0);
+        for (const Occ3 &oc : occs) {
+            const double den = oc.nx * dx3 + oc.ny * dy3 + oc.nz * dz3;
+            if (fabs(den) > 1e-14) {
+                const double t = (oc.dd - (oc.nx * wx1 + oc.ny * wy1
+                                           + oc.nz * wz1)) / den;
+                if (t > 1e-9 && t < 1.0 - 1e-9) ts.push_back(t);
+            }
+            // 投影路径与填充多边形边界的 2D 交点（拆出带内/带外）
+            const size_t pn = oc.poly.size() / 2;
+            for (size_t e = 0; e < pn; ++e) {
+                const size_t e2 = (e + 1) % pn;
+                const double ex0 = oc.poly[2 * e], ey0 = oc.poly[2 * e + 1];
+                const double ex1 = oc.poly[2 * e2], ey1 = oc.poly[2 * e2 + 1];
+                const double eex = ex1 - ex0, eey = ey1 - ey0;
+                const double dcross = sdx * eey - sdy * eex;
+                if (fabs(dcross) < 1e-12) continue;
+                const double gx = ex0 - ppx1, gy = ey0 - ppy1;
+                const double t = (gx * eey - gy * eex) / dcross;
+                const double sg2 = (gx * sdy - gy * sdx) / dcross;
+                if (t > 1e-9 && t < 1.0 - 1e-9
+                    && sg2 > -1e-9 && sg2 < 1.0 + 1e-9) {
+                    ts.push_back(t);
+                }
+            }
+        }
+        std::sort(ts.begin(), ts.end());
+        bool any = false;
+        for (size_t k = 0; k + 1 < ts.size(); ++k) {
+            const double t0 = ts[k], t1 = ts[k + 1];
+            if (t1 - t0 < 1e-9) continue;
+            const double tm = 0.5 * (t0 + t1);
+            const double vis = veilAt(wx1 + tm * dx3, wy1 + tm * dy3, wz1 + tm * dz3);
+            double qpx1, qpy1, qpx2, qpy2;
+            proj(wx1 + t0 * dx3, wy1 + t0 * dy3, wz1 + t0 * dz3, qpx1, qpy1);
+            proj(wx1 + t1 * dx3, wy1 + t1 * dy3, wz1 + t1 * dz3, qpx2, qpy2);
+            if (!ClipSegRect(qpx1, qpy1, qpx2, qpy2, xmn, ymn, xmx, ymx)) continue;
+            DrawCmd d;
+            d.op = DrawOp::Segment;
+            d.color = vis > 0.999 ? col : rgbaOfHex(col, vis);
+            d.lineWidth = lw;
+            d.pts = { (float)qpx1, (float)qpy1, (float)qpx2, (float)qpy2 };
+            out.push_back(d);
+            any = true;
+        }
+        return any;
+    };
     for (auto &g : geos_) {
         if (!g->visible) continue;
         switch (g->type()) {
@@ -13000,78 +13357,18 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             break;
         }
         case GeoType::Plane: {
-            // 1.0.8.2 平面：视图立方体 [-5,5]³ 12 棱求交 → 凸多边形（质心
-            // 角向排序）→ 光照填充 + 描边 + 标签（法向单位化后裁剪）
+            // 1.0.8.2 平面：视图立方体 [-5,5]³ 求交 → 凸多边形（质心角向
+            // 排序）→ 光照填充 + 描边 + 标签（1.0.8.4 裁剪提取为
+            // cubeClipPlane，与 A4 遮挡体收集共用）
             GeoPlane *pl = static_cast<GeoPlane *>(g.get());
             const double nl = sqrt(pl->a * pl->a + pl->b * pl->b + pl->c * pl->c);
             if (!(nl > 1e-12)) break;
             const double nx = pl->a / nl, ny = pl->b / nl, nz = pl->c / nl;
             const double dd = pl->d / nl;
-            const double C = 5.0;
-            const double corners[8][3] = {
-                { -C, -C, -C }, { C, -C, -C }, { C, C, -C }, { -C, C, -C },
-                { -C, -C, C }, { C, -C, C }, { C, C, C }, { -C, C, C },
-            };
-            const int edges[12][2] = {
-                { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 },
-                { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 },
-                { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 },
-            };
-            double ix[12], iy[12], iz[12];
-            int npts = 0;
-            auto nearPt = [&](double x, double y, double z) -> bool {
-                for (int q = 0; q < npts; ++q) {
-                    if (fabs(ix[q] - x) < 1e-9 && fabs(iy[q] - y) < 1e-9
-                        && fabs(iz[q] - z) < 1e-9) return true;
-                }
-                return false;
-            };
-            for (const auto &ed : edges) {
-                const double *P = corners[ed[0]];
-                const double *Q = corners[ed[1]];
-                const double s1 = nx * P[0] + ny * P[1] + nz * P[2] - dd;
-                const double s2 = nx * Q[0] + ny * Q[1] + nz * Q[2] - dd;
-                if ((s1 > 1e-12) == (s2 > 1e-12)) continue;
-                const double t = s1 / (s1 - s2);
-                const double px2 = P[0] + t * (Q[0] - P[0]);
-                const double py2 = P[1] + t * (Q[1] - P[1]);
-                const double pz2 = P[2] + t * (Q[2] - P[2]);
-                if (!nearPt(px2, py2, pz2) && npts < 12) {
-                    ix[npts] = px2;
-                    iy[npts] = py2;
-                    iz[npts] = pz2;
-                    ++npts;
-                }
-            }
+            std::vector<double> ix, iy, iz;
+            cubeClipPlane(nx, ny, nz, dd, ix, iy, iz);
+            const int npts = (int)ix.size();
             if (npts < 3) break;
-            // 平面内正交基（n 最小分量轴的叉积，幅值最大）→ 质心角向排序
-            double e1x, e1y, e1z;
-            if (fabs(nx) <= fabs(ny) && fabs(nx) <= fabs(nz)) {
-                e1x = 0; e1y = nz; e1z = -ny;          // n × x̂
-            } else if (fabs(ny) <= fabs(nz)) {
-                e1x = -nz; e1y = 0; e1z = nx;          // n × ŷ
-            } else {
-                e1x = ny; e1y = -nx; e1z = 0;          // n × ẑ
-            }
-            const double el = sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
-            e1x /= el; e1y /= el; e1z /= el;
-            const double e2x = ny * e1z - nz * e1y;
-            const double e2y = nz * e1x - nx * e1z;
-            const double e2z = nx * e1y - ny * e1x;
-            double gx = 0, gy = 0, gz = 0;
-            for (int q = 0; q < npts; ++q) {
-                gx += ix[q]; gy += iy[q]; gz += iz[q];
-            }
-            gx /= npts; gy /= npts; gz /= npts;
-            auto angOf = [&](int q) -> double {
-                const double rx = ix[q] - gx, ry = iy[q] - gy, rz = iz[q] - gz;
-                return atan2(rx * e2x + ry * e2y + rz * e2z,
-                             rx * e1x + ry * e1y + rz * e1z);
-            };
-            int order[12];
-            for (int q = 0; q < npts; ++q) order[q] = q;
-            std::sort(order, order + npts,
-                      [&](int a, int b) { return angOf(a) < angOf(b); });
             const double shade = 0.55 + 0.45 * fabs(nx * fx + ny * fy + nz * fz);
             DrawCmd fp;
             fp.op = DrawOp::FillPoly;
@@ -13079,12 +13376,11 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                                  shade, pl->fillAlpha);
             double cx2 = 0, cy2 = 0, cz2 = 0;
             for (int q = 0; q < npts; ++q) {
-                const int oi = order[q];
                 double ppx, ppy;
-                proj(ix[oi], iy[oi], iz[oi], ppx, ppy);
+                proj(ix[q], iy[q], iz[q], ppx, ppy);
                 fp.pts.push_back((float)ppx);
                 fp.pts.push_back((float)ppy);
-                cx2 += ix[oi]; cy2 += iy[oi]; cz2 += iz[oi];
+                cx2 += ix[q]; cy2 += iy[q]; cz2 += iz[q];
             }
             out.push_back(fp);
             DrawCmd pline;
@@ -13092,7 +13388,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             pline.color = ObjectColor(pl->color, darkTheme);
             pline.lineWidth = pl->lineThickness / 3.0f;
             for (int q = 0; q <= npts; ++q) {
-                const int oi = order[q % npts];
+                const int oi = q % npts;
                 double ppx, ppy;
                 proj(ix[oi], iy[oi], iz[oi], ppx, ppy);
                 pline.pts.push_back((float)ppx);
@@ -13311,26 +13607,27 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         switch (g->type()) {
         case GeoType::Line3: {
             GeoLine3 *l3 = static_cast<GeoLine3 *>(g.get());
-            // 1.0.8.3 image 缓存感知（交线/字面量端点直线）；未定义跳绘
+            // 1.0.8.3 image 缓存感知（交线/字面量端点直线）；未定义跳绘。
+            // 1.0.8.4 世界参数化延伸 + 遮挡拆段（drawSplitSeg；无遮挡体时
+            // 单子段与原屏幕延伸裁剪等价——投影线性，逐子段矩形裁剪并集不变）
             if (!l3->defined()) break;
+            const double wx1 = l3->ex1(), wy1 = l3->ey1(), wz1 = l3->ez1();
+            double dwx = l3->ex2() - wx1, dwy = l3->ey2() - wy1, dwz = l3->ez2() - wz1;
+            const double wlen = sqrt(dwx * dwx + dwy * dwy + dwz * dwz);
+            if (!(wlen > 1e-12)) break;
+            dwx /= wlen; dwy /= wlen; dwz /= wlen;
             double x1, y1, x2, y2;
-            proj(l3->ex1(), l3->ey1(), l3->ez1(), x1, y1);
-            proj(l3->ex2(), l3->ey2(), l3->ez2(), x2, y2);
+            proj(wx1, wy1, wz1, x1, y1);
+            proj(wx1 + dwx, wy1 + dwy, wz1 + dwz, x2, y2);
             double dx = x2 - x1, dy = y2 - y1;
-            double len = sqrt(dx * dx + dy * dy);
-            if (len < 1e-9) break;
-            // 向两端延伸覆盖视口（射线同款），再矩形裁剪
+            if (sqrt(dx * dx + dy * dy) < 1e-9) break;   // 视向平行线投影成点
             double diag = sqrt((double)V.width * V.width + (double)V.height * V.height);
             double Lx = sqrt(x1 * x1 + y1 * y1) + 2 * diag + 20;
-            double ex1 = x1 - dx / len * Lx, ey1 = y1 - dy / len * Lx;
-            double ex2 = x1 + dx / len * Lx, ey2 = y1 + dy / len * Lx;
-            if (!ClipSegRect(ex1, ey1, ex2, ey2, xmn, ymn, xmx, ymx)) break;
-            DrawCmd d;
-            d.op = DrawOp::Segment;
-            d.color = ObjectColor(l3->color, darkTheme);
-            d.lineWidth = l3->lineThickness / 3.0f;
-            d.pts = { (float)ex1, (float)ey1, (float)ex2, (float)ey2 };
-            out.push_back(d);
+            const double tExt = Lx / V.scale + 1.0;
+            drawSplitSeg(wx1 - tExt * dwx, wy1 - tExt * dwy, wz1 - tExt * dwz,
+                         wx1 + tExt * dwx, wy1 + tExt * dwy, wz1 + tExt * dwz,
+                         ObjectColor(l3->color, darkTheme),
+                         l3->lineThickness / 3.0f);
             DrawCmd lb;
             lb.op = DrawOp::Text;
             lb.color = ObjectColor(l3->color, darkTheme);
@@ -13351,16 +13648,17 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             double x1, y1, x2, y2;
             proj(s->ex1(), s->ey1(), s->ez1(), x1, y1);
             proj(s->ex2(), s->ey2(), s->ez2(), x2, y2);
-            if (!ClipSegRect(x1, y1, x2, y2, xmn, ymn, xmx, ymx)) break;
-            DrawCmd d;
-            d.op = DrawOp::Segment;
-            d.color = ObjectColor(s->color, darkTheme);
-            d.lineWidth = s->lineThickness / 3.0f;
-            d.pts = { (float)x1, (float)y1, (float)x2, (float)y2 };
-            out.push_back(d);
+            // 1.0.8.4 遮挡拆段；标签按世界中点可见率透视
+            drawSplitSeg(s->ex1(), s->ey1(), s->ez1(), s->ex2(), s->ey2(), s->ez2(),
+                         ObjectColor(s->color, darkTheme),
+                         s->lineThickness / 3.0f);
+            const double visMid = veilAt(0.5 * (s->ex1() + s->ex2()),
+                                         0.5 * (s->ey1() + s->ey2()),
+                                         0.5 * (s->ez1() + s->ez2()));
             DrawCmd lb;
             lb.op = DrawOp::Text;
-            lb.color = ObjectColor(s->color, darkTheme);
+            const std::string sCol = ObjectColor(s->color, darkTheme);
+            lb.color = visMid > 0.999 ? sCol : rgbaOfHex(sCol, visMid);
             lb.pts = { (float)(0.5 * (x1 + x2) + 6 * us), (float)(0.5 * (y1 + y2) - 6 * us) };
             lb.text = s->label;
             out.push_back(lb);
@@ -13380,22 +13678,22 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             proj(v->ex2(), v->ey2(), v->ez2(), x2, y2);
             double dx = x2 - x1, dy = y2 - y1;
             if (sqrt(dx * dx + dy * dy) < 1e-9) break;
-            double cx1 = x1, cy1 = y1, cx2 = x2, cy2 = y2;
-            if (!ClipSegRect(cx1, cy1, cx2, cy2, xmn, ymn, xmx, ymx)) break;
-            DrawCmd d;
-            d.op = DrawOp::Segment;
-            d.color = ObjectColor(v->color, darkTheme);
-            d.lineWidth = v->lineThickness / 3.0f;
-            d.pts = { (float)cx1, (float)cy1, (float)cx2, (float)cy2 };
-            out.push_back(d);
+            // 1.0.8.4 遮挡拆段；箭头按终点可见率透视
+            const std::string vCol = ObjectColor(v->color, darkTheme);
+            drawSplitSeg(v->ex1(), v->ey1(), v->ez1(), v->ex2(), v->ey2(), v->ez2(),
+                         vCol, v->lineThickness / 3.0f);
+            const double visTip = veilAt(v->ex2(), v->ey2(), v->ez2());
+            const double visMidV = veilAt(0.5 * (v->ex1() + v->ex2()),
+                                          0.5 * (v->ey1() + v->ey2()),
+                                          0.5 * (v->ez1() + v->ez2()));
             // 箭头（投影平面内按屏幕方向）
             const double hl = 12.0 * us;
             const double base = atan2(dy, dx);
             const double a1 = base + 2.70, a2 = base - 2.70;
             DrawCmd h;
             h.op = DrawOp::MultiSeg;
-            h.color = d.color;
-            h.lineWidth = d.lineWidth;
+            h.color = visTip > 0.999 ? vCol : rgbaOfHex(vCol, visTip);
+            h.lineWidth = v->lineThickness / 3.0f;
             h.pts = { (float)x2, (float)y2,
                       (float)(x2 + hl * std::cos(a1)), (float)(y2 + hl * std::sin(a1)),
                       (float)x2, (float)y2,
@@ -13403,7 +13701,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             out.push_back(h);
             DrawCmd lb;
             lb.op = DrawOp::Text;
-            lb.color = d.color;
+            lb.color = visMidV > 0.999 ? vCol : rgbaOfHex(vCol, visMidV);
             lb.pts = { (float)(0.5 * (x1 + x2) + 6 * us), (float)(0.5 * (y1 + y2) - 6 * us) };
             lb.text = v->label;
             out.push_back(lb);
@@ -13415,6 +13713,10 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             double px, py;
             proj(p->x, p->y, p->z, px, py);
             if (px < -20 || px > V.width + 20 || py < -20 || py > V.height + 20) break;
+            // 1.0.8.4 平面遮挡：点落在遮挡体远侧且投影入填充多边形 → 透视
+            //（选中环保持原色便于拾取辨识）
+            const double visP = veilAt(p->x, p->y, p->z);
+            const std::string pCol = ObjectColor(p->color, darkTheme);
             if (p->selected) {
                 DrawCmd ring;
                 ring.op = DrawOp::CirclePix;
@@ -13426,12 +13728,12 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             }
             DrawCmd d;
             d.op = DrawOp::FillCircle;
-            d.color = ObjectColor(p->color, darkTheme);
+            d.color = visP > 0.999 ? pCol : rgbaOfHex(pCol, visP);
             d.pts = { (float)px, (float)py, (float)(p->pointSize * us) };
             out.push_back(d);
             DrawCmd lb;
             lb.op = DrawOp::Text;
-            lb.color = ObjectColor(p->color, darkTheme);
+            lb.color = visP > 0.999 ? pCol : rgbaOfHex(pCol, visP);
             lb.pts = { (float)(px + 4 * us), (float)(py - 2 * p->pointSize * us - 2 * us) };
             lb.text = p->label;
             out.push_back(lb);
