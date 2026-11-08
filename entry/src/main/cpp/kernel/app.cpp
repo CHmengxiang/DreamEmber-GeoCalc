@@ -3516,14 +3516,38 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         GeoElement *dep = nullptr;
         bool dis3D = false;
         if (cmdPointArg(a[0], p0)
-            && dirFromArg(a[1], dxx, dyy, dzz, dep, dis3D)
-            && (p0.is3D || dis3D)) {
+            && dirFromArg(a[1], dxx, dyy, dzz, dep, dis3D)) {
             const double dl0 = sqrt(dxx * dxx + dyy * dyy + dzz * dzz);
             if (!(dl0 > 1e-12)) {
                 lastError = "方向为零向量";
                 made = nullptr;
                 return true;
             }
+            // 1.0.8.7 2D 方向直线：GeoLine calc 闭包（点/向量均随动）；
+            // 字面量 2D 点与 2D Ray 方向不接管（缺口记录 HANDOFF）
+            if (!p0.is3D && !dis3D) {
+                if (cmdLower == "line" && p0.ref && dep) {
+                    auto l = std::make_unique<GeoLine>();
+                    const CmdPt P0 = p0;
+                    GeoElement *DEP = dep;
+                    l->inputs = { p0.ref, dep };
+                    l->cmdName = "Line";
+                    l->cmdArgs = { a[0], a[1] };
+                    l->calc = [P0, DEP](GeoLine *L) {
+                        GeoVector *v = dynamic_cast<GeoVector *>(DEP);
+                        const double dx = v->ex2() - v->ex1();
+                        const double dy = v->ey2() - v->ey1();
+                        L->a = -dy;
+                        L->b = dx;
+                        L->c = L->a * P0.ref->x + L->b * P0.ref->y;
+                        L->verticalConst = false;
+                    };
+                    l->update();
+                    made = std::move(l);
+                    return true;
+                }
+                // 其余 2D 组合放行两点路径（向量实参报原错误文案）
+            } else {
             const CmdPt P0 = p0;
             GeoElement *DEP = dep;
             const double ux = dxx / dl0, uy = dyy / dl0, uz = dzz / dl0;
@@ -3603,6 +3627,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             l3->update();
             made = std::move(l3);
             return true;
+        }
         }
     }
     if ((cmdLower == "line" || cmdLower == "segment") && a.size() == 2) {
@@ -4375,6 +4400,60 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             pl->update();
             made = std::move(pl);
             return true;
+        }
+        // 1.0.8.7 字面量补口：Plane((x,y,z), (nx,ny,nz)) / Plane(P, (nx,ny,nz))
+        // / Plane((x,y,z), v)（image 向量端点差）。calc 闭包随动（标签端），
+        // inputs 只挂标签端；零法向拒绝；全 2D（2D 点 + 2D 法向）不接管
+        {
+            CmdPt pp0;
+            const bool p0ok = cmdPointArg(a[0], pp0);
+            GeoVector *nv2 = dynamic_cast<GeoVector *>(lookup(a[1]));
+            CmdPt nn0;
+            bool n0lit = false;
+            if (!nv2 && cmdPointArg(a[1], nn0) && nn0.lit) n0lit = true;
+            const bool p3D = p0ok && (pp0.ref ? pp0.ref->is3D : pp0.is3D);
+            const bool n3D = nv2
+                ? ((nv2->p1 && nv2->p1->is3D) || (nv2->p2 && nv2->p2->is3D)
+                   || nv2->ez1() != 0.0 || nv2->ez2() != 0.0)
+                : (n0lit && nn0.is3D);
+            if (p0ok && (nv2 || n0lit) && (p3D || n3D)) {
+                auto pl = std::make_unique<GeoPlane>();
+                if (pp0.ref) pl->inputs.push_back(pp0.ref);
+                if (nv2) pl->inputs.push_back(nv2);
+                pl->cmdName = "Plane";
+                pl->cmdArgs = { a[0], a[1] };
+                const CmdPt P0 = pp0;
+                GeoVector *NV = nv2;
+                const CmdPt N0 = nn0;
+                pl->calc = [P0, NV, N0](GeoPlane *P) {
+                    const double px = P0.ref ? P0.ref->x : P0.x;
+                    const double py = P0.ref ? P0.ref->y : P0.y;
+                    const double pz = P0.ref ? P0.ref->z : P0.z;
+                    double nx2, ny2, nz2;
+                    if (NV) {
+                        nx2 = NV->ex2() - NV->ex1();
+                        ny2 = NV->ey2() - NV->ey1();
+                        nz2 = NV->ez2() - NV->ez1();
+                    } else {
+                        nx2 = N0.x;
+                        ny2 = N0.y;
+                        nz2 = N0.z;
+                    }
+                    P->a = nx2;
+                    P->b = ny2;
+                    P->c = nz2;
+                    P->d = nx2 * px + ny2 * py + nz2 * pz;
+                };
+                pl->update();
+                if (fabs(pl->a) < 1e-15 && fabs(pl->b) < 1e-15
+                    && fabs(pl->c) < 1e-15) {
+                    lastError = "法向量不能为零向量";
+                    made = nullptr;
+                    return true;
+                }
+                made = std::move(pl);
+                return true;
+            }
         }
         std::string perr;
         const int pr = tryPlaneLinear(a[0], a[1], a[0] + "=" + a[1], made, perr);
