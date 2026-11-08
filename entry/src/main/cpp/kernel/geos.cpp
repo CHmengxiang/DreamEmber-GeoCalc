@@ -405,6 +405,19 @@ std::string GeoList::definitionText() const
 
 std::string GeoPolygon::valueText() const
 {
+    // 1.0.8.2 三维多边形：Newell 叉积和面积（|Σ p_i × p_{i+1}| / 2），
+    // 顶点全 z=0 时与鞋带公式同值
+    if (is3D) {
+        double ax = 0, ay = 0, az = 0;
+        for (size_t i = 0; i < verts.size(); ++i) {
+            const GeoPoint *p = verts[i];
+            const GeoPoint *q = verts[(i + 1) % verts.size()];
+            ax += p->y * q->z - p->z * q->y;
+            ay += p->z * q->x - p->x * q->z;
+            az += p->x * q->y - p->y * q->x;
+        }
+        return FormatNum(sqrt(ax * ax + ay * ay + az * az) / 2.0);
+    }
     // 鞋带公式面积（绝对值）
     double area = 0;
     if (image) {
@@ -440,13 +453,56 @@ std::string GeoPolygon::definitionText() const
 
 std::string GeoSurface::valueText() const
 {
+    if (parametric) {
+        // 参数曲面值列：分量原文（GGB 代数区同位显示分量式）
+        return "(" + ex.text() + ", " + ey.text() + ", " + ez.text() + ")";
+    }
     return "z = " + src;
 }
 
 std::string GeoSurface::definitionText() const
 {
     if (!cmdName.empty()) return cmdDefText();
+    if (parametric) return label + " = Surface(" + ex.text() + ", " + ey.text()
+        + ", " + ez.text() + ", " + uName + ", " + vName + ")";
     return label + "(x, y) = " + src;
+}
+
+// ax+by+cz=d 展示（1.0.8.2；零系数跳过、±1 省略数值，全零写 "0 = d"）
+std::string PlaneEqText(double a, double b, double c, double d)
+{
+    const char *names[3] = { "x", "y", "z" };
+    const double co[3] = { a, b, c };
+    std::string lhs;
+    for (int i = 0; i < 3; ++i) {
+        if (std::fabs(co[i]) < 1e-12) continue;
+        const double ab = std::fabs(co[i]);
+        const bool unit = ab - 1.0 < 1e-12;
+        if (lhs.empty()) {
+            lhs = (co[i] < 0 ? std::string("-") : std::string())
+                + (unit ? std::string(names[i]) : FormatNum(ab) + names[i]);
+        } else {
+            lhs += co[i] > 0 ? " + " : " - ";
+            lhs += unit ? std::string(names[i]) : FormatNum(ab) + names[i];
+        }
+    }
+    if (lhs.empty()) lhs = "0";
+    return lhs + " = " + FormatNum(d);
+}
+
+std::string GeoPlane::valueText() const
+{
+    if (std::fabs(a) < 1e-12 && std::fabs(b) < 1e-12 && std::fabs(c) < 1e-12) {
+        return "未定义";
+    }
+    return PlaneEqText(a, b, c, d);
+}
+
+std::string GeoPlane::definitionText() const
+{
+    std::string dc = cmdDefText();
+    if (!dc.empty()) return dc;
+    return src.empty() ? "Plane" : src;
 }
 
 std::string GeoSphere::valueText() const

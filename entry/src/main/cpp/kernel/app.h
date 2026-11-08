@@ -292,6 +292,15 @@ private:
     bool tryCommand(const std::string &cmdLower, const std::string &args,
                     const std::string &name, std::unique_ptr<GeoElement> &made);
 
+    // 1.0.8.2 隐式线性平面方程提取（x+y+z=d 裸输入与 Plane(lhs,rhs) 命令
+    // 共用）：lhs/rhs refs 模式解析，refs 须含 z 且除 z 外全为数值对象
+    //（滑条随动），一次式系数采样提取并校验线性。返回 1=成功（out 已填，
+    // src 为定义原文）；0=不是平面方程（err 未动，调用方回落既有分支）；
+    // -1=识别为平面方程但非法（err 已填文案）
+    int tryPlaneLinear(const std::string &lhsS, const std::string &rhsS,
+                       const std::string &src, std::unique_ptr<GeoElement> &out,
+                       std::string &err);
+
     // N4 .ggb XML 重放辅助
     void xmlApplyStyle(GeoElement *e, const std::string &inner);
     // headTag = <command ...> 开标签属性文本；body = 开标签之后的内部内容

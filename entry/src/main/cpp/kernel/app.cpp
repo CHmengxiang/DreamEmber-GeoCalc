@@ -264,6 +264,7 @@ bool PathPointAt(GeoElement *e, double param, double &x, double &y)
     }
     case GeoType::Polygon: {
         GeoPolygon *pg = static_cast<GeoPolygon *>(e);
+        if (pg->is3D) return false;   // 1.0.8.2 三维多边形不作 2D 依附路径
         const size_t n = pg->image ? pg->ivx.size() : pg->verts.size();
         if (n == 0) return false;
         long i = static_cast<long>(floor(param));
@@ -358,6 +359,7 @@ bool PathProject(GeoElement *e, double wx, double wy, double prev,
     }
     case GeoType::Polygon: {
         GeoPolygon *pg = static_cast<GeoPolygon *>(e);
+        if (pg->is3D) return false;   // 1.0.8.2 三维多边形不作 2D 依附路径
         const size_t n = pg->image ? pg->ivx.size() : pg->verts.size();
         if (n == 0) return false;
         double bestD = 1e18;
@@ -2062,9 +2064,11 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                 // "依随表达式"数值（B1=A1+1，inputs 注册依赖，拖点/滑杆/
                 // 重定义级联重算）；引用不可解析（不存在/非数值/函数定义
                 // h(x)=zz+1 混入）时置 made 为空回落旧流程，保持原错误文案
+                // 1.0.8.2 f(x,y)=k / z=k 常数式不再落数值（GGB 3D 口径为
+                // 平面）：surfaceForm/z 形式跳过数值分支，交曲面入口定型
                 Expr t;
                 if (t.parse(norm, err, std::string(), true) && !t.containsX()
-                    && !t.containsY()) {
+                    && !t.containsY() && !surfaceForm && name != "z") {
                     const std::vector<std::string> &refs = t.refs();
                     std::vector<std::pair<std::string, GeoNumeric *>> deps;
                     std::vector<std::pair<std::string, GeoList *>> matDeps;
@@ -2210,9 +2214,49 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                 }
             }
         }
+        // 1.0.8.2 隐式线性平面方程（GGB 3D 口径）：x+y+z=5 等无标签方程。
+        // 顶层 '='（引号/括号外）且左部不含 '('（不劫持 f(x)= / u(x)= 类），
+        // tryPlaneLinear 识别（refs 须含 z）才接管；未识别回落既有分支
+        if (!made && !hasAssign) {
+            size_t eqP = std::string::npos;
+            int eqDepth = 0;
+            bool eqStr = false;
+            for (size_t ci = 0; ci < src.size(); ++ci) {
+                const char c2 = src[ci];
+                if (eqStr) {
+                    if (c2 == '"') eqStr = false;
+                    continue;
+                }
+                if (c2 == '"') { eqStr = true; continue; }
+                if (c2 == '(') ++eqDepth;
+                else if (c2 == ')') --eqDepth;
+                else if (c2 == '=' && eqDepth == 0) { eqP = ci; break; }
+            }
+            if (eqP != std::string::npos && eqP > 0 && eqP + 1 < src.size()
+                && src.find("(x)=") == std::string::npos
+                && src.find("(x,y)=") == std::string::npos) {
+                std::string lhsS = src.substr(0, eqP);
+                std::string rhsS = src.substr(eqP + 1);
+                const auto trim2 = [](std::string &t) {
+                    const size_t b = t.find_first_not_of(" \t");
+                    const size_t e = t.find_last_not_of(" \t");
+                    t = b == std::string::npos ? std::string()
+                                               : t.substr(b, e - b + 1);
+                };
+                trim2(lhsS);
+                trim2(rhsS);
+                if (!lhsS.empty() && !rhsS.empty()
+                    && lhsS.find('(') == std::string::npos) {
+                    std::string perr;
+                    const int pr = tryPlaneLinear(lhsS, rhsS, src, made, perr);
+                    if (pr < 0) { lastError = perr; return false; }
+                }
+            }
+        }
         // 1.0.8.1 曲面入口先于单变量函数校验：f(x,y)=expr 显式形式，或 z=expr
-        //（GGB 3D 输入口径，常数式已在数值分支定型为数值不会到这）。refs 模式
-        // 独立重解析——含滑条引用的式子 plain parse 会先报"未知符号"
+        //（GGB 3D 输入口径）。refs 模式独立重解析——含滑条引用的式子 plain
+        // parse 会先报"未知符号"。1.0.8.2 常数式（不含 x/y）落平面（GGB 口径
+        // f(x,y)=5 / z=5 为平面，四十五包候选⑥），非常数落曲面
         if (!made && (surfaceForm || (hasAssign && name == "z"))) {
             Expr body2;
             std::string err2;
@@ -2234,14 +2278,35 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                 lastError = "曲面引用了非数值对象（仅滑条/数值可随动）";
                 return false;
             }
-            auto s2 = std::make_unique<GeoSurface>();
-            s2->src = norm;
-            s2->body = std::move(body2);
-            for (const auto &d : deps) {
-                s2->refDeps.push_back(d);
-                s2->inputs.push_back(d.second);
+            if (!body2.containsX() && !body2.containsY()) {
+                // 常数式 → 平面 z=值（a=b=0,c=1；滑条引用闭包随动）
+                auto pl = std::make_unique<GeoPlane>();
+                pl->src = surfaceForm ? (name + "(x,y)=" + norm) : ("z=" + norm);
+                pl->calc = [body2, deps](GeoPlane *P) {
+                    P->a = 0;
+                    P->b = 0;
+                    P->c = 1;
+                    P->d = body2.evalResolved(0.0,
+                        [deps](const std::string &nm) -> double {
+                            for (const auto &d : deps) {
+                                if (d.first == nm) return d.second->value;
+                            }
+                            return NAN;
+                        });
+                };
+                for (const auto &d : deps) pl->inputs.push_back(d.second);
+                pl->update();
+                made = std::move(pl);
+            } else {
+                auto s2 = std::make_unique<GeoSurface>();
+                s2->src = norm;
+                s2->body = std::move(body2);
+                for (const auto &d : deps) {
+                    s2->refDeps.push_back(d);
+                    s2->inputs.push_back(d.second);
+                }
+                made = std::move(s2);
             }
-            made = std::move(s2);
             if (!surfaceForm && name == "z") name.clear();
         }
         if (!made) {
@@ -2279,6 +2344,97 @@ bool Kernel::inputImpl(const std::string &srcRaw)
     }
     flushExtras();
     return true;
+}
+
+// ---------- 1.0.8.2 隐式线性平面方程提取 ----------
+// lhs/rhs refs 模式解析：refs 须含 z（坐标变量名恒占用，滑条同名时被平面
+// 方程遮蔽——GGB 3D 同口径），除 z 外须为已存在数值对象（滑条随动）；
+// 一次式系数采样提取并校验线性（g(lhs−rhs) 在 0/单位点/2 倍点/全 1 点取样）。
+// 返回 1=成功（out 已填，src 为定义原文）；0=不是平面方程（err 未动，调用
+// 方回落既有分支）；-1=识别为平面方程但非法（err 已填文案）
+int Kernel::tryPlaneLinear(const std::string &lhsS, const std::string &rhsS,
+                           const std::string &src, std::unique_ptr<GeoElement> &out,
+                           std::string &err)
+{
+    Expr le, re;
+    std::string perr;
+    if (!le.parse(lhsS, perr, std::string(), true)
+        || !re.parse(rhsS, perr, std::string(), true)) {
+        return 0;   // 解析不了：不是平面方程（回落，含原生错误路径）
+    }
+    std::vector<std::pair<std::string, GeoNumeric *>> deps;
+    bool hasZ = false;
+    auto collect = [&](const Expr &e) -> bool {
+        for (const std::string &rn : e.refs()) {
+            if (rn == "z") { hasZ = true; continue; }
+            GeoNumeric *dn = dynamic_cast<GeoNumeric *>(lookup(rn));
+            if (!dn) return false;
+            bool seen = false;
+            for (const auto &d : deps) {
+                if (d.first == rn) { seen = true; break; }
+            }
+            if (!seen) deps.emplace_back(rn, dn);
+        }
+        return true;
+    };
+    if (!collect(le) || !collect(re) || !hasZ) return 0;
+    // g(x,y,z) = lhs − rhs（z 走 resolver 采样，x/y 原生变量；滑条现值）
+    auto g = [&](double x, double y, double z, double &ov) -> bool {
+        auto res = [&](const std::string &nm) -> double {
+            if (nm == "z") return z;
+            for (const auto &d : deps) {
+                if (d.first == nm) return d.second->value;
+            }
+            return NAN;
+        };
+        ov = le.evalXYResolved(x, y, res) - re.evalXYResolved(x, y, res);
+        return std::isfinite(ov);
+    };
+    double g000, g100, g010, g001, g200, g020, g002, g111;
+    if (!g(0, 0, 0, g000) || !g(1, 0, 0, g100) || !g(0, 1, 0, g010)
+        || !g(0, 0, 1, g001) || !g(2, 0, 0, g200) || !g(0, 2, 0, g020)
+        || !g(0, 0, 2, g002) || !g(1, 1, 1, g111)) {
+        err = "平面方程含不可求值的引用";
+        return -1;
+    }
+    const double A = g100 - g000, B = g010 - g000, C = g001 - g000;
+    const double tol = 1e-7 * (1.0 + std::fabs(g000) + std::fabs(A)
+                               + std::fabs(B) + std::fabs(C));
+    if (std::fabs(g200 - g000 - 2 * A) > tol
+        || std::fabs(g020 - g000 - 2 * B) > tol
+        || std::fabs(g002 - g000 - 2 * C) > tol
+        || std::fabs(g111 - g000 - A - B - C) > tol) {
+        err = "暂只支持线性平面方程（ax + by + cz = d 形式）";
+        return -1;
+    }
+    if (std::fabs(A) < 1e-12 && std::fabs(B) < 1e-12 && std::fabs(C) < 1e-12) {
+        err = "方程不含有效的平面系数";
+        return -1;
+    }
+    auto pl = std::make_unique<GeoPlane>();
+    pl->src = src;
+    // 依随重算：滑条现值下重采样系数（构造期已过线性校验，重算免检）
+    pl->calc = [le, re, deps](GeoPlane *P) {
+        auto gg = [&](double x, double y, double z) -> double {
+            auto res = [&](const std::string &nm) -> double {
+                if (nm == "z") return z;
+                for (const auto &d : deps) {
+                    if (d.first == nm) return d.second->value;
+                }
+                return NAN;
+            };
+            return le.evalXYResolved(x, y, res) - re.evalXYResolved(x, y, res);
+        };
+        const double g0 = gg(0, 0, 0);
+        P->a = gg(1, 0, 0) - g0;
+        P->b = gg(0, 1, 0) - g0;
+        P->c = gg(0, 0, 1) - g0;
+        P->d = -g0;
+    };
+    for (const auto &d : deps) pl->inputs.push_back(d.second);
+    pl->update();
+    out = std::move(pl);
+    return 1;
 }
 
 // ---------- 命令分发 ----------
@@ -3686,12 +3842,156 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         }
         return true;
     }
+    // 1.0.8.2 Plane 三形式：Plane(A,B,C) 三点式（2D 点按 z=0 允许）/
+    // Plane(点, 法向量) / Plane(lhs, rhs) 隐式线性方程（XML 重放与定义列
+    // 统一走命令形式）
+    if (cmdLower == "plane" && (a.size() == 2 || a.size() == 3)) {
+        if (a.size() == 3) {
+            auto pts = needPts(3);
+            if (pts.empty()) { made = nullptr; return true; }
+            auto pl = std::make_unique<GeoPlane>();
+            pl->pa = pts[0];
+            pl->pb = pts[1];
+            pl->pc = pts[2];
+            pl->inputs = { pts[0], pts[1], pts[2] };
+            pl->cmdName = "Plane";
+            pl->cmdArgs = a;
+            pl->calc = [](GeoPlane *P) {
+                const double ux = P->pb->x - P->pa->x, uy = P->pb->y - P->pa->y,
+                             uz = P->pb->z - P->pa->z;
+                const double vx = P->pc->x - P->pa->x, vy = P->pc->y - P->pa->y,
+                             vz = P->pc->z - P->pa->z;
+                P->a = uy * vz - uz * vy;
+                P->b = uz * vx - ux * vz;
+                P->c = ux * vy - uy * vx;
+                P->d = P->a * P->pa->x + P->b * P->pa->y + P->c * P->pa->z;
+            };
+            pl->update();
+            made = std::move(pl);
+            return true;
+        }
+        // 2 参：点 + 法向量（向量端点 z 参与一般法向），否则按隐式线性
+        // 方程提取（含 z 才接管；全 2D 语义报错）
+        GeoPoint *p0 = lookupPoint(a[0]);
+        GeoVector *nv = p0 ? dynamic_cast<GeoVector *>(lookup(a[1])) : nullptr;
+        if (p0 && nv && nv->p1 && nv->p2) {
+            auto pl = std::make_unique<GeoPlane>();
+            pl->inputs = { p0, nv };
+            pl->cmdName = "Plane";
+            pl->cmdArgs = a;
+            pl->calc = [p0, nv](GeoPlane *P) {
+                const double nx = nv->p2->x - nv->p1->x;
+                const double ny = nv->p2->y - nv->p1->y;
+                const double nz = nv->p2->z - nv->p1->z;
+                P->a = nx;
+                P->b = ny;
+                P->c = nz;
+                P->d = nx * p0->x + ny * p0->y + nz * p0->z;
+            };
+            pl->update();
+            made = std::move(pl);
+            return true;
+        }
+        std::string perr;
+        const int pr = tryPlaneLinear(a[0], a[1], a[0] + "=" + a[1], made, perr);
+        if (pr < 0) { lastError = perr; made = nullptr; return true; }
+        if (pr == 0) {
+            lastError = "Plane 需要（点, 点, 点）、（点, 向量）或线性方程两参形式";
+            made = nullptr;
+            return true;
+        }
+        GeoPlane *plm = static_cast<GeoPlane *>(made.get());
+        plm->cmdName = "Plane";
+        plm->cmdArgs = a;
+        return true;
+    }
+    // 1.0.8.2 Surface(X,Y,Z,u,u1,u2,v,v1,v2) 参数曲面：分量 refs 模式解析
+    //（uName/vName 与滑条引用统一走 resolver 回调，参数名优先于同名滑条），
+    // 范围仅数值字面量（min < max）
+    if (cmdLower == "surface" && a.size() == 9) {
+        const std::string &un = a[3];
+        const std::string &vn = a[6];
+        auto isParamName = [](const std::string &s) -> bool {
+            if (s.empty() || !isalpha((unsigned char)s[0])) return false;
+            for (char c : s) {
+                if (!isalnum((unsigned char)c) && c != '_') return false;
+            }
+            return true;
+        };
+        if (!isParamName(un) || !isParamName(vn) || un == vn
+            || un == "x" || un == "y" || vn == "x" || vn == "y") {
+            lastError = "参数名须为标识符、不能是 x/y 且互不相同";
+            made = nullptr;
+            return true;
+        }
+        double u1v = 0, u2v = 0, v1v = 0, v2v = 0;
+        if (!numArg(a[4], u1v) || !numArg(a[5], u2v)
+            || !numArg(a[7], v1v) || !numArg(a[8], v2v)) {
+            lastError = "参数范围须为数值（如 Surface(u, u·cos(v), u·sin(v), "
+                        "u, 0, 3, v, 0, 6.28)）";
+            made = nullptr;
+            return true;
+        }
+        if (!(u2v > u1v) || !(v2v > v1v)) {
+            lastError = "参数范围须满足 max > min";
+            made = nullptr;
+            return true;
+        }
+        auto sf = std::make_unique<GeoSurface>();
+        sf->parametric = true;
+        sf->uName = un;
+        sf->vName = vn;
+        sf->u0 = u1v;
+        sf->u1 = u2v;
+        sf->v0 = v1v;
+        sf->v1 = v2v;
+        const char *compName[3] = { "x", "y", "z" };
+        Expr *compExpr[3] = { &sf->ex, &sf->ey, &sf->ez };
+        for (int ci2 = 0; ci2 < 3; ++ci2) {
+            std::string cerr2;
+            if (!compExpr[ci2]->parse(a[ci2], cerr2, std::string(), true)) {
+                lastError = std::string(compName[ci2]) + " 分量无法解析: " + cerr2;
+                made = nullptr;
+                return true;
+            }
+            if (compExpr[ci2]->containsX() || compExpr[ci2]->containsY()) {
+                lastError = "分量请用参数 " + un + "/" + vn + "，不要用 x/y";
+                made = nullptr;
+                return true;
+            }
+            for (const std::string &rn : compExpr[ci2]->refs()) {
+                if (rn == un || rn == vn) continue;
+                GeoNumeric *dn = dynamic_cast<GeoNumeric *>(lookup(rn));
+                if (!dn) {
+                    lastError = "分量引用了非数值对象（仅滑条/数值可随动）";
+                    made = nullptr;
+                    return true;
+                }
+                bool seen = false;
+                for (const auto &d : sf->refDeps) {
+                    if (d.first == rn) { seen = true; break; }
+                }
+                if (!seen) {
+                    sf->refDeps.emplace_back(rn, dn);
+                    sf->inputs.push_back(dn);
+                }
+            }
+        }
+        sf->cmdName = "Surface";
+        sf->cmdArgs = a;
+        made = std::move(sf);
+        return true;
+    }
     if (cmdLower == "polygon" && a.size() >= 3) {
         auto pts = needPts(a.size());
         if (pts.empty()) { made = nullptr; return true; }
         auto pg = std::make_unique<GeoPolygon>();
         pg->verts = pts;
         pg->inputs.assign(pts.begin(), pts.end());
+        // 1.0.8.2 任一顶点为三维点 → 三维多边形（2D 跳绘，render3D 填充）
+        for (GeoPoint *p : pts) {
+            if (p->is3D) { pg->is3D = true; break; }
+        }
         pg->cmdName = "Polygon";
         pg->cmdArgs = a;
         made = std::move(pg);
@@ -8253,6 +8553,9 @@ std::string Kernel::nextLabelFor(GeoType t)
     } else if (t == GeoType::Surface) {
         pool = "fghjklmnpqrs";   // 曲面与函数同池（GGB 同款：f(x,y) 记号）
         poolLen = 12;
+    } else if (t == GeoType::Plane) {
+        pool = "pqrstuvw";       // 平面独立池（GGB 平面惯用 p/q 起）
+        poolLen = 8;
     } else if (t == GeoType::List) {
         for (int n = 1; n < 1000; ++n) {
             std::string cand = "L" + std::to_string(n);
@@ -8304,6 +8607,7 @@ void Kernel::algebraRows(std::vector<AlgebraRow> &out) const
         case GeoType::Sphere: r.type = "sphere"; break;
         case GeoType::Cylinder: r.type = "cylinder"; break;
         case GeoType::Line3: r.type = "line"; break;
+        case GeoType::Plane: r.type = "plane"; break;
         case GeoType::Numeric: {
             GeoNumeric *n = static_cast<GeoNumeric *>(g.get());
             r.type = n->isSlider ? "slider" : "numeric";
@@ -8319,6 +8623,13 @@ void Kernel::algebraRows(std::vector<AlgebraRow> &out) const
             if (fn->ineqOp || fn->ineqCombo()) {
                 r.fillAlphaPct = (int)std::lround(fn->fillAlpha * 100.0);
             }
+        } else if (g->type() == GeoType::Surface
+                   || g->type() == GeoType::Plane) {
+            // 1.0.8.2 曲面/平面填充透明度滑杆（四十五包候选⑤，同多边形口径）
+            r.fillAlphaPct = (int)std::lround(
+                (g->type() == GeoType::Surface
+                     ? static_cast<GeoSurface *>(g.get())->fillAlpha
+                     : static_cast<GeoPlane *>(g.get())->fillAlpha) * 100.0);
         } else if (g->type() == GeoType::Polygon) {
             // 十四轮：多边形/角度区域填充透明度滑杆（协议第 7 列，同不等式）
             r.fillAlphaPct =
@@ -8912,6 +9223,7 @@ std::string Kernel::propsOf(const std::string &label) const
     case GeoType::Sphere: ty = "sphere"; break;
     case GeoType::Cylinder: ty = "cylinder"; break;
     case GeoType::Line3: ty = "line"; break;
+    case GeoType::Plane: ty = "plane"; break;
     }
     add("type", ty);
     add("vis", g->visible ? "1" : "0");
@@ -9027,6 +9339,14 @@ bool Kernel::setProp(const std::string &label, const std::string &key,
         }
         if (g->type() == GeoType::Polygon) {
             static_cast<GeoPolygon *>(g)->fillAlpha = a;
+            return true;
+        }
+        if (g->type() == GeoType::Surface) {
+            static_cast<GeoSurface *>(g)->fillAlpha = a;
+            return true;
+        }
+        if (g->type() == GeoType::Plane) {
+            static_cast<GeoPlane *>(g)->fillAlpha = a;
             return true;
         }
         if (g->type() == GeoType::Angle) {
@@ -9376,6 +9696,20 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->src = s->src;
             d->body = s->body;
             d->fillAlpha = s->fillAlpha;
+            // 1.0.8.2 参数曲面分量与范围；refDeps/inputs 同步搬（重定义
+            // 换滑条引用时旧 resolver 指向已删引用会整体 NaN——一并修）
+            d->parametric = s->parametric;
+            d->uName = s->uName;
+            d->vName = s->vName;
+            d->ex = s->ex;
+            d->ey = s->ey;
+            d->ez = s->ez;
+            d->u0 = s->u0;
+            d->u1 = s->u1;
+            d->v0 = s->v0;
+            d->v1 = s->v1;
+            d->refDeps = s->refDeps;
+            d->inputs = s->inputs;
             break;
         }
         case GeoType::Sphere: {
@@ -9405,6 +9739,22 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             GeoLine3 *s = static_cast<GeoLine3 *>(src);
             d->p1 = s->p1;
             d->p2 = s->p2;
+            break;
+        }
+        case GeoType::Plane: {
+            GeoPlane *d = static_cast<GeoPlane *>(dst);
+            GeoPlane *s = static_cast<GeoPlane *>(src);
+            d->a = s->a;
+            d->b = s->b;
+            d->c = s->c;
+            d->d = s->d;
+            d->fillAlpha = s->fillAlpha;
+            d->src = s->src;
+            d->pa = s->pa;
+            d->pb = s->pb;
+            d->pc = s->pc;
+            d->calc = s->calc;
+            d->inputs = s->inputs;   // 闭包捕获的依赖与 inputs 保持一致
             break;
         }
         }
@@ -11646,6 +11996,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
         }
         case GeoType::Polygon: {
             GeoPolygon *pg = static_cast<GeoPolygon *>(g.get());
+            if (pg->is3D) break;   // 1.0.8.2 三维多边形只在 render3D 绘制
             size_t n = pg->image ? pg->ivx.size() : pg->verts.size();
             if (n < 3) break;
             std::vector<float> poly;
@@ -11843,6 +12194,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
         case GeoType::Sphere:
         case GeoType::Cylinder:
         case GeoType::Line3:
+        case GeoType::Plane:
             break;
         }
     }
@@ -12018,12 +12370,20 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             std::vector<double> sx((size_t)W * W), sy((size_t)W * W);
             for (int i = 0; i <= N; ++i) {
                 for (int j = 0; j <= N; ++j) {
-                    const double wx = -D + 2 * D * i / N;
-                    const double wy = -D + 2 * D * j / N;
-                    const double vz = sf->evalAt(wx, wy);
+                    double wx, wy, vz;
+                    if (sf->parametric) {
+                        // 1.0.8.2 参数曲面：uv 域采样（分量含 x/y 已在创建拒绝）
+                        sf->evalUV(sf->u0 + (sf->u1 - sf->u0) * i / N,
+                                   sf->v0 + (sf->v1 - sf->v0) * j / N,
+                                   wx, wy, vz);
+                    } else {
+                        wx = -D + 2 * D * i / N;
+                        wy = -D + 2 * D * j / N;
+                        vz = sf->evalAt(wx, wy);
+                    }
                     const size_t k = (size_t)i * W + j;
                     zy[k] = wx; zz[k] = wy;   // zy 存世界 x、zz 存世界 y（列主序语义仅内部）
-                    if (std::isfinite(vz)) {
+                    if (std::isfinite(vz) && std::isfinite(wx) && std::isfinite(wy)) {
                         zx[k] = vz;
                         double ppx, ppy;
                         proj(wx, wy, vz, ppx, ppy);
@@ -12123,10 +12483,187 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             lb.op = DrawOp::Text;
             lb.color = ObjectColor(sf->color, darkTheme);
             double lpx, lpy;
-            const double lvz = sf->evalAt(D, D);
-            proj(D, D, std::isfinite(lvz) ? lvz : 0.0, lpx, lpy);
+            if (sf->parametric) {
+                double tx, ty, tz;
+                sf->evalUV(sf->u1, sf->v1, tx, ty, tz);
+                if (!std::isfinite(tx) || !std::isfinite(ty)
+                    || !std::isfinite(tz)) {
+                    tx = ty = tz = 0.0;
+                }
+                proj(tx, ty, tz, lpx, lpy);
+            } else {
+                const double lvz = sf->evalAt(D, D);
+                proj(D, D, std::isfinite(lvz) ? lvz : 0.0, lpx, lpy);
+            }
             lb.pts = { (float)(lpx + 6 * us), (float)lpy };
             lb.text = sf->label;
+            out.push_back(lb);
+            break;
+        }
+        case GeoType::Plane: {
+            // 1.0.8.2 平面：视图立方体 [-5,5]³ 12 棱求交 → 凸多边形（质心
+            // 角向排序）→ 光照填充 + 描边 + 标签（法向单位化后裁剪）
+            GeoPlane *pl = static_cast<GeoPlane *>(g.get());
+            const double nl = sqrt(pl->a * pl->a + pl->b * pl->b + pl->c * pl->c);
+            if (!(nl > 1e-12)) break;
+            const double nx = pl->a / nl, ny = pl->b / nl, nz = pl->c / nl;
+            const double dd = pl->d / nl;
+            const double C = 5.0;
+            const double corners[8][3] = {
+                { -C, -C, -C }, { C, -C, -C }, { C, C, -C }, { -C, C, -C },
+                { -C, -C, C }, { C, -C, C }, { C, C, C }, { -C, C, C },
+            };
+            const int edges[12][2] = {
+                { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 },
+                { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 },
+                { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 },
+            };
+            double ix[12], iy[12], iz[12];
+            int npts = 0;
+            auto nearPt = [&](double x, double y, double z) -> bool {
+                for (int q = 0; q < npts; ++q) {
+                    if (fabs(ix[q] - x) < 1e-9 && fabs(iy[q] - y) < 1e-9
+                        && fabs(iz[q] - z) < 1e-9) return true;
+                }
+                return false;
+            };
+            for (const auto &ed : edges) {
+                const double *P = corners[ed[0]];
+                const double *Q = corners[ed[1]];
+                const double s1 = nx * P[0] + ny * P[1] + nz * P[2] - dd;
+                const double s2 = nx * Q[0] + ny * Q[1] + nz * Q[2] - dd;
+                if ((s1 > 1e-12) == (s2 > 1e-12)) continue;
+                const double t = s1 / (s1 - s2);
+                const double px2 = P[0] + t * (Q[0] - P[0]);
+                const double py2 = P[1] + t * (Q[1] - P[1]);
+                const double pz2 = P[2] + t * (Q[2] - P[2]);
+                if (!nearPt(px2, py2, pz2) && npts < 12) {
+                    ix[npts] = px2;
+                    iy[npts] = py2;
+                    iz[npts] = pz2;
+                    ++npts;
+                }
+            }
+            if (npts < 3) break;
+            // 平面内正交基（n 最小分量轴的叉积，幅值最大）→ 质心角向排序
+            double e1x, e1y, e1z;
+            if (fabs(nx) <= fabs(ny) && fabs(nx) <= fabs(nz)) {
+                e1x = 0; e1y = nz; e1z = -ny;          // n × x̂
+            } else if (fabs(ny) <= fabs(nz)) {
+                e1x = -nz; e1y = 0; e1z = nx;          // n × ŷ
+            } else {
+                e1x = ny; e1y = -nx; e1z = 0;          // n × ẑ
+            }
+            const double el = sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+            e1x /= el; e1y /= el; e1z /= el;
+            const double e2x = ny * e1z - nz * e1y;
+            const double e2y = nz * e1x - nx * e1z;
+            const double e2z = nx * e1y - ny * e1x;
+            double gx = 0, gy = 0, gz = 0;
+            for (int q = 0; q < npts; ++q) {
+                gx += ix[q]; gy += iy[q]; gz += iz[q];
+            }
+            gx /= npts; gy /= npts; gz /= npts;
+            auto angOf = [&](int q) -> double {
+                const double rx = ix[q] - gx, ry = iy[q] - gy, rz = iz[q] - gz;
+                return atan2(rx * e2x + ry * e2y + rz * e2z,
+                             rx * e1x + ry * e1y + rz * e1z);
+            };
+            int order[12];
+            for (int q = 0; q < npts; ++q) order[q] = q;
+            std::sort(order, order + npts,
+                      [&](int a, int b) { return angOf(a) < angOf(b); });
+            const double shade = 0.55 + 0.45 * fabs(nx * fx + ny * fy + nz * fz);
+            DrawCmd fp;
+            fp.op = DrawOp::FillPoly;
+            fp.color = ShadeRgba(pl->color.r, pl->color.g, pl->color.b,
+                                 shade, pl->fillAlpha);
+            double cx2 = 0, cy2 = 0, cz2 = 0;
+            for (int q = 0; q < npts; ++q) {
+                const int oi = order[q];
+                double ppx, ppy;
+                proj(ix[oi], iy[oi], iz[oi], ppx, ppy);
+                fp.pts.push_back((float)ppx);
+                fp.pts.push_back((float)ppy);
+                cx2 += ix[oi]; cy2 += iy[oi]; cz2 += iz[oi];
+            }
+            out.push_back(fp);
+            DrawCmd pline;
+            pline.op = DrawOp::Polyline;
+            pline.color = ObjectColor(pl->color, darkTheme);
+            pline.lineWidth = pl->lineThickness / 3.0f;
+            for (int q = 0; q <= npts; ++q) {
+                const int oi = order[q % npts];
+                double ppx, ppy;
+                proj(ix[oi], iy[oi], iz[oi], ppx, ppy);
+                pline.pts.push_back((float)ppx);
+                pline.pts.push_back((float)ppy);
+            }
+            out.push_back(pline);
+            DrawCmd lb;
+            lb.op = DrawOp::Text;
+            lb.color = ObjectColor(pl->color, darkTheme);
+            double lpx2, lpy2;
+            proj(cx2 / npts, cy2 / npts, cz2 / npts, lpx2, lpy2);
+            lb.pts = { (float)(lpx2 + 6 * us), (float)lpy2 };
+            lb.text = pl->label;
+            out.push_back(lb);
+            break;
+        }
+        case GeoType::Polygon: {
+            // 1.0.8.2 三维多边形：Newell 面积向量光照，单次 FillPoly + 描边
+            GeoPolygon *pg = static_cast<GeoPolygon *>(g.get());
+            const size_t n = pg->verts.size();
+            if (!pg->is3D || n < 3) break;
+            double ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
+            bool bad = false;
+            for (size_t i = 0; i < n; ++i) {
+                const GeoPoint *p = pg->verts[i];
+                const GeoPoint *q = pg->verts[(i + 1) % n];
+                ax += p->y * q->z - p->z * q->y;
+                ay += p->z * q->x - p->x * q->z;
+                az += p->x * q->y - p->y * q->x;
+                gx += p->x; gy += p->y; gz += p->z;
+                if (!std::isfinite(p->x) || !std::isfinite(p->y)
+                    || !std::isfinite(p->z)) bad = true;
+            }
+            if (bad) break;
+            const double nl2 = sqrt(ax * ax + ay * ay + az * az);
+            double shade = 0.85;
+            if (nl2 > 1e-12) {
+                shade = 0.55 + 0.45 * fabs((ax * fx + ay * fy + az * fz) / nl2);
+            }
+            DrawCmd fp;
+            fp.op = DrawOp::FillPoly;
+            fp.color = ShadeRgba(pg->color.r, pg->color.g, pg->color.b,
+                                 shade, pg->fillAlpha);
+            for (size_t i = 0; i < n; ++i) {
+                const GeoPoint *p = pg->verts[i];
+                double ppx, ppy;
+                proj(p->x, p->y, p->z, ppx, ppy);
+                fp.pts.push_back((float)ppx);
+                fp.pts.push_back((float)ppy);
+            }
+            out.push_back(fp);
+            DrawCmd pline;
+            pline.op = DrawOp::Polyline;
+            pline.color = ObjectColor(pg->color, darkTheme);
+            pline.lineWidth = pg->lineThickness / 3.0f;
+            for (size_t i = 0; i <= n; ++i) {
+                const GeoPoint *p = pg->verts[i % n];
+                double ppx, ppy;
+                proj(p->x, p->y, p->z, ppx, ppy);
+                pline.pts.push_back((float)ppx);
+                pline.pts.push_back((float)ppy);
+            }
+            out.push_back(pline);
+            DrawCmd lb;
+            lb.op = DrawOp::Text;
+            lb.color = ObjectColor(pg->color, darkTheme);
+            double lpx3, lpy3;
+            proj(gx / n, gy / n, gz / n, lpx3, lpy3);
+            lb.pts = { (float)(lpx3 + 6 * us), (float)lpy3 };
+            lb.text = pg->label;
             out.push_back(lb);
             break;
         }
@@ -12467,10 +13004,11 @@ std::string Kernel::getXml() const
             AppendCommandXml(o, *p);   // Midpoint/Intersect/变换像等依随点
             AppendElementHead(o, *p, "point");
             // 1.0.8.1 三维点 z 实存（官方 GGB 同位：2D 点 z=1 齐次权，z≠1 即
-            // 三维；z 恰为 1 的三维点往返丢标记——官方文件同限，可接受）
+            // 三维）。1.0.8.2 z 恰为 1 的三维点补 is3D 标记（官方文件无此
+            // 属性按缺省忽略，自产文件往返保真；四十五包候选⑦）
             if (p->is3D) {
                 o += "<coords x=\"" + NumA(p->x) + "\" y=\"" + NumA(p->y)
-                   + "\" z=\"" + NumA(p->z) + "\"/>\n";
+                   + "\" z=\"" + NumA(p->z) + "\" is3D=\"true\"/>\n";
             } else {
                 o += "<coords x=\"" + NumA(p->x) + "\" y=\"" + NumA(p->y) + "\" z=\"1\"/>\n";
             }
@@ -12620,10 +13158,15 @@ std::string Kernel::getXml() const
         }
         case GeoType::Surface: {
             // 1.0.8.1 曲面：按 f(x,y)=src 表达式重放（input 直通曲面分支）；
-            // 元素类型取官方 surfacecartesian3d 同位
+            // 元素类型取官方 surfacecartesian3d 同位。1.0.8.2 参数曲面走
+            // 命令重放（cmdArgs 存 9 参原文，z=f(x,y) 表达式装不下）
             GeoSurface *sf = static_cast<GeoSurface *>(g);
-            o += "<expression label=\"" + XmlEsc(sf->label) + "\" exp=\""
-               + XmlEsc(sf->label + "(x,y)=" + sf->src) + "\"/>\n";
+            if (sf->parametric) {
+                AppendCommandXml(o, *sf);
+            } else {
+                o += "<expression label=\"" + XmlEsc(sf->label) + "\" exp=\""
+                   + XmlEsc(sf->label + "(x,y)=" + sf->src) + "\"/>\n";
+            }
             AppendElementHead(o, *sf, "surfacecartesian3d", sf->fillAlpha);
             o += "</element>\n";
             break;
@@ -12649,6 +13192,20 @@ std::string Kernel::getXml() const
             AppendCommandXml(o, *l3);
             AppendElementHead(o, *l3, "line3d");
             AppendLineStyle(o, l3->lineThickness);
+            break;
+        }
+        case GeoType::Plane: {
+            // 1.0.8.2 平面：命令产物走通用重放；隐式/常数式写 exp 原文
+            //（x+y+z=5 / z=5 重放即命中隐式入口/曲面入口常数分支）
+            GeoPlane *pl = static_cast<GeoPlane *>(g);
+            if (!pl->cmdName.empty()) {
+                AppendCommandXml(o, *pl);
+            } else {
+                o += "<expression label=\"" + XmlEsc(pl->label) + "\" exp=\""
+                   + XmlEsc(pl->src) + "\"/>\n";
+            }
+            AppendElementHead(o, *pl, "plane", pl->fillAlpha);
+            AppendLineStyle(o, pl->lineThickness);
             break;
         }
         }
@@ -12867,9 +13424,10 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
         const std::string t = inner.substr(c, end - c);
         const double x = AttrNum(t, "x", 0.0);
         const double y = AttrNum(t, "y", 0.0);
-        // 1.0.8.1 三维点：z≠1（齐次权 1 = 2D）→ (x,y,z) 重建
+        // 1.0.8.1 三维点：z≠1（齐次权 1 = 2D）→ (x,y,z) 重建；1.0.8.2
+        // z==1 的三维点靠自产 is3D 标记（官方文件无此属性不受影响）
         const double z = AttrNum(t, "z", 1.0);
-        const bool is3D = z != 1.0;
+        const bool is3D = z != 1.0 || AttrVal(t, "is3D") == "true";
         const std::string src = is3D
             ? label + "=(" + NumA(x) + "," + NumA(y) + "," + NumA(z) + ")"
             : label + "=(" + NumA(x) + "," + NumA(y) + ")";

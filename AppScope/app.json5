@@ -2,9 +2,9 @@
   "app": {
     "bundleName": "chmx.geoCalc.dreamEmber",
     "vendor": "chmx",
-    "versionCode": 1000049,
-    "versionName": "1.0.8.1",
-    "buildVersion": "50",
+    "versionCode": 1000050,
+    "versionName": "1.0.8.2",
+    "buildVersion": "51",
     "icon": "$media:app_icon",
     "label": "$string:app_name"
   }

@@ -12,7 +12,7 @@
 namespace dreamember {
 
 enum class GeoType { Point, Segment, Line, Ray, Vector, Circle, Polygon, Function, Numeric, Angle, List, Text,
-                     Surface, Sphere, Cylinder, Line3 };
+                     Surface, Sphere, Cylinder, Line3, Plane };
 
 struct GeoColor {
     int r = 0, g = 0, b = 0;
@@ -32,6 +32,8 @@ std::string ColorHex(const GeoColor &c);
 std::string FormatNum(double v);
 // ax+by=c 的展示文本（y = ... 优先；b≈0 时 x = ...）
 std::string LineEqText(double a, double b, double c);
+// ax+by+cz=d 的展示文本（1.0.8.2 平面：零系数跳过、±1 省略数值，全零写 "0 = d"）
+std::string PlaneEqText(double a, double b, double c, double d);
 
 // 基类：标签/可见性/颜色/线宽 + 依赖重算接口。
 // inputs：依赖的前置对象（创建时填写；构造序即拓扑序，重算按构造序单遍 update，
@@ -382,6 +384,13 @@ public:
     // 滑条/数值引用（refs 模式解析；inputs 同步注册保证级联删除与重算，
     // 渲染/求值按现值随动——1.0.7.1 滑条动态联动同机制）
     std::vector<std::pair<std::string, GeoNumeric *>> refDeps;
+    // 1.0.8.2 参数曲面（Surface(X,Y,Z,u,u1,u2,v,v1,v2)）：分量表达式 refs
+    // 模式解析，uName/vName 与滑条引用统一走 resolver 查值回调（复用
+    // evalXYResolved，无 Expr API 改动；分量含原生 x/y 直接拒绝）
+    bool parametric = false;
+    std::string uName = "u", vName = "v";
+    Expr ex, ey, ez;                    // x/y/z 分量（parametric 时有效）
+    double u0 = 0, u1 = 1, v0 = 0, v1 = 1;   // 参数范围（仅数值字面量）
     double evalAt(double x, double y) const
     {
         if (refDeps.empty()) return body.evalXY(x, y);
@@ -393,7 +402,22 @@ public:
                 return NAN;
             });
     }
-    bool definable() const { return !body.empty(); }
+    // 参数曲面分量求值：u/v/滑条引用按名回填（滑条现值随动）
+    void evalUV(double u, double v, double &ox, double &oy, double &oz) const
+    {
+        auto res = [this, u, v](const std::string &nm) -> double {
+            if (nm == uName) return u;
+            if (nm == vName) return v;
+            for (const auto &d : refDeps) {
+                if (d.first == nm) return d.second->value;
+            }
+            return NAN;
+        };
+        ox = ex.evalXYResolved(0.0, 0.0, res);
+        oy = ey.evalXYResolved(0.0, 0.0, res);
+        oz = ez.evalXYResolved(0.0, 0.0, res);
+    }
+    bool definable() const { return parametric || !body.empty(); }
     std::string valueText() const override;
     std::string definitionText() const override;
 };
@@ -439,6 +463,23 @@ public:
     std::string definitionText() const override;
 };
 
+// 平面一般式 a·x+b·y+c·z=d（1.0.8.2）。来源：Plane 三点式（pa/pb/pc 引用
+// 随点重算）、Plane(点, 法向量)（calc 闭包重解）、隐式线性方程 x+y+z=d
+//（裸输入或 Plane(lhs,rhs) 命令式，采样提取系数，滑条引用随动）、常值曲面
+// f(x,y)=k / z=k（GGB 口径为平面，a=b=0, c=1）。渲染按视图立方体裁剪。
+class GeoPlane : public GeoElement {
+public:
+    GeoPlane() : GeoElement(GeoType::Plane) { color = {0x2C, 0x6B, 0xD4}; }
+    double a = 0, b = 0, c = 0, d = 0;   // 一般式系数（法向未归一化）
+    double fillAlpha = 0.25;             // 半透明面填充（样式条透明度滑杆）
+    std::string src;                     // 隐式/常数式定义原文（定义列回填用）
+    GeoPoint *pa = nullptr, *pb = nullptr, *pc = nullptr;   // 三点式
+    std::function<void(GeoPlane *)> calc;  // 依随重算（点/向量/滑条变动）
+    void update() override { if (calc) calc(this); }
+    std::string valueText() const override;
+    std::string definitionText() const override;
+};
+
 // 多边形（顶点序即边序；值 = 面积）。变换像走 ivx/ivy 缓存。
 class GeoPolygon : public GeoElement {
 public:
@@ -446,6 +487,9 @@ public:
     std::vector<GeoPoint *> verts;
     bool image = false;
     std::vector<double> ivx, ivy;
+    // 1.0.8.2 三维多边形（Polygon 收到任一 is3D 顶点）：2D 视图跳绘，
+    // render3D 按顶点现值投影填充（Newell 法向光照），面积走叉积和
+    bool is3D = false;
     // 区域填充不透明度 0-1（上游 多边形默认 ~15%）。代数区选中行滑杆以
     // "透明度 = 100×(1−fillAlpha)" 呈现：透明度 100 = 填充消失，0 = 最深
     double fillAlpha = 0.15;

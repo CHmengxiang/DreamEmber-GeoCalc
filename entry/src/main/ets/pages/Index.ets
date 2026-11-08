@@ -524,7 +524,7 @@ struct Index {
             .padding({ left: 20, top: 10, bottom: 2 })
           // 1.0.8.1 3D 视图开关（真源 AppStorage view3dOn，CanvasView 切画布）
           this.MenuRow(this.view3dOn ? '退出 3D 视图' : '3D 视图',
-            '三维点 / 曲面 / 球柱 · 拖动旋转视角', () => {
+            '三维点 / 曲面 / 球柱 / 平面 · 拖动旋转视角', () => {
               this.menuOpen = false;
               AppStorage.setOrCreate('view3dOn', !this.view3dOn);
             })
