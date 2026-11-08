@@ -239,12 +239,13 @@ bool PathPointAt(GeoElement *e, double param, double &x, double &y)
     }
     case GeoType::Ray: {
         GeoRay *r = static_cast<GeoRay *>(e);
-        double dx = r->p2->x - r->p1->x, dy = r->p2->y - r->p1->y;
+        // 1.0.8.3 字面量/混合端点射线走 image 缓存（ex1/ex2 感知）
+        double dx = r->ex2() - r->ex1(), dy = r->ey2() - r->ey1();
         double len = sqrt(dx * dx + dy * dy);
         if (len < 1e-15) return false;
         double t = std::max(0.0, param);
-        x = r->p1->x + (dx / len) * t;
-        y = r->p1->y + (dy / len) * t;
+        x = r->ex1() + (dx / len) * t;
+        y = r->ey1() + (dy / len) * t;
         return true;
     }
     case GeoType::Circle: {
@@ -324,14 +325,15 @@ bool PathProject(GeoElement *e, double wx, double wy, double prev,
     }
     case GeoType::Ray: {
         GeoRay *r = static_cast<GeoRay *>(e);
-        double dx = r->p2->x - r->p1->x, dy = r->p2->y - r->p1->y;
+        // 1.0.8.3 字面量/混合端点射线走 image 缓存（ex1/ex2 感知）
+        double dx = r->ex2() - r->ex1(), dy = r->ey2() - r->ey1();
         double len2 = dx * dx + dy * dy;
         if (len2 < 1e-18) return false;
-        double t = ((wx - r->p1->x) * dx + (wy - r->p1->y) * dy) / len2;
+        double t = ((wx - r->ex1()) * dx + (wy - r->ey1()) * dy) / len2;
         t = std::max(0.0, t);
         param = t * sqrt(len2);   // 参数统一为有向距离
-        x = r->p1->x + t * dx;
-        y = r->p1->y + t * dy;
+        x = r->ex1() + t * dx;
+        y = r->ey1() + t * dy;
         return true;
     }
     case GeoType::Circle: {
@@ -2046,6 +2048,57 @@ bool Kernel::inputImpl(const std::string &srcRaw)
         }
     }
 
+    // 1.0.8.3 x=3 / y=3 → 竖直/水平直线（GGB 口径：坐标常量式是线不是
+    // 数；右部可为数值对象引用随动，闭包同数值 refs 模式）。右部含
+    // x/y（y=2x+1 函数式）或引用不可解析时照旧走原分支。置 made 贯穿
+    //（inputImpl 尾部统一 add，不得提前 return）
+    if (!made && hasAssign && !surfaceForm && (name == "x" || name == "y")) {
+        Expr cx;
+        std::string cerrx;
+        if (cx.parse(rhs, cerrx, std::string(), true) && !cx.containsX()
+            && !cx.containsY()) {
+            std::vector<std::pair<std::string, GeoNumeric *>> deps;
+            bool bad = false;
+            for (const std::string &rn : cx.refs()) {
+                GeoNumeric *dn = dynamic_cast<GeoNumeric *>(lookup(rn));
+                if (!dn) { bad = true; break; }
+                deps.emplace_back(rn, dn);
+            }
+            if (!bad) {
+                const bool isX = name == "x";
+                auto l = std::make_unique<GeoLine>();
+                l->mode = GeoLine::Mode::Fixed;
+                l->src = name + "=" + rhs;
+                l->calc = [cx, deps, isX](GeoLine *L) {
+                    const double v = cx.evalResolved(0.0,
+                        [deps](const std::string &nm) -> double {
+                            for (const auto &d : deps) {
+                                if (d.first == nm) return d.second->value;
+                            }
+                            return NAN;
+                        });
+                    if (isX) {
+                        L->a = 1;
+                        L->b = 0;
+                        L->c = v;
+                        L->verticalConst = true;
+                    } else {
+                        L->a = 0;
+                        L->b = 1;
+                        L->c = v;
+                        L->verticalConst = false;
+                    }
+                };
+                for (const auto &d : deps) l->inputs.push_back(d.second);
+                l->update();
+                made = std::move(l);
+                // x/y 是坐标变量保留名：直线不占 x/y 标签（隐式平面同
+                // 口径清 name 走自动标签，重输 x=3 新建不撞占用检查）
+                name.clear();
+            }
+        }
+    }
+
     // 3) 函数：y=expr / f(x)=expr / 纯表达式（按函数画）
     if (!made) {
         std::string err;
@@ -3201,6 +3254,69 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         out = e.eval(0.0);
         return std::isfinite(out);
     };
+    // 1.0.8.3 命令点实参收字面量元组：(a,b) / (a,b,c) 直填（GGB 同款，
+    // probe_1082 G30 系 workaround 在案）。仅常量分量（不含 x/y、不引用
+    // 对象——含引用给明确文案引导先建点）；标签点引用返回现值快照供
+    // needPts 类分支外使用。产物按「标签点引用 + 字面量」image/闭包
+    // 随动装配或「全字面量」静态装配
+    struct CmdPt {
+        GeoPoint *ref = nullptr;    // 标签点（可空）
+        double x = 0, y = 0, z = 0; // 坐标（ref 空时为字面量值）
+        bool is3D = false;
+        bool lit = false;           // true = 字面量元组
+    };
+    auto cmdPointArg = [&](const std::string &s, CmdPt &out) -> bool {
+        GeoPoint *p = lookupPoint(s);
+        if (p) {
+            out = CmdPt();
+            out.ref = p;
+            out.is3D = p->is3D;
+            out.x = p->x;
+            out.y = p->y;
+            out.z = p->z;
+            return true;
+        }
+        if (s.size() < 5 || s.front() != '(' || s.back() != ')') return false;
+        std::vector<std::string> cs;
+        {
+            int depth = 0;
+            size_t start = 1;
+            for (size_t i = 1; i < s.size() - 1; ++i) {
+                const char c = s[i];
+                if (c == '(' || c == '[' || c == '{') ++depth;
+                else if (c == ')' || c == ']' || c == '}') --depth;
+                else if (c == ',' && depth == 0) {
+                    cs.push_back(Trim(s.substr(start, i - start)));
+                    start = i + 1;
+                }
+            }
+            // 末段止于闭括号前（s.back() 是 ')'）
+            cs.push_back(Trim(s.substr(start, s.size() - 1 - start)));
+        }
+        if (cs.size() != 2 && cs.size() != 3) return false;
+        double vs[3] = { 0, 0, 0 };
+        for (size_t i = 0; i < cs.size(); ++i) {
+            Expr e;
+            std::string eerr;
+            if (!e.parse(cs[i], eerr) || e.containsX() || e.containsY()
+                || !e.refs().empty()) {
+                lastError = "字面量点分量须为常量（随动引用请先定义点）: " + s;
+                return false;
+            }
+            vs[i] = e.eval(0.0);
+            if (!std::isfinite(vs[i])) {
+                lastError = "字面量点分量不是有限数: " + s;
+                return false;
+            }
+        }
+        out = CmdPt();
+        out.lit = true;
+        out.is3D = cs.size() == 3;
+        out.x = vs[0];
+        out.y = vs[1];
+        out.z = vs[2];
+        return true;
+    };
 
     // ---------- 1.0.6.3 列表/图表命令共用实参解析 ----------
     // 字面量列表临时对象（命令实参允许 {1,2,3} 直接书写；不入构造列表，
@@ -3379,6 +3495,96 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         return true;
     }
     if ((cmdLower == "line" || cmdLower == "segment") && a.size() == 2) {
+        // 1.0.8.3 端点收字面量元组：(a,b)/(a,b,c) 直填（GGB 同款）。字面量
+        // 端点走 image 缓存 + calc 闭包（标签端随动、字面端定值；全字面量
+        // 静态）——产物形态与 needPts 两点形式一致
+        CmdPt p1a, p2a;
+        const bool p1ok = cmdPointArg(a[0], p1a);
+        const bool p2ok = p1ok ? cmdPointArg(a[1], p2a) : false;
+        if (p1ok && p2ok) {
+            const bool anyLit = p1a.lit || p2a.lit;
+            if (cmdLower == "segment") {
+                auto s = std::make_unique<GeoSegment>();
+                s->cmdName = "Segment";
+                s->cmdArgs = { a[0], a[1] };
+                if (!anyLit) {
+                    s->p1 = p1a.ref;
+                    s->p2 = p2a.ref;
+                    s->inputs = { p1a.ref, p2a.ref };
+                } else {
+                    s->image = true;
+                    CmdPt A = p1a, B = p2a;
+                    s->calc = [A, B](GeoSegment *g) {
+                        g->ix1 = A.ref ? A.ref->x : A.x;
+                        g->iy1 = A.ref ? A.ref->y : A.y;
+                        g->iz1 = A.ref ? A.ref->z : A.z;
+                        g->ix2 = B.ref ? B.ref->x : B.x;
+                        g->iy2 = B.ref ? B.ref->y : B.y;
+                        g->iz2 = B.ref ? B.ref->z : B.z;
+                    };
+                    if (p1a.ref) s->inputs.push_back(p1a.ref);
+                    if (p2a.ref) s->inputs.push_back(p2a.ref);
+                    s->update();
+                }
+                made = std::move(s);
+                return true;
+            }
+            if (p1a.is3D || p2a.is3D) {
+                // 空间直线（任一端三维）：image 缓存含 z（字面量端点）
+                auto l3 = std::make_unique<GeoLine3>();
+                l3->cmdName = "Line";
+                l3->cmdArgs = { a[0], a[1] };
+                if (!anyLit) {
+                    l3->p1 = p1a.ref;
+                    l3->p2 = p2a.ref;
+                    l3->inputs = { p1a.ref, p2a.ref };
+                } else {
+                    l3->image = true;
+                    CmdPt A = p1a, B = p2a;
+                    l3->calc = [A, B](GeoLine3 *L) {
+                        L->ix1 = A.ref ? A.ref->x : A.x;
+                        L->iy1 = A.ref ? A.ref->y : A.y;
+                        L->iz1 = A.ref ? A.ref->z : A.z;
+                        L->ix2 = B.ref ? B.ref->x : B.x;
+                        L->iy2 = B.ref ? B.ref->y : B.y;
+                        L->iz2 = B.ref ? B.ref->z : B.z;
+                    };
+                    if (p1a.ref) l3->inputs.push_back(p1a.ref);
+                    if (p2a.ref) l3->inputs.push_back(p2a.ref);
+                    l3->update();
+                }
+                made = std::move(l3);
+                return true;
+            }
+            auto l = std::make_unique<GeoLine>();
+            l->cmdName = "Line";
+            l->cmdArgs = { a[0], a[1] };
+            if (!anyLit) {
+                l->mode = GeoLine::Mode::TwoPoints;
+                l->p1 = p1a.ref;
+                l->p2 = p2a.ref;
+                l->inputs = { p1a.ref, p2a.ref };
+                l->update();
+            } else {
+                l->mode = GeoLine::Mode::Fixed;
+                CmdPt A = p1a, B = p2a;
+                l->calc = [A, B](GeoLine *L) {
+                    const double ax = A.ref ? A.ref->x : A.x;
+                    const double ay = A.ref ? A.ref->y : A.y;
+                    const double bx = B.ref ? B.ref->x : B.x;
+                    const double by = B.ref ? B.ref->y : B.y;
+                    L->a = ay - by;
+                    L->b = bx - ax;
+                    L->c = L->a * ax + L->b * ay;
+                    L->verticalConst = false;
+                };
+                if (p1a.ref) l->inputs.push_back(p1a.ref);
+                if (p2a.ref) l->inputs.push_back(p2a.ref);
+                l->update();
+            }
+            made = std::move(l);
+            return true;
+        }
         auto pts = needPts(2);
         if (!pts.empty()) {
             if (cmdLower == "segment") {
@@ -3797,6 +4003,64 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         return true;
     }
     if ((cmdLower == "ray" || cmdLower == "vector") && a.size() == 2) {
+        // 1.0.8.3 端点收字面量元组（同 Line/Segment；向量 image 缓存含
+        // iz1/iz2 三维分量，2D/3D 渲染 ex*/ez* 感知）
+        CmdPt p1a, p2a;
+        const bool p1ok = cmdPointArg(a[0], p1a);
+        const bool p2ok = p1ok ? cmdPointArg(a[1], p2a) : false;
+        if (p1ok && p2ok) {
+            const bool anyLit = p1a.lit || p2a.lit;
+            if (cmdLower == "ray") {
+                auto r = std::make_unique<GeoRay>();
+                r->cmdName = "Ray";
+                r->cmdArgs = { a[0], a[1] };
+                if (!anyLit) {
+                    r->p1 = p1a.ref;
+                    r->p2 = p2a.ref;
+                    r->inputs = { p1a.ref, p2a.ref };
+                } else {
+                    r->image = true;
+                    CmdPt A = p1a, B = p2a;
+                    r->calc = [A, B](GeoRay *g) {
+                        g->ix1 = A.ref ? A.ref->x : A.x;
+                        g->iy1 = A.ref ? A.ref->y : A.y;
+                        g->iz1 = A.ref ? A.ref->z : A.z;
+                        g->ix2 = B.ref ? B.ref->x : B.x;
+                        g->iy2 = B.ref ? B.ref->y : B.y;
+                        g->iz2 = B.ref ? B.ref->z : B.z;
+                    };
+                    if (p1a.ref) r->inputs.push_back(p1a.ref);
+                    if (p2a.ref) r->inputs.push_back(p2a.ref);
+                    r->update();
+                }
+                made = std::move(r);
+                return true;
+            }
+            auto v = std::make_unique<GeoVector>();
+            v->cmdName = "Vector";
+            v->cmdArgs = { a[0], a[1] };
+            if (!anyLit) {
+                v->p1 = p1a.ref;
+                v->p2 = p2a.ref;
+                v->inputs = { p1a.ref, p2a.ref };
+            } else {
+                v->image = true;
+                CmdPt A = p1a, B = p2a;
+                v->calc = [A, B](GeoVector *g) {
+                    g->ix1 = A.ref ? A.ref->x : A.x;
+                    g->iy1 = A.ref ? A.ref->y : A.y;
+                    g->iz1 = A.ref ? A.ref->z : A.z;
+                    g->ix2 = B.ref ? B.ref->x : B.x;
+                    g->iy2 = B.ref ? B.ref->y : B.y;
+                    g->iz2 = B.ref ? B.ref->z : B.z;
+                };
+                if (p1a.ref) v->inputs.push_back(p1a.ref);
+                if (p2a.ref) v->inputs.push_back(p2a.ref);
+                v->update();
+            }
+            made = std::move(v);
+            return true;
+        }
         auto pts = needPts(2);
         if (pts.empty()) {
             // 上游 语义 Vector(点, 向量) = 相等向量（自点出发的平移副本）。
@@ -3813,8 +4077,10 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             v->calc = [A, src](GeoVector *g) {
                 g->ix1 = A->x;
                 g->iy1 = A->y;
+                g->iz1 = A->z;
                 g->ix2 = A->x + src->ex2() - src->ex1();
                 g->iy2 = A->y + src->ey2() - src->ey1();
+                g->iz2 = A->z + src->ez2() - src->ez1();
             };
             v->inputs = { pt, u };
             v->cmdName = "Vector";
@@ -3924,27 +4190,66 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             made = nullptr;
             return true;
         }
-        double u1v = 0, u2v = 0, v1v = 0, v2v = 0;
-        if (!numArg(a[4], u1v) || !numArg(a[5], u2v)
-            || !numArg(a[7], v1v) || !numArg(a[8], v2v)) {
-            lastError = "参数范围须为数值（如 Surface(u, u·cos(v), u·sin(v), "
-                        "u, 0, 3, v, 0, 6.28)）";
-            made = nullptr;
-            return true;
-        }
-        if (!(u2v > u1v) || !(v2v > v1v)) {
-            lastError = "参数范围须满足 max > min";
-            made = nullptr;
-            return true;
-        }
+        // 1.0.8.3 范围收数值对象引用（滑条随动）：范围式 refs 模式解析，
+        // 引用并入 refDeps（update 按现值重解刷新缓存，滑条驱动重采样）；
+        // 纯字面量路径行为不变。范围不能引用参数本身
         auto sf = std::make_unique<GeoSurface>();
         sf->parametric = true;
         sf->uName = un;
         sf->vName = vn;
-        sf->u0 = u1v;
-        sf->u1 = u2v;
-        sf->v0 = v1v;
-        sf->v1 = v2v;
+        {
+            const char *rngName[4] = { "u 下限", "u 上限", "v 下限", "v 上限" };
+            const size_t rngIdx[4] = { 4, 5, 7, 8 };
+            Expr *rngExpr[4] = { &sf->rU0, &sf->rU1, &sf->rV0, &sf->rV1 };
+            bool anyRef = false;
+            for (int ri = 0; ri < 4; ++ri) {
+                std::string rerr;
+                if (!rngExpr[ri]->parse(a[rngIdx[ri]], rerr, std::string(), true)
+                    || rngExpr[ri]->containsX() || rngExpr[ri]->containsY()) {
+                    lastError = std::string(rngName[ri]) + "须为数值或数值对象: "
+                              + a[rngIdx[ri]];
+                    made = nullptr;
+                    return true;
+                }
+                for (const std::string &rn : rngExpr[ri]->refs()) {
+                    if (rn == un || rn == vn) {
+                        lastError = "参数范围不能引用参数本身: " + rn;
+                        made = nullptr;
+                        return true;
+                    }
+                    GeoNumeric *dn = dynamic_cast<GeoNumeric *>(lookup(rn));
+                    if (!dn) {
+                        lastError = "范围引用须为数值对象: " + rn;
+                        made = nullptr;
+                        return true;
+                    }
+                    anyRef = true;
+                    bool seen = false;
+                    for (const auto &d : sf->refDeps) {
+                        if (d.first == rn) { seen = true; break; }
+                    }
+                    if (!seen) {
+                        sf->refDeps.emplace_back(rn, dn);
+                        sf->inputs.push_back(dn);
+                    }
+                }
+            }
+            if (anyRef) sf->rangeRefs = true;
+            // 求值范围回写缓存（字面量直算 / 引用现值；rangeRefs 时此后
+            // update() 级联重解）
+            sf->u0 = sf->rEval(sf->rU0);
+            sf->u1 = sf->rEval(sf->rU1);
+            sf->v0 = sf->rEval(sf->rV0);
+            sf->v1 = sf->rEval(sf->rV1);
+            if (!(sf->u1 > sf->u0) || !(sf->v1 > sf->v0)
+                || !std::isfinite(sf->u0) || !std::isfinite(sf->u1)
+                || !std::isfinite(sf->v0) || !std::isfinite(sf->v1)) {
+                lastError = "参数范围须为数值且满足 max > min（如 Surface(u, "
+                            "u·cos(v), u·sin(v), u, 0, 3, v, 0, 6.28)）";
+                made = nullptr;
+                return true;
+            }
+        }
         const char *compName[3] = { "x", "y", "z" };
         Expr *compExpr[3] = { &sf->ex, &sf->ey, &sf->ez };
         for (int ci2 = 0; ci2 < 3; ++ci2) {
@@ -4101,6 +4406,84 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         }
         GeoElement *o1 = lookup(a[0]), *o2 = lookup(a[1]);
         if (!o1 || !o2) { lastError = "未找到对象 " + (o1 ? a[1] : a[0]); made = nullptr; return true; }
+        // 1.0.8.3 3D 交点（GGB AlgoIntersectPlanePlane / AlgoIntersectLinePlane
+        // 同口径）：Intersect(平面, 平面) → 交线（GeoLine3 image 缓存，平行/
+        // 共面 → 未定义）；Intersect(直线, 平面) → 交点（平行/共面 → 未定义）
+        GeoPlane *pa1 = dynamic_cast<GeoPlane *>(o1);
+        GeoPlane *pa2 = dynamic_cast<GeoPlane *>(o2);
+        GeoLine3 *l3a = dynamic_cast<GeoLine3 *>(o1);
+        GeoLine3 *l3b = dynamic_cast<GeoLine3 *>(o2);
+        if (pa1 && pa2) {
+            GeoPlane *P1 = pa1;
+            GeoPlane *P2 = pa2;
+            auto l3 = std::make_unique<GeoLine3>();
+            l3->image = true;
+            l3->inputs = { pa1, pa2 };
+            l3->cmdName = "Intersect";
+            l3->cmdArgs = { a[0], a[1] };
+            l3->calc = [P1, P2](GeoLine3 *L) {
+                // 方向 = 两法向叉积；过点 = 取方向绝对值最大分量归零解剩余
+                // 2×2（行列式 = ±D[k]，最大分量保证良态）
+                const double D[3] = { P1->b * P2->c - P1->c * P2->b,
+                                      P1->c * P2->a - P1->a * P2->c,
+                                      P1->a * P2->b - P1->b * P2->a };
+                const double n2 = D[0] * D[0] + D[1] * D[1] + D[2] * D[2];
+                if (n2 < 1e-18) {   // 平行/共面：无唯一交线
+                    L->ix1 = L->iy1 = L->iz1 = L->ix2 = L->iy2 = L->iz2 = NAN;
+                    return;
+                }
+                const double A[3] = { P1->a, P1->b, P1->c };
+                const double B[3] = { P2->a, P2->b, P2->c };
+                int k = 0;
+                if (fabs(D[1]) > fabs(D[k])) k = 1;
+                if (fabs(D[2]) > fabs(D[k])) k = 2;
+                const int i1 = (k + 1) % 3, i2 = (k + 2) % 3;
+                const double det = A[i1] * B[i2] - A[i2] * B[i1];
+                double u[3] = { 0, 0, 0 };
+                u[i1] = (P1->d * B[i2] - P2->d * A[i2]) / det;
+                u[i2] = (A[i1] * P2->d - B[i1] * P1->d) / det;
+                const double il = 1.0 / sqrt(n2);
+                L->ix1 = u[0];
+                L->iy1 = u[1];
+                L->iz1 = u[2];
+                L->ix2 = u[0] + D[0] * il;
+                L->iy2 = u[1] + D[1] * il;
+                L->iz2 = u[2] + D[2] * il;
+            };
+            l3->update();
+            made = std::move(l3);
+            return true;
+        }
+        if ((pa1 && l3b) || (l3a && pa2)) {
+            GeoLine3 *L3 = l3a ? l3a : l3b;
+            GeoPlane *PP = pa1 ? pa1 : pa2;
+            auto p = std::make_unique<GeoPoint>();
+            p->isFree = false;
+            p->pointSize = 4;
+            p->is3D = true;
+            p->color = { 0x64, 0x64, 0x64 };
+            p->inputs = { L3, PP };
+            p->cmdName = "Intersect";
+            p->cmdArgs = { a[0], a[1] };
+            p->calc = [L3, PP](GeoPoint *P) {
+                const double dx = L3->ex2() - L3->ex1();
+                const double dy = L3->ey2() - L3->ey1();
+                const double dz = L3->ez2() - L3->ez1();
+                const double s = dx * PP->a + dy * PP->b + dz * PP->c;
+                if (fabs(s) < 1e-12) {   // 直线与平面平行/共面
+                    P->x = P->y = P->z = NAN;
+                    return;
+                }
+                const double t = (PP->d - (L3->ex1() * PP->a + L3->ey1() * PP->b
+                                           + L3->ez1() * PP->c)) / s;
+                P->x = L3->ex1() + t * dx;
+                P->y = L3->ey1() + t * dy;
+                P->z = L3->ez1() + t * dz;
+            };
+            p->update();
+            made = std::move(p);
+            return true;
+        }
         auto mkPt = [&](int idx) -> std::unique_ptr<GeoPoint> {
             auto p = std::make_unique<GeoPoint>();
             p->isFree = false;
@@ -5595,6 +5978,75 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         std::vector<GeoElement *> inputs(srcs.begin(), srcs.end());
         finishList(out, bake, anyLit, std::move(inputs));
         return true;
+    }
+
+    // 1.0.8.3 单实参整式：Intersection(x>0∧x<3) / Union(x>0∨x<-3)——实参内
+    // 顶层连词（∧∨，ASCII &&/|| 由 InlineRegionDnf 归一）按组合区域意图
+    // 处理（§42 遗留：此前语句层连词把整式拆句，整式单实参收不了）。无
+    // 连词的单实参照旧走列表路径
+    if ((cmdLower == "intersection" || cmdLower == "union") && a.size() == 1) {
+        const std::string &one = a[0];
+        const bool hasConn = !ScanTextConn(one).empty() || ScanTextTopNeg(one);
+        if (!hasConn) {
+            // 无连词：静默走列表路径
+        } else {
+            std::vector<std::vector<GeoFunction::IneqCond>> cls;
+            std::string nerr;
+            if (InlineRegionDnf(one, cls, nerr)) {
+                // 内联原子引用校验（同两参 argDnf 口径）：须为已定义数值对象
+                bool refsOk = true;
+                for (const auto &cl : cls) {
+                    for (const auto &c : cl) {
+                        for (const Expr *side : { &c.l, &c.r }) {
+                            for (const std::string &rn : side->refs()) {
+                                if (!dynamic_cast<GeoNumeric *>(lookup(rn))) {
+                                    lastError = "内联区域实参含未知或非数值引用: " + rn;
+                                    refsOk = false;
+                                    break;
+                                }
+                            }
+                            if (!refsOk) break;
+                        }
+                        if (!refsOk) break;
+                    }
+                    if (!refsOk) break;
+                }
+                if (refsOk && !cls.empty() && cls.size() <= 32) {
+                    const bool isU = cmdLower == "union";
+                    auto f2 = std::make_unique<GeoFunction>();
+                    f2->cmdName = isU ? "Union" : "Intersection";
+                    f2->cmdArgs = { one };
+                    f2->src = f2->cmdName + "(" + one + ")";
+                    if (cls.size() == 1 && cls[0].size() == 1) {
+                        double vx2 = 0;
+                        int vop = 0;
+                        if (VerticalFromCond(cls[0][0], vx2, vop)) {
+                            f2->ineqOp = vop;
+                            f2->ineqVertical = true;
+                            f2->ineqX = vx2;
+                        } else {
+                            f2->ineqChain = std::move(cls[0]);
+                        }
+                    } else if (cls.size() == 1) {
+                        f2->ineqChain = std::move(cls[0]);
+                    } else {
+                        f2->ineqDNF = std::move(cls);
+                    }
+                    made = std::move(f2);
+                    return true;
+                }
+                if (refsOk) {
+                    lastError = "组合区域过复杂（条件句 ≤32）";
+                    made = nullptr;
+                    return true;
+                }
+                made = nullptr;
+                return true;
+            }
+            lastError = nerr.empty() ? "无法解析区域实参: " + one : nerr;
+            made = nullptr;
+            return true;
+        }
     }
 
     // Intersection(L1, L2) / Union(L1, L2)（1.0.7.5，GGB 列表语义）：交集/
@@ -9555,8 +10007,10 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->image = s->image;
             d->ix1 = s->ix1;
             d->iy1 = s->iy1;
+            d->iz1 = s->iz1;
             d->ix2 = s->ix2;
             d->iy2 = s->iy2;
+            d->iz2 = s->iz2;
             d->calc = s->calc;
             break;
         }
@@ -9567,6 +10021,7 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->b = s->b;
             d->c = s->c;
             d->verticalConst = s->verticalConst;
+            d->src = s->src;
             d->mode = s->mode;
             d->p1 = s->p1;
             d->p2 = s->p2;
@@ -9580,6 +10035,14 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             GeoRay *s = static_cast<GeoRay *>(src);
             d->p1 = s->p1;
             d->p2 = s->p2;
+            d->image = s->image;
+            d->ix1 = s->ix1;
+            d->iy1 = s->iy1;
+            d->iz1 = s->iz1;
+            d->ix2 = s->ix2;
+            d->iy2 = s->iy2;
+            d->iz2 = s->iz2;
+            d->calc = s->calc;
             break;
         }
         case GeoType::Vector: {
@@ -9592,8 +10055,10 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->image = s->image;
             d->ix1 = s->ix1;
             d->iy1 = s->iy1;
+            d->iz1 = s->iz1;
             d->ix2 = s->ix2;
             d->iy2 = s->iy2;
+            d->iz2 = s->iz2;
             d->calc = s->calc;
             break;
         }
@@ -9708,6 +10173,12 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->u1 = s->u1;
             d->v0 = s->v0;
             d->v1 = s->v1;
+            // 1.0.8.3 范围引用（滑条驱动重采样）随 refDeps 一并搬
+            d->rangeRefs = s->rangeRefs;
+            d->rU0 = s->rU0;
+            d->rU1 = s->rU1;
+            d->rV0 = s->rV0;
+            d->rV1 = s->rV1;
             d->refDeps = s->refDeps;
             d->inputs = s->inputs;
             break;
@@ -9739,6 +10210,15 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             GeoLine3 *s = static_cast<GeoLine3 *>(src);
             d->p1 = s->p1;
             d->p2 = s->p2;
+            // 1.0.8.3 交线/字面量端点 image 缓存与闭包
+            d->image = s->image;
+            d->ix1 = s->ix1;
+            d->iy1 = s->iy1;
+            d->iz1 = s->iz1;
+            d->ix2 = s->ix2;
+            d->iy2 = s->iy2;
+            d->iz2 = s->iz2;
+            d->calc = s->calc;
             break;
         }
         case GeoType::Plane: {
@@ -11797,8 +12277,13 @@ void Kernel::render(std::vector<DrawCmd> &out)
         }
         case GeoType::Segment: {
             GeoSegment *s = static_cast<GeoSegment *>(g.get());
-            // 1.0.8.1 三维端点线段只在 3D 视图绘制（像线段恒 2D）
-            if (!s->image && s->p1 && s->p2 && (s->p1->is3D || s->p2->is3D)) break;
+            // 1.0.8.1 三维端点线段只在 3D 视图绘制；1.0.8.3 image 缓存含
+            // 非零 z 或引用三维点（字面量三维线段）同理跳过
+            const bool seg3D2 = (!s->image && s->p1 && s->p2
+                                 && (s->p1->is3D || s->p2->is3D))
+                || (s->image && (s->ez1() != 0.0 || s->ez2() != 0.0
+                    || (s->p1 && s->p1->is3D) || (s->p2 && s->p2->is3D)));
+            if (seg3D2) break;
             DrawCmd d;
             d.op = DrawOp::Segment;
             d.color = ObjectColor(s->color, darkTheme);
@@ -11915,10 +12400,13 @@ void Kernel::render(std::vector<DrawCmd> &out)
         }
         case GeoType::Ray: {
             GeoRay *r = static_cast<GeoRay *>(g.get());
-            // 1.0.8.1 三维端点射线 3D 一期不绘（2D/3D 视图都跳过）
-            if ((r->p1 && r->p1->is3D) || (r->p2 && r->p2->is3D)) break;
-            double x1 = view.px(r->p1->x), y1 = view.py(r->p1->y);
-            double dx = view.px(r->p2->x) - x1, dy = view.py(r->p2->y) - y1;
+            // 1.0.8.1 三维端点射线 3D 一期不绘（2D/3D 视图都跳过）；
+            // 1.0.8.3 字面量端点含非零 z 同口径跳过
+            if ((r->p1 && r->p1->is3D) || (r->p2 && r->p2->is3D)
+                || r->ez1() != 0.0 || r->ez2() != 0.0) break;
+            // 1.0.8.3 字面量/混合端点走 image 缓存（ex1/ex2 感知）
+            double x1 = view.px(r->ex1()), y1 = view.py(r->ey1());
+            double dx = view.px(r->ex2()) - x1, dy = view.py(r->ey2()) - y1;
             double len = sqrt(dx * dx + dy * dy);
             if (len < 1e-9) break;
             // 延伸长度覆盖「起点到画布远角」：|p1| + 2×对角线（三角不等式
@@ -11948,8 +12436,13 @@ void Kernel::render(std::vector<DrawCmd> &out)
         }
         case GeoType::Vector: {
             GeoVector *v = static_cast<GeoVector *>(g.get());
-            // 1.0.8.1 三维端点向量只在 3D 视图绘制（相等向量像恒 2D）
-            if (!v->image && v->p1 && v->p2 && (v->p1->is3D || v->p2->is3D)) break;
+            // 1.0.8.1 三维端点向量只在 3D 视图绘制；1.0.8.3 image 缓存含
+            // 非零 z 或引用三维点（字面量三维向量/相等向量副本）同理跳过
+            const bool vec3D2 = (!v->image && v->p1 && v->p2
+                                 && (v->p1->is3D || v->p2->is3D))
+                || (v->image && (v->ez1() != 0.0 || v->ez2() != 0.0
+                    || (v->p1 && v->p1->is3D) || (v->p2 && v->p2->is3D)));
+            if (vec3D2) break;
             double x1 = view.px(v->ex1()), y1 = view.py(v->ey1());
             double x2 = view.px(v->ex2()), y2 = view.py(v->ey2());
             double dx = x2 - x1, dy = y2 - y1;
@@ -12362,6 +12855,12 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         case GeoType::Surface: {
             GeoSurface *sf = static_cast<GeoSurface *>(g.get());
             if (!sf->definable()) break;
+            // 1.0.8.3 动态范围失效（滑条使 max ≤ min / NaN）不绘制
+            if (sf->parametric && (!(sf->u1 > sf->u0) || !(sf->v1 > sf->v0)
+                || !std::isfinite(sf->u0) || !std::isfinite(sf->u1)
+                || !std::isfinite(sf->v0) || !std::isfinite(sf->v1))) {
+                break;
+            }
             const int N = 20;
             const double D = 5.0;
             const int W = N + 1;
@@ -12812,10 +13311,11 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         switch (g->type()) {
         case GeoType::Line3: {
             GeoLine3 *l3 = static_cast<GeoLine3 *>(g.get());
-            if (!l3->p1 || !l3->p2) break;
+            // 1.0.8.3 image 缓存感知（交线/字面量端点直线）；未定义跳绘
+            if (!l3->defined()) break;
             double x1, y1, x2, y2;
-            proj(l3->p1->x, l3->p1->y, l3->p1->z, x1, y1);
-            proj(l3->p2->x, l3->p2->y, l3->p2->z, x2, y2);
+            proj(l3->ex1(), l3->ey1(), l3->ez1(), x1, y1);
+            proj(l3->ex2(), l3->ey2(), l3->ez2(), x2, y2);
             double dx = x2 - x1, dy = y2 - y1;
             double len = sqrt(dx * dx + dy * dy);
             if (len < 1e-9) break;
@@ -12841,11 +13341,16 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         }
         case GeoType::Segment: {
             GeoSegment *s = static_cast<GeoSegment *>(g.get());
-            if (s->image || !s->p1 || !s->p2
-                || !(s->p1->is3D || s->p2->is3D)) break;
+            // 1.0.8.3 image 缓存线段（字面量端点）也进 3D：任一端 is3D 或
+            // 缓存 z 非零即按空间线段画
+            const bool seg3D = s->image
+                ? ((s->p1 && s->p1->is3D) || (s->p2 && s->p2->is3D)
+                   || s->ez1() != 0.0 || s->ez2() != 0.0)
+                : (s->p1 && s->p2 && (s->p1->is3D || s->p2->is3D));
+            if (!seg3D) break;
             double x1, y1, x2, y2;
-            proj(s->p1->x, s->p1->y, s->p1->z, x1, y1);
-            proj(s->p2->x, s->p2->y, s->p2->z, x2, y2);
+            proj(s->ex1(), s->ey1(), s->ez1(), x1, y1);
+            proj(s->ex2(), s->ey2(), s->ez2(), x2, y2);
             if (!ClipSegRect(x1, y1, x2, y2, xmn, ymn, xmx, ymx)) break;
             DrawCmd d;
             d.op = DrawOp::Segment;
@@ -12863,11 +13368,16 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         }
         case GeoType::Vector: {
             GeoVector *v = static_cast<GeoVector *>(g.get());
-            if (v->image || !v->p1 || !v->p2
-                || !(v->p1->is3D || v->p2->is3D)) break;
+            // 1.0.8.3 image 缓存向量（字面量端点/相等向量副本）也进 3D 渲染：
+            // 任一端 is3D 或缓存 z 非零即按空间向量画
+            const bool vec3D = v->image
+                ? ((v->p1 && v->p1->is3D) || (v->p2 && v->p2->is3D)
+                   || v->ez1() != 0.0 || v->ez2() != 0.0)
+                : (v->p1 && v->p2 && (v->p1->is3D || v->p2->is3D));
+            if (!vec3D) break;
             double x1, y1, x2, y2;
-            proj(v->p1->x, v->p1->y, v->p1->z, x1, y1);
-            proj(v->p2->x, v->p2->y, v->p2->z, x2, y2);
+            proj(v->ex1(), v->ey1(), v->ez1(), x1, y1);
+            proj(v->ex2(), v->ey2(), v->ez2(), x2, y2);
             double dx = x2 - x1, dy = y2 - y1;
             if (sqrt(dx * dx + dy * dy) < 1e-9) break;
             double cx1 = x1, cy1 = y1, cx2 = x2, cy2 = y2;
@@ -13024,7 +13534,14 @@ std::string Kernel::getXml() const
         }
         case GeoType::Line: {
             GeoLine *l = static_cast<GeoLine *>(g);
-            AppendCommandXml(o, *l);   // Line/PerpendicularLine（含过点平行）
+            if (!l->cmdName.empty()) {
+                AppendCommandXml(o, *l);   // Line/PerpendicularLine（含过点平行）
+            } else if (!l->src.empty()) {
+                // 1.0.8.3 坐标常量线（x=3）：表达式原文重放（载入 input()
+                // 裸输入命中 x=/y= 直线入口）
+                o += "<expression label=\"" + XmlEsc(l->label) + "\" exp=\""
+                   + XmlEsc(l->src) + "\"/>\n";
+            }
             AppendElementHead(o, *l, "line");
             AppendLineStyle(o, l->lineThickness);
             break;

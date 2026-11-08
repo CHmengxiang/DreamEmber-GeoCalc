@@ -300,6 +300,23 @@ napi_value Kernel3DReset(napi_env env, napi_callback_info)
     return ToNapi(env, RenderFrame3D());
 }
 
+// kernel3DPan(dx, dy): string — 1.0.8.3 视图平移（双指拖动像素增量）后返回重绘帧
+napi_value Kernel3DPan(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = { nullptr, nullptr };
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 2) {
+        napi_throw_error(env, nullptr, "kernel3DPan requires (dx, dy)");
+        return nullptr;
+    }
+    double dx = 0, dy = 0;
+    napi_get_value_double(env, argv[0], &dx);
+    napi_get_value_double(env, argv[1], &dy);
+    g_kernel.view3d.panBy(dx, dy);
+    return ToNapi(env, RenderFrame3D());
+}
+
 // kernel3DPick(px, py): string — 命中三维自由点则记住并返回 "+|label"，否则 "-|"
 napi_value Kernel3DPick(napi_env env, napi_callback_info info)
 {
@@ -890,6 +907,7 @@ void DreamemberRegisterKernelApis(napi_env env, napi_value exports)
         { "kernel3DRotate", nullptr, Kernel3DRotate, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernel3DZoom", nullptr, Kernel3DZoom, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernel3DReset", nullptr, Kernel3DReset, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernel3DPan", nullptr, Kernel3DPan, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernel3DPick", nullptr, Kernel3DPick, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernel3DDragPoint", nullptr, Kernel3DDragPoint, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelPickPoint", nullptr, KernelPickPoint, nullptr, nullptr, nullptr, napi_default, nullptr },

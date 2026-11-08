@@ -16,6 +16,8 @@ export const kernelRender3D: (width: number, height: number, uiScale?: number, d
 export const kernel3DRotate: (dx: number, dy: number) => string;
 export const kernel3DZoom: (factor: number) => string;
 export const kernel3DReset: () => string;
+// 1.0.8.3 3D 视图平移（双指拖动像素增量）
+export const kernel3DPan: (dx: number, dy: number) => string;
 export const kernel3DPick: (px: number, py: number) => string;
 export const kernel3DDragPoint: (dx: number, dy: number) => string;
 export const kernelPickPoint: (px: number, py: number) => string;

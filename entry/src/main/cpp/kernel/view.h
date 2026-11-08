@@ -51,7 +51,8 @@ private:
 // 深度 depth = p·f（越大越远，供画家算法排序）。
 // 视窗世界范围固定 [−5,5]³（上游 3D 视图默认 x/y/z 范围），缩放改 scale、
 // 拖动改 yaw/pitch（轨道旋转：拖 x 转方位、拖 y 转仰角，仰角钳位 ±89.9°）。
-// r0/u0 为视图中心的世界投影（恒 0,0：相机始终看向原点，平移后补）。
+// r0/u0 为视图中心的世界投影（1.0.8.3 平移：双指拖动改 r0/u0，project 全
+// 场景随动；拖点 dragDelta 按位移向量解算，与中心无关不用改）。
 class EuclidianView3D {
 public:
     int width = 0, height = 0;
@@ -59,6 +60,7 @@ public:
     double yaw = 30.0;          // 方位角（度）：绕 z，30° 时 x 轴朝左下、y 朝右下
     double pitch = 20.0;        // 仰角（度）：>0 自上往下看
     double scale = 50.0;        // 每世界单位像素数（上游 SCALE_STANDARD 同值）
+    double r0 = 0.0, u0 = 0.0;  // 1.0.8.3 平移：视图中心在 right/up 轴上的世界投影
 
     void setCanvasSize(int w, int h, double uiScale2 = 1.0)
     {
@@ -80,8 +82,8 @@ public:
         const double X = -sa * x + ca * y;                 // p·r
         const double Y = -ca * sb * x - sa * sb * y + cb * z;   // p·u
         const double D = ca * cb * x + sa * cb * y + sb * z;    // p·f
-        px = cx() + X * scale;
-        py = cy() - Y * scale;
+        px = cx() + (X - r0) * scale;
+        py = cy() - (Y - u0) * scale;
         return D;
     }
     // 视平面拖动 → 世界位移（屏幕 dx,dy 像素 → 世界 dx·r − dy·u 方向）：
@@ -107,6 +109,13 @@ public:
         while (yaw >= 360.0) yaw -= 360.0;
         while (yaw < 0.0) yaw += 360.0;
     }
+    // 1.0.8.3 平移：屏幕像素增量（右/下为正）→ 中心沿视平面反向移动
+    //（world = (−dx/scale)·r + (dy/scale)·u，屏幕内容跟随手指）
+    void panBy(double dxPx, double dyPx)
+    {
+        r0 -= dxPx / scale;
+        u0 += dyPx / scale;
+    }
     void zoomBy(double factor)
     {
         if (factor <= 0.0) return;
@@ -118,6 +127,8 @@ public:
         yaw = 30.0;
         pitch = 20.0;
         scale = 50.0;
+        r0 = 0.0;
+        u0 = 0.0;
     }
 };
 

@@ -2,7 +2,8 @@
 // 画布本体：内核 render3D 出帧（底面网格/三轴/曲面网格/球柱线框/空间线/
 // 三维点，投影后与 2D 帧同协议），本组件持有帧执行器（与 CanvasView.execFrame
 // 同一套 op 语义）。
-// 交互：单指拖 = 轨道旋转（按在三维点上则视平面拖点）；双指捏 = 缩放；
+// 交互：单指拖 = 轨道旋转（按在三维点上则视平面拖点）；双指 = 缩放+平移
+//（1.0.8.3：质心拖动平移，距离比缩放）；
 // 点按 = 选中三维点（代数区联动）；PC 滚轮 = 缩放；「复位」= 视角回标准。
 // 刷新：宿主在输入/删除/滑条动画等变更后 bump AppStorage view3dRefresh，
 // 本组件 @StorageProp+@Watch 重取帧（代数区与本视图共享同一内核构造）。
@@ -38,11 +39,13 @@ export struct View3D {
   private canvasW: number = 0;
   private canvasH: number = 0;
   private uiScale: number = 1.0;
-  // 触摸状态：0=无 1=拖三维点 2=旋转 3=捏合
+  // 触摸状态：0=无 1=拖三维点 2=旋转 3=双指（捏合缩放+拖动平移）
   private mode: number = 0;
   private lastX: number = 0;      // vp
   private lastY: number = 0;
   private pinchDist: number = 0;
+  private pinchCx: number = 0;    // 双指质心（vp，1.0.8.3 平移基准）
+  private pinchCy: number = 0;
   private tapMoved: boolean = false;
   private downX: number = 0;
   private downY: number = 0;
@@ -252,11 +255,13 @@ export struct View3D {
             this.mode = 1;   // 拖三维点（kernel 内已记住命中点）
           }
         } else if (ev.touches.length >= 2) {
-          this.mode = 3;   // 捏合
+          this.mode = 3;   // 双指：捏合缩放 + 质心拖动平移（GGB 3D 口径）
           dreamemberKernel.kernelEndDrag();   // 取消拖点拾取
           const dx = ev.touches[0].x - ev.touches[1].x;
           const dy = ev.touches[0].y - ev.touches[1].y;
           this.pinchDist = Math.sqrt(dx * dx + dy * dy);
+          this.pinchCx = (ev.touches[0].x + ev.touches[1].x) / 2;
+          this.pinchCy = (ev.touches[0].y + ev.touches[1].y) / 2;
         }
         break;
       }
@@ -265,10 +270,19 @@ export struct View3D {
           const dx = ev.touches[0].x - ev.touches[1].x;
           const dy = ev.touches[0].y - ev.touches[1].y;
           const dist = Math.sqrt(dx * dx + dy * dy);
+          const cx = (ev.touches[0].x + ev.touches[1].x) / 2;
+          const cy = (ev.touches[0].y + ev.touches[1].y) / 2;
+          // 1.0.8.3 双指手势：距离比 → 缩放，质心位移 → 平移（两次内核
+          // 变更合并取末帧一次重绘）
           if (this.pinchDist > 1e-6 && dist > 1e-6) {
-            this.execFrame(dreamemberKernel.kernel3DZoom(dist / this.pinchDist));
+            dreamemberKernel.kernel3DZoom(dist / this.pinchDist);
           }
+          const dpx = this.toPx(cx - this.pinchCx, cy - this.pinchCy);
+          const frame = dreamemberKernel.kernel3DPan(dpx[0], dpx[1]);
+          this.execFrame(frame);
           this.pinchDist = dist;
+          this.pinchCx = cx;
+          this.pinchCy = cy;
           this.tapMoved = true;
           break;
         }
@@ -373,7 +387,7 @@ export struct View3D {
       .margin({ left: 8, top: 44 })
 
       // 左上提示条（交互说明；深浅色自适应半透明底）
-      Text('单指拖=旋转 · 双指=缩放 · 点选/拖动三维点')
+      Text('单指拖=旋转 · 双指=缩放/平移 · 点选/拖动三维点')
         .fontSize(11)
         .fontColor(Theme.sub(this.dark))
         .padding({ left: 10, right: 10, top: 4, bottom: 4 })

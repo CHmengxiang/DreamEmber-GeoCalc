@@ -236,6 +236,7 @@ std::string GeoLine::definitionText() const
 {
     std::string d = cmdDefText();
     if (!d.empty()) return d;
+    if (!src.empty()) return src;   // 1.0.8.3 坐标常量线 x=3 / y=3 原文回填
     switch (mode) {
     case Mode::TwoPoints:
         if (p1 && p2) return std::string("Line(") + p1->label + ", " + p2->label + ")";
@@ -302,9 +303,9 @@ std::string GeoFunction::definitionText() const
 
 std::string GeoRay::valueText() const
 {
-    if (!p1 || !p2) return "Ray";
-    double a = p1->y - p2->y, b = p2->x - p1->x;
-    double c = a * p1->x + b * p1->y;
+    if (!image && (!p1 || !p2)) return "Ray";
+    double a = ey1() - ey2(), b = ex2() - ex1();
+    double c = a * ex1() + b * ey1();
     return LineEqText(a, b, c);
 }
 
@@ -312,7 +313,7 @@ std::string GeoRay::definitionText() const
 {
     std::string d = cmdDefText();
     if (!d.empty()) return d;
-    if (p1 && p2) return std::string("Ray(") + p1->label + ", " + p2->label + ")";
+    if (!image && p1 && p2) return std::string("Ray(") + p1->label + ", " + p2->label + ")";
     return "Ray";
 }
 
@@ -540,10 +541,11 @@ std::string GeoCylinder::definitionText() const
 
 std::string GeoLine3::valueText() const
 {
-    if (!p1 || !p2) return "直线";
-    const double dx = p2->x - p1->x, dy = p2->y - p1->y, dz = p2->z - p1->z;
-    return "X = (" + FormatNum(p1->x) + ", " + FormatNum(p1->y) + ", "
-         + FormatNum(p1->z) + ") + t·(" + FormatNum(dx) + ", "
+    if (!image && (!p1 || !p2)) return "直线";
+    if (image && (!std::isfinite(ix1) || !std::isfinite(ix2))) return "未定义";
+    const double dx = ex2() - ex1(), dy = ey2() - ey1(), dz = ez2() - ez1();
+    return "X = (" + FormatNum(ex1()) + ", " + FormatNum(ey1()) + ", "
+         + FormatNum(ez1()) + ") + t·(" + FormatNum(dx) + ", "
          + FormatNum(dy) + ", " + FormatNum(dz) + ")";
 }
 
@@ -551,7 +553,7 @@ std::string GeoLine3::definitionText() const
 {
     std::string d = cmdDefText();
     if (!d.empty()) return d;
-    if (p1 && p2) return std::string("Line(") + p1->label + ", " + p2->label + ")";
+    if (!image && p1 && p2) return std::string("Line(") + p1->label + ", " + p2->label + ")";
     return "Line";
 }
 

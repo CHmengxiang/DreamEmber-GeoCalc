@@ -99,15 +99,19 @@ class GeoSegment : public GeoElement {
 public:
     GeoSegment() : GeoElement(GeoType::Segment) {}
     GeoPoint *p1 = nullptr, *p2 = nullptr;
-    // 变换像：端点缓存（image=true 时几何取缓存而非 p1/p2）
+    // 变换像：端点缓存（image=true 时几何取缓存而非 p1/p2）。
+    // 1.0.8.3 字面量/混合端点线段同走缓存，iz1/iz2 补三维 z 分量
     bool image = false;
     double ix1 = 0, iy1 = 0, ix2 = 0, iy2 = 0;
+    double iz1 = 0, iz2 = 0;
     std::function<void(GeoSegment *)> calc;
 
     double ex1() const { return image ? ix1 : p1->x; }
     double ey1() const { return image ? iy1 : p1->y; }
+    double ez1() const { return image ? iz1 : (p1 ? p1->z : 0.0); }
     double ex2() const { return image ? ix2 : p2->x; }
     double ey2() const { return image ? iy2 : p2->y; }
+    double ez2() const { return image ? iz2 : (p2 ? p2->z : 0.0); }
     void update() override { if (calc) calc(this); }
     std::string valueText() const override;
     std::string definitionText() const override;
@@ -121,6 +125,9 @@ public:
     GeoLine() : GeoElement(GeoType::Line) {}
     double a = 0, b = 0, c = 0;
     bool verticalConst = false;
+    // 1.0.8.3 坐标常量线（x=3 / y=3，GGB 口径竖直/水平直线）的定义原文
+    //（"x=3"；右部可含数值引用）——定义列回填与 .ggb 表达式重放用
+    std::string src;
     Mode mode = Mode::Fixed;
     GeoPoint *p1 = nullptr, *p2 = nullptr;   // TwoPoints / PerpBisector(A,B)
     GeoPoint *pt = nullptr;                  // Perp/ParallelThrough 的过点；AngleBisector 顶点
@@ -273,6 +280,20 @@ class GeoRay : public GeoElement {
 public:
     GeoRay() : GeoElement(GeoType::Ray) {}
     GeoPoint *p1 = nullptr, *p2 = nullptr;
+    // 1.0.8.3 字面量/混合端点（Ray(A, (a,b)) 等）：image 缓存（同 GeoSegment
+    // 变换像模式）+ calc 闭包随标签端重算；image=true 时几何取缓存。
+    // iz1/iz2 补三维 z 分量（射线 3D 渲染一期未做，仅用于 2D 跳绘判定）
+    bool image = false;
+    double ix1 = 0, iy1 = 0, ix2 = 0, iy2 = 0;
+    double iz1 = 0, iz2 = 0;
+    std::function<void(GeoRay *)> calc;
+    double ex1() const { return image ? ix1 : p1->x; }
+    double ey1() const { return image ? iy1 : p1->y; }
+    double ez1() const { return image ? iz1 : (p1 ? p1->z : 0.0); }
+    double ex2() const { return image ? ix2 : p2->x; }
+    double ey2() const { return image ? iy2 : p2->y; }
+    double ez2() const { return image ? iz2 : (p2 ? p2->z : 0.0); }
+    void update() override { if (calc) calc(this); }
     std::string valueText() const override;
     std::string definitionText() const override;
 };
@@ -357,15 +378,19 @@ class GeoVector : public GeoElement {
 public:
     GeoVector() : GeoElement(GeoType::Vector) { color = {51, 51, 204}; }
     GeoPoint *p1 = nullptr, *p2 = nullptr;
-    // 相等向量：起/终点缓存（image=true 时几何取缓存而非 p1/p2）
+    // 相等向量：起/终点缓存（image=true 时几何取缓存而非 p1/p2）。
+    // 1.0.8.3 字面量/混合端点向量同走缓存，iz1/iz2 补三维 z 分量
     bool image = false;
     double ix1 = 0, iy1 = 0, ix2 = 0, iy2 = 0;
+    double iz1 = 0, iz2 = 0;
     std::function<void(GeoVector *)> calc;
 
     double ex1() const { return image ? ix1 : p1->x; }
     double ey1() const { return image ? iy1 : p1->y; }
+    double ez1() const { return image ? iz1 : (p1 ? p1->z : 0.0); }
     double ex2() const { return image ? ix2 : p2->x; }
     double ey2() const { return image ? iy2 : p2->y; }
+    double ez2() const { return image ? iz2 : (p2 ? p2->z : 0.0); }
     void update() override { if (calc) calc(this); }
     std::string valueText() const override;
     std::string definitionText() const override;
@@ -390,7 +415,22 @@ public:
     bool parametric = false;
     std::string uName = "u", vName = "v";
     Expr ex, ey, ez;                    // x/y/z 分量（parametric 时有效）
-    double u0 = 0, u1 = 1, v0 = 0, v1 = 1;   // 参数范围（仅数值字面量）
+    double u0 = 0, u1 = 1, v0 = 0, v1 = 1;   // 参数范围（缓存值，update 刷新）
+    // 1.0.8.3 范围引用：范围参数可为数值对象（滑条）——范围式 refs 模式
+    // 解析（引用并入 refDeps），update 时按现值重解刷新缓存（滑条驱动
+    // 重采样）；无引用时缓存即字面量，update 空转
+    bool rangeRefs = false;
+    Expr rU0, rU1, rV0, rV1;
+    double rEval(const Expr &e) const
+    {
+        return e.evalXYResolved(0.0, 0.0,
+            [this](const std::string &nm) -> double {
+                for (const auto &d : refDeps) {
+                    if (d.first == nm) return d.second->value;
+                }
+                return NAN;
+            });
+    }
     double evalAt(double x, double y) const
     {
         if (refDeps.empty()) return body.evalXY(x, y);
@@ -418,6 +458,15 @@ public:
         oz = ez.evalXYResolved(0.0, 0.0, res);
     }
     bool definable() const { return parametric || !body.empty(); }
+    void update() override
+    {
+        if (rangeRefs) {
+            u0 = rEval(rU0);
+            u1 = rEval(rU1);
+            v0 = rEval(rV0);
+            v1 = rEval(rV1);
+        }
+    }
     std::string valueText() const override;
     std::string definitionText() const override;
 };
@@ -459,6 +508,23 @@ class GeoLine3 : public GeoElement {
 public:
     GeoLine3() : GeoElement(GeoType::Line3) { color = {0, 0, 0}; }
     GeoPoint *p1 = nullptr, *p2 = nullptr;
+    // 1.0.8.3 交线产物（Intersect(平面, 平面)）：image 缓存 + calc 闭包（同
+    // GeoSegment 变换像模式）；两平面平行/共面 → 六值 NaN，值列 "未定义"
+    bool image = false;
+    double ix1 = 0, iy1 = 0, iz1 = 0, ix2 = 0, iy2 = 0, iz2 = 0;
+    std::function<void(GeoLine3 *)> calc;
+    double ex1() const { return image ? ix1 : p1->x; }
+    double ey1() const { return image ? iy1 : p1->y; }
+    double ez1() const { return image ? iz1 : p1->z; }
+    double ex2() const { return image ? ix2 : p2->x; }
+    double ey2() const { return image ? iy2 : p2->y; }
+    double ez2() const { return image ? iz2 : p2->z; }
+    bool defined() const
+    {
+        if (image) return std::isfinite(ix1) && std::isfinite(ix2);
+        return p1 != nullptr && p2 != nullptr;
+    }
+    void update() override { if (calc) calc(this); }
     std::string valueText() const override;
     std::string definitionText() const override;
 };
