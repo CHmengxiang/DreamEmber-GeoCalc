@@ -103,8 +103,9 @@ std::string GeoPoint::definitionText() const
 
 std::string GeoSegment::valueText() const
 {
-    double dx = ex2() - ex1(), dy = ey2() - ey1();
-    return FormatNum(sqrt(dx * dx + dy * dy));
+    // 1.0.8.10 含 z：三维线段代数区显示真长（2D 段 dz=0 不变）
+    double dx = ex2() - ex1(), dy = ey2() - ey1(), dz = ez2() - ez1();
+    return FormatNum(sqrt(dx * dx + dy * dy + dz * dz));
 }
 
 std::string GeoSegment::definitionText() const

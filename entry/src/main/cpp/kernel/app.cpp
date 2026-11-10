@@ -4441,6 +4441,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         n->cmdArgs = { a[0], a[1] };
         n->inputs = { o1, o2 };
         n->isAngleVal = true;   // 角语义（度）
+        n->visible = true;      // 1.0.8.10 扇面随角值绘制（代数行可关）
         n->update();
         made = std::move(n);
         return true;
@@ -14421,6 +14422,251 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         default:
             break;
         }
+    }
+
+    // 1.0.8.10 双参角扇面：Angle(平面,平面)/(直线系,平面)/(直线系,直线系) 在
+    // 交线/交点处画扇面（GGB 弧口径取锐角侧，半径 1 世界单位，弧缘 + 两半径
+    // + 浅填充）。形式由 inputs 类型现场重推，弧几何世界坐标现算（随对象
+    // 重定义联动）；平行面/平行线/异面/线面平行（含线在面内）/线⊥面（投影
+    // 退化为点）/0° 不画。扇面在全部对象之后发射（叠于平面填充上），填充
+    // 透明度按扇心 veilAt 调淡
+    const std::string fanC = darkTheme ? "#7FD1A8" : "#1C7E54";
+    for (auto &g : geos_) {
+        if (g->type() != GeoType::Numeric || !g->visible) continue;
+        GeoNumeric *n = static_cast<GeoNumeric *>(g.get());
+        if (!n->isAngleVal || n->inputs.size() != 2 || n->isSlider
+            || !std::isfinite(n->value) || n->value <= 1e-9) continue;
+        GeoElement *o1 = n->inputs[0], *o2 = n->inputs[1];
+        GeoPlane *pa = dynamic_cast<GeoPlane *>(o1);
+        GeoPlane *pb = dynamic_cast<GeoPlane *>(o2);
+        const int form = pa && pb ? 1 : (pa || pb ? 2 : 3);
+        auto unit3 = [](double x, double y, double z,
+                        double &ux, double &uy, double &uz) -> bool {
+            const double l = sqrt(x * x + y * y + z * z);
+            if (!(l > 1e-12)) return false;
+            ux = x / l;
+            uy = y / l;
+            uz = z / l;
+            return true;
+        };
+        auto dirOfEl = [](GeoElement *e, double &dx, double &dy,
+                          double &dz) -> bool {
+            if (GeoLine3 *l = dynamic_cast<GeoLine3 *>(e)) {
+                if (!l->defined()) return false;
+                dx = l->ex2() - l->ex1();
+                dy = l->ey2() - l->ey1();
+                dz = l->ez2() - l->ez1();
+                return true;
+            }
+            if (GeoLine *l = dynamic_cast<GeoLine *>(e)) {
+                dx = l->b;
+                dy = -l->a;
+                dz = 0;
+                return true;
+            }
+            if (GeoSegment *sg = dynamic_cast<GeoSegment *>(e)) {
+                dx = sg->ex2() - sg->ex1();
+                dy = sg->ey2() - sg->ey1();
+                dz = sg->ez2() - sg->ez1();
+                return true;
+            }
+            if (GeoRay *r = dynamic_cast<GeoRay *>(e)) {
+                dx = r->ex2() - r->ex1();
+                dy = r->ey2() - r->ey1();
+                dz = r->ez2() - r->ez1();
+                return true;
+            }
+            return false;
+        };
+        auto ptOfEl = [](GeoElement *e, double &px, double &py,
+                         double &pz) -> bool {
+            if (GeoLine3 *l = dynamic_cast<GeoLine3 *>(e)) {
+                if (!l->defined()) return false;
+                px = l->ex1();
+                py = l->ey1();
+                pz = l->ez1();
+                return true;
+            }
+            if (GeoSegment *sg = dynamic_cast<GeoSegment *>(e)) {
+                px = sg->ex1();
+                py = sg->ey1();
+                pz = sg->ez1();
+                return true;
+            }
+            if (GeoRay *r = dynamic_cast<GeoRay *>(e)) {
+                px = r->ex1();
+                py = r->ey1();
+                pz = r->ez1();
+                return true;
+            }
+            if (GeoLine *l = dynamic_cast<GeoLine *>(e)) {
+                // 2D 直线离原点最近参考点（z=0）
+                const double q = l->a * l->a + l->b * l->b;
+                if (!(q > 1e-15)) return false;
+                px = l->a * l->c / q;
+                py = l->b * l->c / q;
+                pz = 0;
+                return true;
+            }
+            return false;
+        };
+        double cx = 0, cy = 0, cz = 0;        // 扇心
+        double u1x = 0, u1y = 0, u1z = 0;     // 弧起向
+        double u2x = 0, u2y = 0, u2z = 0;     // 弧终向（u1·u2 ≥ 0，夹角=值）
+        bool ok = false;
+        if (form == 1) {
+            const double l1 = sqrt(pa->a * pa->a + pa->b * pa->b + pa->c * pa->c);
+            const double l2 = sqrt(pb->a * pb->a + pb->b * pb->b + pb->c * pb->c);
+            if (!(l1 > 1e-12) || !(l2 > 1e-12)) continue;
+            double n1x = pa->a / l1, n1y = pa->b / l1, n1z = pa->c / l1;
+            double n2x = pb->a / l2, n2y = pb->b / l2, n2z = pb->c / l2;
+            const double dd1 = pa->d / l1, dd2 = pb->d / l2;
+            const double c = n1x * n2x + n1y * n2y + n1z * n2z;
+            if (1.0 - fabs(c) < 1e-12) continue;   // 平行面不画
+            // 交线方向 L̂ = n̂1×n̂2；交线上离原点最近点 X = α n̂1 + β n̂2
+            //（n̂1·X=d1, n̂2·X=d2, L̂·X=0 解三元组）
+            double lx = n1y * n2z - n1z * n2y, ly = n1z * n2x - n1x * n2z,
+                   lz = n1x * n2y - n1y * n2x;
+            if (!unit3(lx, ly, lz, lx, ly, lz)) continue;
+            const double den = 1.0 - c * c;
+            const double al = (dd1 - c * dd2) / den, be = (dd2 - c * dd1) / den;
+            cx = al * n1x + be * n2x;
+            cy = al * n1y + be * n2y;
+            cz = al * n1z + be * n2z;
+            // 两面内垂直于交线的方向：u1 = n̂1×L̂, u2 = n̂2×L̂（u1·u2 = c，
+            // 翻 u2 号使弧张角 = acos|c|）
+            double w1x = n1y * lz - n1z * ly, w1y = n1z * lx - n1x * lz,
+                   w1z = n1x * ly - n1y * lx;
+            double w2x = n2y * lz - n2z * ly, w2y = n2z * lx - n2x * lz,
+                   w2z = n2x * ly - n2y * lx;
+            if (!unit3(w1x, w1y, w1z, u1x, u1y, u1z)
+                || !unit3(w2x, w2y, w2z, u2x, u2y, u2z)) continue;
+            if (u1x * u2x + u1y * u2y + u1z * u2z < 0) {
+                u2x = -u2x;
+                u2y = -u2y;
+                u2z = -u2z;
+            }
+            ok = true;
+        } else if (form == 2) {
+            GeoPlane *fp = pa ? pa : pb;
+            GeoElement *le = pa ? o2 : o1;
+            const double ln = sqrt(fp->a * fp->a + fp->b * fp->b + fp->c * fp->c);
+            if (!(ln > 1e-12)) continue;
+            double n1x = fp->a / ln, n1y = fp->b / ln, n1z = fp->c / ln;
+            const double dd = fp->d / ln;
+            double dx, dy, dz;
+            if (!dirOfEl(le, dx, dy, dz)) continue;
+            if (!unit3(dx, dy, dz, dx, dy, dz)) continue;
+            double s = n1x * dx + n1y * dy + n1z * dz;
+            if (fabs(s) < 1e-9) continue;          // 线∥面（含在面内）不画
+            if (s < 0) { dx = -dx; dy = -dy; dz = -dz; s = -s; }
+            // 穿点：X = P + t·d̂，n̂·X = d → t = (d − n̂·P)/s
+            double px, py, pz;
+            if (!ptOfEl(le, px, py, pz)) continue;
+            const double t = (dd - (n1x * px + n1y * py + n1z * pz)) / s;
+            cx = px + t * dx;
+            cy = py + t * dy;
+            cz = pz + t * dz;
+            u1x = dx;
+            u1y = dy;
+            u1z = dz;
+            // 面内投影方向 proj = d̂ − s·n̂（线⊥面时退化为零向量，不画）
+            double vx = dx - s * n1x, vy = dy - s * n1y, vz = dz - s * n1z;
+            if (!unit3(vx, vy, vz, u2x, u2y, u2z)) continue;
+            ok = true;
+        } else {
+            double d1x, d1y, d1z, d2x, d2y, d2z;
+            if (!dirOfEl(o1, d1x, d1y, d1z) || !dirOfEl(o2, d2x, d2y, d2z)) {
+                continue;
+            }
+            if (!unit3(d1x, d1y, d1z, d1x, d1y, d1z)
+                || !unit3(d2x, d2y, d2z, d2x, d2y, d2z)) continue;
+            const double c = d1x * d2x + d1y * d2y + d1z * d2z;
+            if (1.0 - fabs(c) < 1e-12) continue;   // 平行线不画
+            double p1x, p1y, p1z, p2x, p2y, p2z;
+            if (!ptOfEl(o1, p1x, p1y, p1z) || !ptOfEl(o2, p2x, p2y, p2z)) {
+                continue;
+            }
+            // 最近点对重合（相交）才画：PI = P1+sc·û, PJ = P2+tc·v̂
+            const double w0x = p1x - p2x, w0y = p1y - p2y, w0z = p1z - p2z;
+            const double b = c;
+            const double dq = d1x * w0x + d1y * w0y + d1z * w0z;
+            const double e = d2x * w0x + d2y * w0y + d2z * w0z;
+            const double den = 1.0 - b * b;
+            const double sc = (b * e - dq) / den, tc = (e - b * dq) / den;
+            const double ix = p1x + sc * d1x, iy = p1y + sc * d1y,
+                         iz = p1z + sc * d1z;
+            const double jx = p2x + tc * d2x, jy = p2y + tc * d2y,
+                         jz = p2z + tc * d2z;
+            const double gap = sqrt((ix - jx) * (ix - jx) + (iy - jy) * (iy - jy)
+                                    + (iz - jz) * (iz - jz));
+            if (!(gap < 1e-9)) continue;           // 异面不画
+            cx = ix;
+            cy = iy;
+            cz = iz;
+            u1x = d1x;
+            u1y = d1y;
+            u1z = d1z;
+            u2x = d2x;
+            u2y = d2y;
+            u2z = d2z;
+            if (u1x * u2x + u1y * u2y + u1z * u2z < 0) {
+                u2x = -u2x;
+                u2y = -u2y;
+                u2z = -u2z;
+            }
+            ok = true;
+        }
+        if (!ok) continue;
+        // 弧参数：w = (u2 − cosθ·u1)/sinθ（单位、⊥u1），φ=θ 时恰达 u2
+        const double cc = std::max(-1.0,
+            std::min(1.0, u1x * u2x + u1y * u2y + u1z * u2z));
+        const double th = acos(cc);
+        if (!(th > 1e-9)) continue;
+        const double sn = sqrt(std::max(0.0, 1.0 - cc * cc));
+        if (!(sn > 1e-9)) continue;
+        const double ax = (u2x - cc * u1x) / sn, ay = (u2y - cc * u1y) / sn,
+                     az = (u2z - cc * u1z) / sn;
+        const double R = 1.0;
+        const int NS = 24;
+        std::vector<float> fan;                 // FillPoly: 扇心 + 弧点
+        std::vector<float> rim;                 // 弧缘折线
+        double hx, hy;
+        proj(cx, cy, cz, hx, hy);
+        fan.push_back((float)hx);
+        fan.push_back((float)hy);
+        for (int q = 0; q <= NS; ++q) {
+            const double ph = th * q / NS;
+            const double wx = cx + R * (std::cos(ph) * u1x + std::sin(ph) * ax);
+            const double wy = cy + R * (std::cos(ph) * u1y + std::sin(ph) * ay);
+            const double wz = cz + R * (std::cos(ph) * u1z + std::sin(ph) * az);
+            double ppx, ppy;
+            proj(wx, wy, wz, ppx, ppy);
+            fan.push_back((float)ppx);
+            fan.push_back((float)ppy);
+            rim.push_back((float)ppx);
+            rim.push_back((float)ppy);
+        }
+        const double veil = veilAt(cx, cy, cz);
+        DrawCmd fill;
+        fill.op = DrawOp::FillPoly;
+        fill.color = rgbaOfHex(fanC, 0.22 * veil);
+        fill.pts = fan;
+        out.push_back(fill);
+        DrawCmd rads;
+        rads.op = DrawOp::MultiSeg;
+        rads.color = fanC;
+        rads.lineWidth = 1.4f * (float)us;
+        rads.pts = { (float)hx, (float)hy, fan[2], fan[3],
+                     (float)hx, (float)hy, rim[rim.size() - 2],
+                     rim[rim.size() - 1] };
+        out.push_back(rads);
+        DrawCmd rm;
+        rm.op = DrawOp::Polyline;
+        rm.color = fanC;
+        rm.lineWidth = 1.6f * (float)us;
+        rm.pts = rim;
+        out.push_back(rm);
     }
 }
 

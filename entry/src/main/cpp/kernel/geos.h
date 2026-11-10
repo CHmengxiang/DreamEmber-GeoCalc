@@ -243,7 +243,9 @@ public:
     {
         // 1.0.6.6 ∞：IEEE 除零/溢出与 ∞ 常量按官方显示（NAN 维持 "?"）
         if (std::isinf(value)) return value > 0 ? "∞" : "-∞";
-        return boolLike ? (value != 0.0 ? "true" : "false") : FormatNum(value);
+        if (boolLike) return value != 0.0 ? "true" : "false";
+        // 1.0.8.10 角度值数值带 °（GGB 口径；GeoAngle 同款）
+        return isAngleVal ? FormatNum(value) + "°" : FormatNum(value);
     }
     std::string definitionText() const override
     {
