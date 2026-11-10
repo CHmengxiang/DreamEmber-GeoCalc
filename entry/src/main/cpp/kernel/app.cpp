@@ -4168,6 +4168,81 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                     return true;
                 }
             }
+            // 1.0.8.9 Distance(空间直线, 平面)：平行 → 点面距离，相交 → 0；
+            // Distance(空间直线, 空间直线)：异面 → 公垂线距离 |w·(u×v)|/|u×v|，
+            // 平行 → 点线距离，相交 → 0（系数现值实时读取）
+            if (!dlOk) {
+                GeoElement *e1 = lookup(a[0]);
+                GeoElement *e2 = lookup(a[1]);
+                GeoPlane *dpl4 = nullptr;
+                GeoElement *L1 = nullptr, *L2 = nullptr;
+                int dform = 0;   // 1=线面 2=线线
+                if (e1 && e2) {
+                    GeoLine3 *la = dynamic_cast<GeoLine3 *>(e1);
+                    GeoLine3 *lb3 = dynamic_cast<GeoLine3 *>(e2);
+                    GeoPlane *plA = dynamic_cast<GeoPlane *>(e1);
+                    GeoPlane *plB = dynamic_cast<GeoPlane *>(e2);
+                    if (la && plB) { dform = 1; L1 = la; dpl4 = plB; }
+                    else if (lb3 && plA) { dform = 1; L1 = lb3; dpl4 = plA; }
+                    else if (la && lb3) { dform = 2; L1 = la; L2 = lb3; }
+                }
+                if (dform != 0) {
+                    lastError.clear();
+                    GeoElement *E1 = L1;
+                    GeoElement *E2 = L2;
+                    GeoPlane *PL2 = dpl4;
+                    const int DF = dform;
+                    auto n = std::make_unique<GeoNumeric>();
+                    n->calc = [DF, E1, E2, PL2]() {
+                        GeoLine3 *L = dynamic_cast<GeoLine3 *>(E1);
+                        if (!L || !L->defined()) return 0.0;
+                        const double dx = L->ex2() - L->ex1();
+                        const double dy = L->ey2() - L->ey1();
+                        const double dz = L->ez2() - L->ez1();
+                        if (DF == 1) {
+                            const double nl = sqrt(PL2->a * PL2->a
+                                                   + PL2->b * PL2->b
+                                                   + PL2->c * PL2->c);
+                            if (!(nl > 1e-15)) return 0.0;
+                            const double den = (PL2->a * dx + PL2->b * dy
+                                                + PL2->c * dz) / nl;
+                            if (fabs(den) > 1e-12) return 0.0;   // 相交
+                            return fabs(PL2->a * L->ex1() + PL2->b * L->ey1()
+                                        + PL2->c * L->ez1() - PL2->d) / nl;
+                        }
+                        GeoLine3 *M = dynamic_cast<GeoLine3 *>(E2);
+                        if (!M || !M->defined()) return 0.0;
+                        const double ex = M->ex2() - M->ex1();
+                        const double ey = M->ey2() - M->ey1();
+                        const double ez = M->ez2() - M->ez1();
+                        const double cx = dy * ez - dz * ey;
+                        const double cy = dz * ex - dx * ez;
+                        const double cz = dx * ey - dy * ex;
+                        const double cl = sqrt(cx * cx + cy * cy + cz * cz);
+                        const double wx = M->ex1() - L->ex1();
+                        const double wy = M->ey1() - L->ey1();
+                        const double wz = M->ez1() - L->ez1();
+                        if (cl < 1e-12) {
+                            // 平行：M 起点到直线 L 的点线距离
+                            const double ul = sqrt(dx * dx + dy * dy + dz * dz);
+                            if (!(ul > 1e-12)) return 0.0;
+                            const double px = wy * dz - wz * dy;
+                            const double py = wz * dx - wx * dz;
+                            const double pz = wx * dy - wy * dx;
+                            return sqrt(px * px + py * py + pz * pz) / ul;
+                        }
+                        // 异面/相交：|w·(u×v)|/|u×v|（相交时分子为 0）
+                        return fabs(wx * cx + wy * cy + wz * cz) / cl;
+                    };
+                    n->cmd = "Distance(" + e1->label + ", " + e2->label + ")";
+                    n->cmdName = "Distance";
+                    n->cmdArgs = { e1->label, e2->label };
+                    n->inputs = { e1, e2 };
+                    n->update();
+                    made = std::move(n);
+                    return true;
+                }
+            }
             if (dlOk) {
                 lastError.clear();   // needPts 的"未找到点"不再适用
                 GeoPoint *P = dp;
@@ -4263,10 +4338,10 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         }
         GeoPlane *pa1 = dynamic_cast<GeoPlane *>(o1);
         GeoPlane *pa2 = dynamic_cast<GeoPlane *>(o2);
-        GeoLine3 *l3a = dynamic_cast<GeoLine3 *>(o1);
-        GeoLine3 *l3b = dynamic_cast<GeoLine3 *>(o2);
-        GeoLine *ln1 = dynamic_cast<GeoLine *>(o1);
-        GeoLine *ln2 = dynamic_cast<GeoLine *>(o2);
+        auto lineish = [](GeoElement *e) -> bool {
+            return dynamic_cast<GeoLine3 *>(e) || dynamic_cast<GeoLine *>(e)
+                || dynamic_cast<GeoSegment *>(e) || dynamic_cast<GeoRay *>(e);
+        };
         int form = 0;   // 1=面面 2=线面 3=线线
         GeoPlane *f1 = nullptr, *f2 = nullptr;
         GeoElement *s1 = nullptr, *s2 = nullptr;
@@ -4274,29 +4349,21 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             form = 1;
             f1 = pa1;
             f2 = pa2;
-        } else if ((pa1 && l3b) || (l3a && pa2)) {
+        } else if (pa1 && lineish(o2)) {
             form = 2;
-            f1 = pa1 ? pa1 : pa2;
-            s1 = l3a ? l3a : l3b;
-        } else if (l3a && l3b) {
+            f1 = pa1;
+            s1 = o2;
+        } else if (pa2 && lineish(o1)) {
+            form = 2;
+            f1 = pa2;
+            s1 = o1;
+        } else if (lineish(o1) && lineish(o2)) {
             form = 3;
-            s1 = l3a;
-            s2 = l3b;
-        } else if (ln1 && ln2) {
-            form = 3;
-            s1 = ln1;
-            s2 = ln2;
-        } else if (l3a && ln2) {
-            form = 3;
-            s1 = l3a;
-            s2 = ln2;
-        } else if (ln1 && l3b) {
-            form = 3;
-            s1 = ln1;
-            s2 = l3b;
+            s1 = o1;
+            s2 = o2;
         }
         if (form == 0) {
-            lastError = "Angle 需要（点, 顶点, 点）或（平面/直线, 平面/直线）";
+            lastError = "Angle 需要（点, 顶点, 点）或（平面/直线/线段/射线 组合）";
             made = nullptr;
             return true;
         }
@@ -4327,6 +4394,19 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                     dx = l->b;
                     dy = -l->a;
                     dz = 0;
+                    return true;
+                }
+                // 1.0.8.9 线段/射线方向源（端点差，image 感知）
+                if (GeoSegment *sg = dynamic_cast<GeoSegment *>(e)) {
+                    dx = sg->ex2() - sg->ex1();
+                    dy = sg->ey2() - sg->ey1();
+                    dz = sg->ez2() - sg->ez1();
+                    return true;
+                }
+                if (GeoRay *r = dynamic_cast<GeoRay *>(e)) {
+                    dx = r->ex2() - r->ex1();
+                    dy = r->ey2() - r->ey1();
+                    dz = r->ez2() - r->ez1();
                     return true;
                 }
                 return false;
