@@ -13453,6 +13453,110 @@ void Kernel::render(std::vector<DrawCmd> &out)
             // 滑动条改在代数区行内渲染（真机反馈），画布不再绘制；
             // Integral 填充在此绘制（半透明填充 + 边界竖线，上游 同视觉）
             GeoNumeric *n = static_cast<GeoNumeric *>(g.get());
+            // 1.1.0.2 双参角 2D 弧：线线相交处画角扇面（GeoAngle 同视觉，
+            // 锐角侧）；3D 直线/含 z 端点线系不画（3D 视图扇面分管立体情形）
+            if (n->isAngleVal && n->visible && n->inputs.size() == 2
+                && std::isfinite(n->value) && n->value > 1e-9) {
+                GeoElement *q1 = n->inputs[0], *q2 = n->inputs[1];
+                auto is2DL = [](GeoElement *e, double &dx, double &dy,
+                                double &px, double &py) -> bool {
+                    if (dynamic_cast<GeoLine3 *>(e)) return false;
+                    if (GeoLine *l = dynamic_cast<GeoLine *>(e)) {
+                        const double q = l->a * l->a + l->b * l->b;
+                        if (!(q > 1e-15)) return false;
+                        dx = l->b;
+                        dy = -l->a;
+                        px = l->a * l->c / q;
+                        py = l->b * l->c / q;
+                        return true;
+                    }
+                    if (GeoSegment *sg = dynamic_cast<GeoSegment *>(e)) {
+                        if (sg->ez1() != 0.0 || sg->ez2() != 0.0) return false;
+                        dx = sg->ex2() - sg->ex1();
+                        dy = sg->ey2() - sg->ey1();
+                        px = sg->ex1();
+                        py = sg->ey1();
+                        return sqrt(dx * dx + dy * dy) > 1e-12;
+                    }
+                    if (GeoRay *r = dynamic_cast<GeoRay *>(e)) {
+                        if (r->ez1() != 0.0 || r->ez2() != 0.0) return false;
+                        dx = r->ex2() - r->ex1();
+                        dy = r->ey2() - r->ey1();
+                        px = r->ex1();
+                        py = r->ey1();
+                        return sqrt(dx * dx + dy * dy) > 1e-12;
+                    }
+                    return false;
+                };
+                double d1x, d1y, q1x, q1y, d2x, d2y, q2x, q2y;
+                if (is2DL(q1, d1x, d1y, q1x, q1y)
+                    && is2DL(q2, d2x, d2y, q2x, q2y)) {
+                    const double den = d1x * d2y - d1y * d2x;
+                    if (fabs(den) > 1e-12) {
+                        const double tt0 = ((q2x - q1x) * d2y
+                                            - (q2y - q1y) * d2x) / den;
+                        const double ix = q1x + tt0 * d1x;
+                        const double iy = q1y + tt0 * d1y;
+                        double u1x = d1x, u1y = d1y, u2x = d2x, u2y = d2y;
+                        const double l1 = sqrt(u1x * u1x + u1y * u1y);
+                        const double l2 = sqrt(u2x * u2x + u2y * u2y);
+                        if (l1 > 1e-12 && l2 > 1e-12) {
+                            u1x /= l1; u1y /= l1; u2x /= l2; u2y /= l2;
+                            if (u1x * u2x + u1y * u2y < 0) {
+                                u2x = -u2x; u2y = -u2y;
+                            }
+                            const double bx = view.px(ix), by = view.py(iy);
+                            double w0 = atan2(u1y, u1x);
+                            const double w1a = atan2(u2y, u2x);
+                            double ccw = w1a - w0;
+                            while (ccw < 0) ccw += 2 * M_PI;
+                            // 锐角侧（值 = acos|u1·u2| ∈ [0,π/2]）
+                            if (ccw > M_PI) {
+                                w0 = w1a;
+                                ccw = 2 * M_PI - ccw;
+                            }
+                            if (ccw > 1e-9) {
+                                const double R2 = 26.0 * view.uiScale;
+                                DrawCmd fill2;
+                                fill2.op = DrawOp::FillPoly;
+                                fill2.color = RgbaFromHex(
+                                    darkTheme ? "#7FD1A8" : "#1C7E54", 0.12);
+                                const int nseg = std::min(64, std::max(
+                                    8, (int)std::ceil(ccw * 24.0 / M_PI)));
+                                fill2.pts.push_back((float)bx);
+                                fill2.pts.push_back((float)by);
+                                for (int i = 0; i <= nseg; ++i) {
+                                    const double tt = (-w0 - ccw)
+                                                     + ccw * i / nseg;
+                                    fill2.pts.push_back(
+                                        (float)(bx + cos(tt) * R2));
+                                    fill2.pts.push_back(
+                                        (float)(by + sin(tt) * R2));
+                                }
+                                out.push_back(fill2);
+                                DrawCmd d2;
+                                d2.op = DrawOp::Arc;
+                                d2.color = darkTheme ? "#7FD1A8" : "#1C7E54";
+                                d2.lineWidth = 1.6f;
+                                d2.pts = { (float)bx, (float)by, (float)R2,
+                                           (float)(-w0 - ccw), (float)(-w0) };
+                                out.push_back(d2);
+                                const double wm = w0 + ccw / 2;
+                                DrawCmd lb2;
+                                lb2.op = DrawOp::Text;
+                                lb2.color = d2.color;
+                                lb2.pts = {
+                                    (float)(bx + cos(wm)
+                                            * (R2 + 14 * view.uiScale)),
+                                    (float)(by - sin(wm)
+                                            * (R2 + 14 * view.uiScale)) };
+                                lb2.text = FormatNum(n->value) + "°";
+                                out.push_back(lb2);
+                            }
+                        }
+                    }
+                }
+            }
             if (n->fill && n->fill->on && n->fill->fn && n->fill->fn->definable()) {
                 const double a = std::min(n->fill->a, n->fill->b);
                 const double b = std::max(n->fill->a, n->fill->b);
@@ -14856,6 +14960,19 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         rm.lineWidth = 1.6f * (float)us;
         rm.pts = rim;
         out.push_back(rm);
+        // 1.1.0.2 扇面角值标签（GGB 弧旁标度数）：弧中角平分方向外推
+        const double phm = th / 2.0;
+        double lpx, lpy;
+        proj(cx + (R + 0.35) * (std::cos(phm) * u1x + std::sin(phm) * ax),
+             cy + (R + 0.35) * (std::cos(phm) * u1y + std::sin(phm) * ay),
+             cz + (R + 0.35) * (std::cos(phm) * u1z + std::sin(phm) * az),
+             lpx, lpy);
+        DrawCmd lbv;
+        lbv.op = DrawOp::Text;
+        lbv.color = fanC;
+        lbv.pts = { (float)lpx, (float)lpy };
+        lbv.text = FormatNum(n->value) + "°";
+        out.push_back(lbv);
     }
 }
 

@@ -571,7 +571,12 @@ std::string GeoSphere::definitionText() const
 std::string GeoCylinder::valueText() const
 {
     double r = radiusNum ? radiusNum->value : radius;
-    double h = heightNum ? heightNum->value : height;
+    // 1.1.0.2 h 随顶底心现值（字面量顶心形式的 height 字段不更新——
+    // 1.0.8.6 起；访问器口径与渲染一致，各形式 tcz() 回退均自洽）
+    double h = heightNum
+                   ? heightNum->value
+                   : sqrt(pow(tcx() - bcx(), 2.0) + pow(tcy() - bcy(), 2.0)
+                          + pow(tcz() - bcz(), 2.0));
     return "r=" + FormatNum(r) + "，h=" + FormatNum(h);
 }
 
