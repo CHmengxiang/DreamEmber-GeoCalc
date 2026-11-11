@@ -520,6 +520,34 @@ std::string GeoCircle3::definitionText() const
     return d.empty() ? "Circle3" : d;
 }
 
+std::string GeoConic3::valueText() const
+{
+    // 1.1.0.1 圆=Circle3 口径；椭圆=中心+长短半轴（参数化奇异值，闭式
+    // 长轴 R/|cos∠(法,轴)| 短轴 R）；平行直线=条数口径
+    if (!defined()) return "未定义";
+    if (kind == 2) return tangent ? "一条直线（切线）" : "两条平行直线";
+    const double gu = ux * ux + uy * uy + uz * uz;
+    const double gv = vx * vx + vy * vy + vz * vz;
+    const double guv = ux * vx + uy * vy + uz * vz;
+    const double tr = gu + gv;
+    const double disc = sqrt(std::max(0.0, tr * tr / 4.0
+                                        - (gu * gv - guv * guv)));
+    const double sa = sqrt(tr / 2.0 + disc), sb = sqrt(tr / 2.0 - disc);
+    if (kind == 0) {
+        return "圆心 (" + FormatNum(cx) + ", " + FormatNum(cy) + ", "
+             + FormatNum(cz) + ")，半径 " + FormatNum(sa);
+    }
+    return "中心 (" + FormatNum(cx) + ", " + FormatNum(cy) + ", "
+         + FormatNum(cz) + ")，长半轴 " + FormatNum(sa) + "，短半轴 "
+         + FormatNum(sb);
+}
+
+std::string GeoConic3::definitionText() const
+{
+    std::string d = cmdDefText();
+    return d.empty() ? "Conic3" : d;
+}
+
 std::string GeoSphere::valueText() const
 {
     double r = radius;

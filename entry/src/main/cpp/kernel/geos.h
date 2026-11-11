@@ -12,7 +12,7 @@
 namespace dreamember {
 
 enum class GeoType { Point, Segment, Line, Ray, Vector, Circle, Polygon, Function, Numeric, Angle, List, Text,
-                     Surface, Sphere, Cylinder, Line3, Plane, Circle3 };
+                     Surface, Sphere, Cylinder, Line3, Plane, Circle3, Conic3 };
 
 struct GeoColor {
     int r = 0, g = 0, b = 0;
@@ -587,6 +587,39 @@ public:
     {
         return std::isfinite(cx) && std::isfinite(cy) && std::isfinite(cz)
             && std::isfinite(r) && r > 0.0;
+    }
+    void update() override { if (calc) calc(this); }
+    std::string valueText() const override;
+    std::string definitionText() const override;
+};
+
+// 圆锥曲线 3D（1.1.0.1 Intersect(平面, 圆柱)：GGB 无限二次曲面口径——柱面
+// 代数上无限，截线不裁高度）。kind 0=圆（面⊥轴）| 1=椭圆（斜交，整周参数
+// X = C + cos t·U + sin t·V，U/V 非正交但张成截面）| 2=两条平行直线（面∥轴，
+// ∥柱轴，相切合一）。未定义 → 全 NaN（相离/退化）
+class GeoConic3 : public GeoElement {
+public:
+    GeoConic3() : GeoElement(GeoType::Conic3) { color = {0, 0, 0}; }
+    int kind = 0;
+    double cx = 0, cy = 0, cz = 0;   // 中心（圆心）
+    double ux = 0, uy = 0, uz = 0;   // U（t=0 向）
+    double vx = 0, vy = 0, vz = 0;   // V
+    // kind 2：两直线过点 + 公共方向（∥柱轴）
+    double p1x = 0, p1y = 0, p1z = 0;
+    double p2x = 0, p2y = 0, p2z = 0;
+    double wx = 0, wy = 0, wz = 0;
+    bool tangent = false;            // 相切 → 单直线
+    std::function<void(GeoConic3 *)> calc;
+    bool defined() const
+    {
+        if (kind == 2) {
+            return std::isfinite(p1x) && std::isfinite(p1y) && std::isfinite(p1z)
+                && std::isfinite(p2x) && std::isfinite(p2y) && std::isfinite(p2z)
+                && std::isfinite(wx) && std::isfinite(wy) && std::isfinite(wz);
+        }
+        return std::isfinite(cx) && std::isfinite(cy) && std::isfinite(cz)
+            && std::isfinite(ux) && std::isfinite(uy) && std::isfinite(uz)
+            && std::isfinite(vx) && std::isfinite(vy) && std::isfinite(vz);
     }
     void update() override { if (calc) calc(this); }
     std::string valueText() const override;

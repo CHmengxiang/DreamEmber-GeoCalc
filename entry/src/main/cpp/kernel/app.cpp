@@ -5198,6 +5198,107 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             made = std::move(c3);
             return true;
         }
+        // 1.1.0.1 交圆锥曲线（GGB 无限二次曲面口径——柱面代数上无限，截线
+        // 不裁高度）：Intersect(平面, 圆柱)→面⊥轴出圆 / 斜交出椭圆 /
+        // 面∥轴出两条平行直线（相切合一、相离未定义）；两参序容错
+        GeoCylinder *cy1 = dynamic_cast<GeoCylinder *>(o1);
+        GeoCylinder *cy2 = dynamic_cast<GeoCylinder *>(o2);
+        if ((pa1 && cy2) || (cy1 && pa2)) {
+            GeoPlane *PP = pa1 ? pa1 : pa2;
+            GeoCylinder *CY = cy1 ? cy1 : cy2;
+            auto cn = std::make_unique<GeoConic3>();
+            cn->inputs = { PP, CY };
+            cn->cmdName = "Intersect";
+            cn->cmdArgs = { a[0], a[1] };
+            GeoPlane *P2 = PP;
+            GeoCylinder *C2 = CY;
+            cn->calc = [P2, C2](GeoConic3 *g) {
+                g->kind = 0;
+                g->tangent = false;
+                g->cx = g->cy = g->cz = g->ux = g->uy = g->uz =
+                    g->vx = g->vy = g->vz = g->p1x = g->p1y = g->p1z =
+                    g->p2x = g->p2y = g->p2z = g->wx = g->wy = g->wz = NAN;
+                const double nl = sqrt(P2->a * P2->a + P2->b * P2->b
+                                       + P2->c * P2->c);
+                if (!(nl > 1e-12)) return;
+                const double n1 = P2->a / nl, n2 = P2->b / nl, n3 = P2->c / nl;
+                const double dd = P2->d / nl;
+                const double bx = C2->bcx(), by = C2->bcy(), bz = C2->bcz();
+                const double wx0 = C2->tcx() - bx, wy0 = C2->tcy() - by,
+                             wz0 = C2->tcz() - bz;
+                const double wl = sqrt(wx0 * wx0 + wy0 * wy0 + wz0 * wz0);
+                if (!(wl > 1e-12)) return;
+                const double w1 = wx0 / wl, w2 = wy0 / wl, w3 = wz0 / wl;
+                double R = C2->radius;
+                if (C2->radiusNum) R = C2->radiusNum->value;
+                if (!std::isfinite(R) || !(R > 1e-12)) return;
+                // 轴正交基（最小分量叉积法）
+                double e1x, e1y, e1z;
+                if (fabs(w1) <= fabs(w2) && fabs(w1) <= fabs(w3)) {
+                    e1x = 0; e1y = w3; e1z = -w2;
+                } else if (fabs(w2) <= fabs(w3)) {
+                    e1x = -w3; e1y = 0; e1z = w1;
+                } else {
+                    e1x = w2; e1y = -w1; e1z = 0;
+                }
+                const double el = sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+                if (!(el > 1e-12)) return;
+                e1x /= el; e1y /= el; e1z /= el;
+                const double e2x = w2 * e1z - w3 * e1y;
+                const double e2y = w3 * e1x - w1 * e1z;
+                const double e2z = w1 * e1y - w2 * e1x;
+                const double c = n1 * w1 + n2 * w2 + n3 * w3;
+                const double k = dd - (n1 * bx + n2 * by + n3 * bz);
+                if (fabs(c) > 1.0 - 1e-9) {
+                    // 面 ⊥ 轴 → 圆（无限柱恒有圆，圆心 = B + (k/c)·w）
+                    const double sc = k / c;
+                    g->kind = 0;
+                    g->cx = bx + sc * w1;
+                    g->cy = by + sc * w2;
+                    g->cz = bz + sc * w3;
+                    g->ux = R * e1x; g->uy = R * e1y; g->uz = R * e1z;
+                    g->vx = R * e2x; g->vy = R * e2y; g->vz = R * e2z;
+                    return;
+                }
+                // 轴正交基内平面法向分量（面∥轴时 a²+b²=1，斜交 a²+b²=1−c²）
+                const double a1 = n1 * e1x + n2 * e1y + n3 * e1z;
+                const double b1 = n1 * e2x + n2 * e2y + n3 * e2z;
+                if (fabs(c) < 1e-9) {
+                    // 面 ∥ 轴 → 两条平行直线（∥轴）：R(a cos t + b sin t)=k
+                    const double kv = k / R;
+                    if (fabs(kv) > 1.0 + 1e-12) return;   // 相离 → 未定义
+                    const double phi = atan2(b1, a1);
+                    const double dl = acos(std::max(-1.0,
+                                                    std::min(1.0, kv)));
+                    const double tA = phi + dl, tB = phi - dl;
+                    g->kind = 2;
+                    g->tangent = dl < 1e-9;
+                    g->p1x = bx + R * (std::cos(tA) * e1x + std::sin(tA) * e2x);
+                    g->p1y = by + R * (std::cos(tA) * e1y + std::sin(tA) * e2y);
+                    g->p1z = bz + R * (std::cos(tA) * e1z + std::sin(tA) * e2z);
+                    g->p2x = bx + R * (std::cos(tB) * e1x + std::sin(tB) * e2x);
+                    g->p2y = by + R * (std::cos(tB) * e1y + std::sin(tB) * e2y);
+                    g->p2z = bz + R * (std::cos(tB) * e1z + std::sin(tB) * e2z);
+                    g->wx = w1; g->wy = w2; g->wz = w3;
+                    return;
+                }
+                // 斜交 → 椭圆（整周）：X(t) = C + cos t·U + sin t·V，
+                // U = R(e1 − (a/c)w)，V = R(e2 − (b/c)w)，C = B + (k/c)·w
+                g->kind = 1;
+                g->cx = bx + (k / c) * w1;
+                g->cy = by + (k / c) * w2;
+                g->cz = bz + (k / c) * w3;
+                g->ux = R * (e1x - (a1 / c) * w1);
+                g->uy = R * (e1y - (a1 / c) * w2);
+                g->uz = R * (e1z - (a1 / c) * w3);
+                g->vx = R * (e2x - (b1 / c) * w1);
+                g->vy = R * (e2y - (b1 / c) * w2);
+                g->vz = R * (e2z - (b1 / c) * w3);
+            };
+            cn->update();
+            made = std::move(cn);
+            return true;
+        }
         auto mkPt = [&](int idx) -> std::unique_ptr<GeoPoint> {
             auto p = std::make_unique<GeoPoint>();
             p->isFree = false;
@@ -9776,6 +9877,8 @@ void Kernel::algebraRows(std::vector<AlgebraRow> &out) const
         case GeoType::Plane: r.type = "plane"; break;
         // 1.0.8.5 交圆复用 "circle" 行类型（入「圆」分组，Line3 同款口径）
         case GeoType::Circle3: r.type = "circle"; break;
+        // 1.1.0.1 圆锥曲线独立行类型（入「圆锥曲线」分组）
+        case GeoType::Conic3: r.type = "conic"; break;
         case GeoType::Numeric: {
             GeoNumeric *n = static_cast<GeoNumeric *>(g.get());
             r.type = n->isSlider ? "slider" : "numeric";
@@ -10393,6 +10496,7 @@ std::string Kernel::propsOf(const std::string &label) const
     case GeoType::Line3: ty = "line"; break;
     case GeoType::Plane: ty = "plane"; break;
     case GeoType::Circle3: ty = "circle"; break;
+    case GeoType::Conic3: ty = "circle"; break;
     }
     add("type", ty);
     add("vis", g->visible ? "1" : "0");
@@ -10945,6 +11049,21 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->nx = s->nx;
             d->ny = s->ny;
             d->nz = s->nz;
+            d->calc = s->calc;
+            break;
+        }
+        case GeoType::Conic3: {
+            // 1.1.0.1 圆锥曲线重定义搬运（纯值缓存 + 闭包，无对象指针）
+            GeoConic3 *d = static_cast<GeoConic3 *>(dst);
+            GeoConic3 *s = static_cast<GeoConic3 *>(src);
+            d->kind = s->kind;
+            d->cx = s->cx; d->cy = s->cy; d->cz = s->cz;
+            d->ux = s->ux; d->uy = s->uy; d->uz = s->uz;
+            d->vx = s->vx; d->vy = s->vy; d->vz = s->vz;
+            d->p1x = s->p1x; d->p1y = s->p1y; d->p1z = s->p1z;
+            d->p2x = s->p2x; d->p2y = s->p2y; d->p2z = s->p2z;
+            d->wx = s->wx; d->wy = s->wy; d->wz = s->wz;
+            d->tangent = s->tangent;
             d->calc = s->calc;
             break;
         }
@@ -13432,6 +13551,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
         case GeoType::Line3:
         case GeoType::Plane:
         case GeoType::Circle3:
+        case GeoType::Conic3:
             break;
         }
     }
@@ -14051,6 +14171,75 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             lb.pts = { (float)(labX + 6 * us), (float)(labY - 6 * us) };
             lb.text = c3->label;
             out.push_back(lb);
+            break;
+        }
+        case GeoType::Conic3: {
+            // 1.1.0.1 圆锥曲线：圆/椭圆 64 段参数采样闭合折线，逐段走 A4
+            // 遮挡拆段；平行直线走世界参数化延伸拆段（Line3 同款）
+            GeoConic3 *cn = static_cast<GeoConic3 *>(g.get());
+            if (!cn->defined()) break;
+            const std::string cnCol = ObjectColor(cn->color, darkTheme);
+            if (cn->kind == 2) {
+                const double wln = sqrt(cn->wx * cn->wx + cn->wy * cn->wy
+                                        + cn->wz * cn->wz);
+                if (!(wln > 1e-12)) break;
+                const double dwx = cn->wx / wln, dwy = cn->wy / wln,
+                             dwz = cn->wz / wln;
+                double lx1, ly1;
+                proj(cn->p1x, cn->p1y, cn->p1z, lx1, ly1);
+                double diag2 = sqrt((double)V.width * V.width
+                                    + (double)V.height * V.height);
+                double Lx1 = sqrt(lx1 * lx1 + ly1 * ly1) + 2 * diag2 + 20;
+                const double tE1 = Lx1 / V.scale + 1.0;
+                drawSplitSeg(cn->p1x - tE1 * dwx, cn->p1y - tE1 * dwy,
+                             cn->p1z - tE1 * dwz, cn->p1x + tE1 * dwx,
+                             cn->p1y + tE1 * dwy, cn->p1z + tE1 * dwz,
+                             cnCol, cn->lineThickness / 3.0f);
+                if (!cn->tangent) {
+                    double lx2, ly2;
+                    proj(cn->p2x, cn->p2y, cn->p2z, lx2, ly2);
+                    double Lx2 = sqrt(lx2 * lx2 + ly2 * ly2) + 2 * diag2 + 20;
+                    const double tE2 = Lx2 / V.scale + 1.0;
+                    drawSplitSeg(cn->p2x - tE2 * dwx, cn->p2y - tE2 * dwy,
+                                 cn->p2z - tE2 * dwz, cn->p2x + tE2 * dwx,
+                                 cn->p2y + tE2 * dwy, cn->p2z + tE2 * dwz,
+                                 cnCol, cn->lineThickness / 3.0f);
+                }
+                DrawCmd lb1;
+                lb1.op = DrawOp::Text;
+                lb1.color = cnCol;
+                lb1.pts = { (float)(lx1 + 6 * us), (float)(ly1 - 6 * us) };
+                lb1.text = cn->label;
+                out.push_back(lb1);
+                break;
+            }
+            const int NC = 64;
+            double labX2 = 0, labY2 = 0;
+            {
+                double ppx, ppy;
+                proj(cn->cx + cn->ux, cn->cy + cn->uy, cn->cz + cn->uz,
+                     ppx, ppy);
+                labX2 = ppx;
+                labY2 = ppy;
+            }
+            for (int i = 0; i < NC; ++i) {
+                const double t0 = 2.0 * M_PI * i / NC;
+                const double t1 = 2.0 * M_PI * (i + 1) / NC;
+                drawSplitSeg(
+                    cn->cx + std::cos(t0) * cn->ux + std::sin(t0) * cn->vx,
+                    cn->cy + std::cos(t0) * cn->uy + std::sin(t0) * cn->vy,
+                    cn->cz + std::cos(t0) * cn->uz + std::sin(t0) * cn->vz,
+                    cn->cx + std::cos(t1) * cn->ux + std::sin(t1) * cn->vx,
+                    cn->cy + std::cos(t1) * cn->uy + std::sin(t1) * cn->vy,
+                    cn->cz + std::cos(t1) * cn->uz + std::sin(t1) * cn->vz,
+                    cnCol, cn->lineThickness / 3.0f);
+            }
+            DrawCmd lb3;
+            lb3.op = DrawOp::Text;
+            lb3.color = cnCol;
+            lb3.pts = { (float)(labX2 + 6 * us), (float)(labY2 - 6 * us) };
+            lb3.text = cn->label;
+            out.push_back(lb3);
             break;
         }
         case GeoType::Polygon: {
@@ -14958,6 +15147,14 @@ std::string Kernel::getXml() const
             AppendCommandXml(o, *c3);
             AppendElementHead(o, *c3, "circle3");
             AppendLineStyle(o, c3->lineThickness);
+            break;
+        }
+        case GeoType::Conic3: {
+            // 1.1.0.1 圆锥曲线：命令产物走通用重放
+            GeoConic3 *cn = static_cast<GeoConic3 *>(g);
+            AppendCommandXml(o, *cn);
+            AppendElementHead(o, *cn, "conic3");
+            AppendLineStyle(o, cn->lineThickness);
             break;
         }
         }
