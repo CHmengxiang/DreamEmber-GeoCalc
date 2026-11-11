@@ -13832,6 +13832,11 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
 
     // 曲面（画家算法逐对象内排序）→ 线框体 → 线/线段/向量 → 点。
     // 对象间不做全局深度排序（一期取舍：对象交互少，视觉可接受）
+    // 1.1.0.4 收集-排序-发射三列表：填充（深度排序远→近先发）/ 描边
+    // （原序后发，veilAt 不变）/ 标签（末层，注记不被体填充埋没）
+    std::vector<std::pair<double, DrawCmd>> fillList;
+    std::vector<DrawCmd> strokeList;
+    std::vector<DrawCmd> labelList;
     // 1.0.8.4 A4 半空间遮挡：可见平面（fillAlpha≥0.02 且非侧棱目视）先裁剪
     // 到视图立方体作为遮挡体；其后线/线段/向量/点按平面穿越拆段，被遮挡段
     //（平面远侧 + 投影落填充多边形内）以剩余可见率 Π(1−fillAlpha) 透视绘制，
@@ -13917,6 +13922,9 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         double scx = 0, scy = 0, scz = 0, srad = 0;
         double cbx = 0, cby = 0, cbz = 0, cwx = 0, cwy = 0, cwz = 0;
         double crad = 0, chgt = 0;
+        // kind 3 曲面格片：poly + 平均深度
+        double qdep = 0;
+        const void *owner = nullptr;   // 所属对象（源实体背向面豁免用）
     };
     std::vector<Occ3> occs;
     for (auto &g : geos_) {
@@ -13925,6 +13933,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         const double nl = sqrt(pl->a * pl->a + pl->b * pl->b + pl->c * pl->c);
         if (!(nl > 1e-12) || pl->fillAlpha < 0.02) continue;
         Occ3 oc;
+        oc.owner = pl;
         oc.nx = pl->a / nl;
         oc.ny = pl->b / nl;
         oc.nz = pl->c / nl;
@@ -13960,6 +13969,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             if (!(r > 1e-12) || !std::isfinite(r)) continue;
             Occ3 oc;
             oc.kind = 1;
+            oc.owner = sp;
             oc.alpha = sp->fillAlpha;
             oc.scx = sp->ccx();
             oc.scy = sp->ccy();
@@ -13978,6 +13988,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             if (!(wl > 1e-12)) continue;
             Occ3 oc;
             oc.kind = 2;
+            oc.owner = cy;
             oc.alpha = cy->fillAlpha;
             oc.cbx = bx;
             oc.cby = by;
@@ -13988,6 +13999,61 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             oc.crad = r;
             oc.chgt = wl;
             occs.push_back(std::move(oc));
+        }
+    }
+    // 1.1.0.4 曲面遮挡体：20×20 格片（投影像素多边形 + 平均深度 + fillAlpha）
+    for (auto &g : geos_) {
+        if (!g->visible || g->type() != GeoType::Surface) continue;
+        GeoSurface *sf = static_cast<GeoSurface *>(g.get());
+        if (sf->fillAlpha < 0.003 || !sf->definable()) continue;
+        if (sf->parametric && (!(sf->u1 > sf->u0) || !(sf->v1 > sf->v0)
+            || !std::isfinite(sf->u0) || !std::isfinite(sf->u1)
+            || !std::isfinite(sf->v0) || !std::isfinite(sf->v1))) continue;
+        const int N = 20;
+        const double D = 5.0;
+        const int W = N + 1;
+        std::vector<double> pxs((size_t)W * W, 0.0), pys((size_t)W * W, 0.0),
+                            pds((size_t)W * W, 0.0);
+        std::vector<char> oks((size_t)W * W, 0);
+        for (int i = 0; i <= N; ++i) {
+            for (int j = 0; j <= N; ++j) {
+                double wx, wy, wz;
+                if (sf->parametric) {
+                    sf->evalUV(sf->u0 + (sf->u1 - sf->u0) * i / N,
+                               sf->v0 + (sf->v1 - sf->v0) * j / N, wx, wy, wz);
+                } else {
+                    wx = -D + 2 * D * i / N;
+                    wy = -D + 2 * D * j / N;
+                    wz = sf->evalAt(wx, wy);
+                }
+                const size_t k2 = (size_t)i * W + j;
+                if (std::isfinite(wz) && std::isfinite(wx) && std::isfinite(wy)) {
+                    double ppx, ppy;
+                    pds[k2] = proj(wx, wy, wz, ppx, ppy);
+                    pxs[k2] = ppx;
+                    pys[k2] = ppy;
+                    oks[k2] = 1;
+                }
+            }
+        }
+        for (int i = 0; i < N; ++i) {
+            for (int j = 0; j < N; ++j) {
+                const size_t k00 = (size_t)i * W + j;
+                const size_t k10 = (size_t)(i + 1) * W + j;
+                const size_t k11 = (size_t)(i + 1) * W + j + 1;
+                const size_t k01 = (size_t)i * W + j + 1;
+                if (!oks[k00] || !oks[k10] || !oks[k11] || !oks[k01]) continue;
+                Occ3 oc;
+                oc.kind = 3;
+                oc.owner = sf;
+                oc.alpha = sf->fillAlpha;
+                oc.qdep = (pds[k00] + pds[k10] + pds[k11] + pds[k01]) / 4.0;
+                oc.poly = { (float)pxs[k00], (float)pys[k00],
+                            (float)pxs[k10], (float)pys[k10],
+                            (float)pxs[k11], (float)pys[k11],
+                            (float)pxs[k01], (float)pys[k01] };
+                occs.push_back(std::move(oc));
+            }
         }
     }
     // 投影像素点是否落在多边形内（射线交叉法）
@@ -14010,6 +14076,15 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
     auto veilAt = [&](double wx2, double wy2, double wz2) -> double {
         double vis = 1.0;
         for (const Occ3 &oc : occs) {
+            if (oc.kind == 3) {
+                // 1.1.0.4 曲面格片：投影命中且 P 深于格片 → 遮挡
+                double px3, py3;
+                const double pdp = proj(wx2, wy2, wz2, px3, py3);
+                if (pdp > oc.qdep && polyHit(oc.poly, px3, py3)) {
+                    vis *= 1.0 - oc.alpha;
+                }
+                continue;
+            }
             if (oc.kind == 1) {
                 // 1.1.0.3 球实体：剪影判据——P 在球心沿视向深处（d·f>0）且
                 // 横向偏距 ≤ 剪影半径（|d|²−(d·f)² ≤ r²）；P 在球内（C<0）
@@ -14077,6 +14152,110 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         }
         return vis;
     };
+    // 1.1.0.4b 带豁免的可见率：exempt=曲线的源实体（交圆/交线长在其
+    // 表面上）——源实体改背向面判据（弦中点陷入凸体内不再误遮，远半球
+    // 仍被迎光面遮挡）；其余遮挡体维持原判据
+    auto veilAtEx = [&](double wx2, double wy2, double wz2,
+                        const void *exempt) -> double {
+        double vis = 1.0;
+        for (const Occ3 &oc : occs) {
+            if (oc.owner == exempt && exempt != nullptr) {
+                if (oc.kind == 1) {
+                    const double dxx = wx2 - oc.scx, dyy = wy2 - oc.scy,
+                                 dzz = wz2 - oc.scz;
+                    if ((dxx * fx + dyy * fy + dzz * fz) > 0) {
+                        vis *= 1.0 - oc.alpha;
+                    }
+                } else if (oc.kind == 2) {
+                    const double dxx = wx2 - oc.cbx, dyy = wy2 - oc.cby,
+                                 dzz = wz2 - oc.cbz;
+                    const double ax = dxx * oc.cwx + dyy * oc.cwy
+                                      + dzz * oc.cwz;
+                    const double dpx = dxx - ax * oc.cwx,
+                                 dpy = dyy - ax * oc.cwy,
+                                 dpz = dzz - ax * oc.cwz;
+                    if ((dpx * fx + dpy * fy + dpz * fz) > 0) {
+                        vis *= 1.0 - oc.alpha;
+                    }
+                } else {
+                    const double s = oc.nx * wx2 + oc.ny * wy2 + oc.nz * wz2
+                                     - oc.dd;
+                    if (s * (oc.nx * fx + oc.ny * fy + oc.nz * fz) > 0) {
+                        vis *= 1.0 - oc.alpha;
+                    }
+                }
+                continue;
+            }
+            if (oc.kind == 3) {
+                double px3, py3;
+                const double pdp = proj(wx2, wy2, wz2, px3, py3);
+                if (pdp > oc.qdep && polyHit(oc.poly, px3, py3)) {
+                    vis *= 1.0 - oc.alpha;
+                }
+                continue;
+            }
+            if (oc.kind == 1) {
+                const double dxx = wx2 - oc.scx, dyy = wy2 - oc.scy,
+                             dzz = wz2 - oc.scz;
+                const double Bq = dxx * fx + dyy * fy + dzz * fz;
+                const double Cq = dxx * dxx + dyy * dyy + dzz * dzz
+                                  - oc.srad * oc.srad;
+                if ((Bq > 0.0 || Cq < 0.0) && Bq * Bq >= Cq) {
+                    vis *= 1.0 - oc.alpha;
+                }
+                continue;
+            }
+            if (oc.kind == 2) {
+                const double dxx = wx2 - oc.cbx, dyy = wy2 - oc.cby,
+                             dzz = wz2 - oc.cbz;
+                const double ax = dxx * oc.cwx + dyy * oc.cwy + dzz * oc.cwz;
+                const double fA = fx * oc.cwx + fy * oc.cwy + fz * oc.cwz;
+                const double dpx = dxx - ax * oc.cwx, dpy = dyy - ax * oc.cwy,
+                             dpz = dzz - ax * oc.cwz;
+                const double fpx = fx - fA * oc.cwx, fpy = fy - fA * oc.cwy,
+                             fpz = fz - fA * oc.cwz;
+                const double Aq = fpx * fpx + fpy * fpy + fpz * fpz;
+                const double Bq = dpx * fpx + dpy * fpy + dpz * fpz;
+                const double Cq = dpx * dpx + dpy * dpy + dpz * dpz
+                                  - oc.crad * oc.crad;
+                double rt0, rt1;
+                if (Aq < 1e-14) {
+                    if (Cq > 0) continue;
+                    rt0 = -1e18;
+                    rt1 = 1e18;
+                } else {
+                    const double disc = Bq * Bq - Aq * Cq;
+                    if (disc < 0) continue;
+                    const double sq = sqrt(disc);
+                    rt0 = (Bq - sq) / Aq;
+                    rt1 = (Bq + sq) / Aq;
+                }
+                double alo, ahi;
+                if (fabs(fA) < 1e-14) {
+                    if (ax < 0 || ax > oc.chgt) continue;
+                    alo = -1e18;
+                    ahi = 1e18;
+                } else if (fA > 0) {
+                    alo = (ax - oc.chgt) / fA;
+                    ahi = (ax - oc.chgt) / fA;
+                } else {
+                    alo = ax / fA;
+                    ahi = (ax - oc.chgt) / fA;
+                }
+                const double lo = std::max(rt0, std::max(alo, 0.0));
+                const double hi = std::min(rt1, ahi);
+                if (hi >= lo && hi > 0) vis *= 1.0 - oc.alpha;
+                continue;
+            }
+            const double s = oc.nx * wx2 + oc.ny * wy2 + oc.nz * wz2 - oc.dd;
+            if (s * (oc.nx * fx + oc.ny * fy + oc.nz * fz) <= 0) continue;
+            double px, py;
+            proj(wx2, wy2, wz2, px, py);
+            if (!polyHit(oc.poly, px, py)) continue;
+            vis *= 1.0 - oc.alpha;
+        }
+        return vis;
+    };
     auto rgbaOfHex = [](const std::string &hex, double alpha) -> std::string {
         if (hex.size() == 7 && hex[0] == '#') {
             char buf[48];
@@ -14094,7 +14273,8 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
     // 返回是否出了内容
     auto drawSplitSeg = [&](double wx1, double wy1, double wz1,
                             double wx2, double wy2, double wz2,
-                            const std::string &col, float lw) -> bool {
+                            const std::string &col, float lw,
+                            const void *exempt = nullptr) -> bool {
         const double dx3 = wx2 - wx1, dy3 = wy2 - wy1, dz3 = wz2 - wz1;
         double ppx1, ppy1, ppx2, ppy2;
         proj(wx1, wy1, wz1, ppx1, ppy1);
@@ -14184,7 +14364,8 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             const double t0 = ts[k], t1 = ts[k + 1];
             if (t1 - t0 < 1e-9) continue;
             const double tm = 0.5 * (t0 + t1);
-            const double vis = veilAt(wx1 + tm * dx3, wy1 + tm * dy3, wz1 + tm * dz3);
+            const double vis = veilAtEx(wx1 + tm * dx3, wy1 + tm * dy3,
+                                        wz1 + tm * dz3, exempt);
             double qpx1, qpy1, qpx2, qpy2;
             proj(wx1 + t0 * dx3, wy1 + t0 * dy3, wz1 + t0 * dz3, qpx1, qpy1);
             proj(wx1 + t1 * dx3, wy1 + t1 * dy3, wz1 + t1 * dz3, qpx2, qpy2);
@@ -14194,7 +14375,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             d.color = vis > 0.999 ? col : rgbaOfHex(col, vis);
             d.lineWidth = lw;
             d.pts = { (float)qpx1, (float)qpy1, (float)qpx2, (float)qpy2 };
-            out.push_back(d);
+            strokeList.push_back(d);
             any = true;
         }
         return any;
@@ -14289,9 +14470,12 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 d.op = DrawOp::FillPoly;
                 d.color = q.color;
                 d.pts.assign(std::begin(q.pts), std::end(q.pts));
-                out.push_back(d);
+                fillList.push_back({ q.depth, d });
             }
             // 边界描线（曲面包络，暗一档实线）
+            double sDep = 0;
+            for (const Quad &q : quads) sDep += q.depth;
+            if (!quads.empty()) sDep /= (double)quads.size();
             if (sf->fillAlpha > 0.003) {
                 DrawCmd edge;
                 edge.op = DrawOp::Polyline;
@@ -14304,7 +14488,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                     if (!open) { edge.pts.push_back((float)sx[k]); edge.pts.push_back((float)sy[k]); open = true; }
                     else { edge.pts.push_back((float)sx[k]); edge.pts.push_back((float)sy[k]); }
                 }
-                if (edge.pts.size() >= 4) out.push_back(edge);
+                if (edge.pts.size() >= 4) fillList.push_back({ sDep, edge });
                 edge.pts.clear();
                 open = false;
                 for (int i = 0; i <= N; ++i) {
@@ -14312,21 +14496,21 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                     if (std::isnan(sx[k])) { open = false; continue; }
                     edge.pts.push_back((float)sx[k]); edge.pts.push_back((float)sy[k]);
                 }
-                if (edge.pts.size() >= 4) out.push_back(edge);
+                if (edge.pts.size() >= 4) fillList.push_back({ sDep, edge });
                 edge.pts.clear();
                 for (int j = 0; j <= N; ++j) {
                     const size_t k = (size_t)j;
                     if (std::isnan(sx[k])) continue;
                     edge.pts.push_back((float)sx[k]); edge.pts.push_back((float)sy[k]);
                 }
-                if (edge.pts.size() >= 4) out.push_back(edge);
+                if (edge.pts.size() >= 4) fillList.push_back({ sDep, edge });
                 edge.pts.clear();
                 for (int j = 0; j <= N; ++j) {
                     const size_t k = (size_t)N * W + j;
                     if (std::isnan(sx[k])) continue;
                     edge.pts.push_back((float)sx[k]); edge.pts.push_back((float)sy[k]);
                 }
-                if (edge.pts.size() >= 4) out.push_back(edge);
+                if (edge.pts.size() >= 4) fillList.push_back({ sDep, edge });
             }
             DrawCmd lb;
             lb.op = DrawOp::Text;
@@ -14346,7 +14530,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             }
             lb.pts = { (float)(lpx + 6 * us), (float)lpy };
             lb.text = sf->label;
-            out.push_back(lb);
+            labelList.push_back(lb);
             break;
         }
         case GeoType::Plane: {
@@ -14375,7 +14559,12 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 fp.pts.push_back((float)ppy);
                 cx2 += ix[q]; cy2 += iy[q]; cz2 += iz[q];
             }
-            out.push_back(fp);
+            double pdep = 0;
+            {
+                double tx, ty;
+                pdep = proj(cx2 / npts, cy2 / npts, cz2 / npts, tx, ty);
+            }
+            fillList.push_back({ pdep, fp });
             DrawCmd pline;
             pline.op = DrawOp::Polyline;
             pline.color = ObjectColor(pl->color, darkTheme);
@@ -14387,7 +14576,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 pline.pts.push_back((float)ppx);
                 pline.pts.push_back((float)ppy);
             }
-            out.push_back(pline);
+            fillList.push_back({ pdep, pline });
             DrawCmd lb;
             lb.op = DrawOp::Text;
             lb.color = ObjectColor(pl->color, darkTheme);
@@ -14395,7 +14584,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             proj(cx2 / npts, cy2 / npts, cz2 / npts, lpx2, lpy2);
             lb.pts = { (float)(lpx2 + 6 * us), (float)lpy2 };
             lb.text = pl->label;
-            out.push_back(lb);
+            labelList.push_back(lb);
             break;
         }
         case GeoType::Circle3: {
@@ -14431,6 +14620,10 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 labX = ppx;
                 labY = ppy;
             }
+            const GeoSphere *srcSph =
+                dynamic_cast<GeoSphere *>(c3->inputs.size() > 1
+                                              ? c3->inputs[1]
+                                              : nullptr);
             for (int i = 0; i < NC; ++i) {
                 const double t0 = 2.0 * M_PI * i / NC;
                 const double t1 = 2.0 * M_PI * (i + 1) / NC;
@@ -14441,14 +14634,14 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                     c3->cx + c3->r * (std::cos(t1) * e1x + std::sin(t1) * e2x),
                     c3->cy + c3->r * (std::cos(t1) * e1y + std::sin(t1) * e2y),
                     c3->cz + c3->r * (std::cos(t1) * e1z + std::sin(t1) * e2z),
-                    cCol, c3->lineThickness / 3.0f);
+                    cCol, c3->lineThickness / 3.0f, srcSph);
             }
             DrawCmd lb;
             lb.op = DrawOp::Text;
             lb.color = cCol;
             lb.pts = { (float)(labX + 6 * us), (float)(labY - 6 * us) };
             lb.text = c3->label;
-            out.push_back(lb);
+            labelList.push_back(lb);
             break;
         }
         case GeoType::Conic3: {
@@ -14488,10 +14681,14 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 lb1.color = cnCol;
                 lb1.pts = { (float)(lx1 + 6 * us), (float)(ly1 - 6 * us) };
                 lb1.text = cn->label;
-                out.push_back(lb1);
+                labelList.push_back(lb1);
                 break;
             }
             const int NC = 64;
+            const GeoCylinder *srcCyl =
+                dynamic_cast<GeoCylinder *>(cn->inputs.size() > 1
+                                                ? cn->inputs[1]
+                                                : nullptr);
             double labX2 = 0, labY2 = 0;
             {
                 double ppx, ppy;
@@ -14510,14 +14707,14 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                     cn->cx + std::cos(t1) * cn->ux + std::sin(t1) * cn->vx,
                     cn->cy + std::cos(t1) * cn->uy + std::sin(t1) * cn->vy,
                     cn->cz + std::cos(t1) * cn->uz + std::sin(t1) * cn->vz,
-                    cnCol, cn->lineThickness / 3.0f);
+                    cnCol, cn->lineThickness / 3.0f, srcCyl);
             }
             DrawCmd lb3;
             lb3.op = DrawOp::Text;
             lb3.color = cnCol;
             lb3.pts = { (float)(labX2 + 6 * us), (float)(labY2 - 6 * us) };
             lb3.text = cn->label;
-            out.push_back(lb3);
+            labelList.push_back(lb3);
             break;
         }
         case GeoType::Polygon: {
@@ -14554,7 +14751,12 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 fp.pts.push_back((float)ppx);
                 fp.pts.push_back((float)ppy);
             }
-            out.push_back(fp);
+            double gdep = 0;
+            {
+                double tx, ty;
+                gdep = proj(gx / n, gy / n, gz / n, tx, ty);
+            }
+            fillList.push_back({ gdep, fp });
             DrawCmd pline;
             pline.op = DrawOp::Polyline;
             pline.color = ObjectColor(pg->color, darkTheme);
@@ -14566,7 +14768,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 pline.pts.push_back((float)ppx);
                 pline.pts.push_back((float)ppy);
             }
-            out.push_back(pline);
+            fillList.push_back({ gdep, pline });
             DrawCmd lb;
             lb.op = DrawOp::Text;
             lb.color = ObjectColor(pg->color, darkTheme);
@@ -14574,7 +14776,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             proj(gx / n, gy / n, gz / n, lpx3, lpy3);
             lb.pts = { (float)(lpx3 + 6 * us), (float)lpy3 };
             lb.text = pg->label;
-            out.push_back(lb);
+            labelList.push_back(lb);
             break;
         }
         case GeoType::Sphere: {
@@ -14591,6 +14793,11 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             if (!(r > 0) || !std::isfinite(r)) break;
             const double cx = sp->ccx(), cy = sp->ccy(), cz = sp->ccz();
             const std::string col = ObjectColor(sp->color, darkTheme);
+            double cdep0 = 0;
+            {
+                double tx, ty;
+                cdep0 = proj(cx, cy, cz, tx, ty);
+            }
             // 1.1.0.3 实心着色：剪影盘 16 环同心明暗（迎光余弦近似），填充
             // fillAlpha；经纬线框叠加其上
             if (sp->fillAlpha > 0.003) {
@@ -14600,19 +14807,21 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 const double rho = sqrt(pow(cc2x - cc1x, 2)
                                         + pow(cc2y - cc1y, 2));
                 if (rho > 1e-9) {
+                    // 1.1.0.4 叠层实心圆（凸多边形无接缝伪影；层透明度差分
+                    // 1−(1−F)^(1/NR) 使合成恰为 fillAlpha）
                     const int NR = 16, NA = 32;
+                    const double aL = 1.0 - std::pow(1.0 - sp->fillAlpha,
+                                                     1.0 / NR);
                     for (int ring = NR; ring >= 1; --ring) {
                         const double rO = rho * ring / NR;
-                        const double rI = rho * (ring - 1) / NR;
                         const double mu = std::cos((ring - 0.5) / NR
                                                    * M_PI / 2.0);
                         const double shade = 0.55 + 0.45 * mu;
                         DrawCmd rg;
                         rg.op = DrawOp::FillPoly;
                         rg.color = ShadeRgba(sp->color.r, sp->color.g,
-                                             sp->color.b, shade,
-                                             sp->fillAlpha);
-                        rg.pts.reserve((size_t)(2 * NA + 2) * 2);
+                                             sp->color.b, shade, aL);
+                        rg.pts.reserve((size_t)NA * 2);
                         for (int k = 0; k < NA; ++k) {
                             const double t2 = 2 * M_PI * k / NA;
                             rg.pts.push_back((float)(cc1x
@@ -14620,21 +14829,19 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                             rg.pts.push_back((float)(cc1y
                                                      + std::sin(t2) * rO));
                         }
-                        for (int k = NA - 1; k >= 0; --k) {
-                            const double t2 = 2 * M_PI * k / NA;
-                            rg.pts.push_back((float)(cc1x
-                                                     + std::cos(t2) * rI));
-                            rg.pts.push_back((float)(cc1y
-                                                     + std::sin(t2) * rI));
-                        }
-                        out.push_back(rg);
+                        double rdpX, rdpY;
+                        const double rdep = proj(cx - r * mu * fx,
+                                                 cy - r * mu * fy,
+                                                 cz - r * mu * fz, rdpX, rdpY);
+                        fillList.push_back({ rdep, rg });
                     }
                 }
             }
+            // 经纬线框（深度=所在圆心），叠加在填充上
             // 经线 6 条（每 30°，含极点大圆）+ 纬线 5 条（-60..60 每 30°）
             const int SEG = 36;
             auto emitCircle = [&](const std::function<void(int, double &, double &, double &)> &at,
-                                  int n) {
+                                  int n, double cdep) {
                 DrawCmd d;
                 d.op = DrawOp::Polyline;
                 d.color = col;
@@ -14648,7 +14855,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                     d.pts.push_back((float)ppx);
                     d.pts.push_back((float)ppy);
                 }
-                out.push_back(d);
+                fillList.push_back({ cdep, d });
             };
             for (int m = 0; m < 6; ++m) {
                 const double phi = m * M_PI / 6.0;
@@ -14657,18 +14864,23 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                     wx = cx + r * std::cos(t) * std::cos(phi);
                     wy = cy + r * std::cos(t) * std::sin(phi);
                     wz = cz + r * std::sin(t);
-                }, SEG);
+                }, SEG, cdep0);
             }
             for (int lat = -60; lat <= 60; lat += 30) {
                 const double la = lat * M_PI / 180.0;
                 const double rr = r * std::cos(la);
                 const double zoff = cz + r * std::sin(la);
+                double cdepL = 0;
+                {
+                    double tx, ty;
+                    cdepL = proj(cx, cy, zoff, tx, ty);
+                }
                 emitCircle([&](int k, double &wx, double &wy, double &wz) {
                     const double t = 2 * M_PI * k / SEG;
                     wx = cx + rr * std::cos(t);
                     wy = cy + rr * std::sin(t);
                     wz = zoff;
-                }, SEG);
+                }, SEG, cdepL);
             }
             DrawCmd lb;
             lb.op = DrawOp::Text;
@@ -14677,7 +14889,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             proj(cx, cy, cz + r, lpx, lpy);
             lb.pts = { (float)(lpx + 6 * us), (float)(lpy - 6 * us) };
             lb.text = sp->label;
-            out.push_back(lb);
+            labelList.push_back(lb);
             break;
         }
         case GeoType::Cylinder: {
@@ -14783,12 +14995,17 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                     fp2.op = DrawOp::FillPoly;
                     fp2.color = q.color;
                     fp2.pts = q.pts;
-                    out.push_back(fp2);
+                    fillList.push_back({ q.depth, fp2 });
                 }
             }
             const std::string col = ObjectColor(cy->color, darkTheme);
             const int SEG = 36;
             auto ringAt = [&](double px0, double py0, double pz0) {
+                double rdep2 = 0;
+                {
+                    double tx, ty;
+                    rdep2 = proj(px0, py0, pz0, tx, ty);
+                }
                 DrawCmd d;
                 d.op = DrawOp::Polyline;
                 d.color = col;
@@ -14803,7 +15020,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                     d.pts.push_back((float)ppx);
                     d.pts.push_back((float)ppy);
                 }
-                out.push_back(d);
+                fillList.push_back({ rdep2, d });
             };
             ringAt(ax, ay, az);
             ringAt(bx, by, bz);
@@ -14823,7 +15040,12 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 sd.pts.insert(sd.pts.end(),
                               { (float)p1x, (float)p1y, (float)p2x, (float)p2y });
             }
-            out.push_back(sd);
+            double mdep = 0;
+            {
+                double tx, ty;
+                mdep = proj((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2, tx, ty);
+            }
+            fillList.push_back({ mdep, sd });
             DrawCmd lb;
             lb.op = DrawOp::Text;
             lb.color = col;
@@ -14831,7 +15053,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             proj((ax + bx) / 2 + r, (ay + by) / 2, (az + bz) / 2, lpx, lpy);
             lb.pts = { (float)(lpx + 6 * us), (float)lpy };
             lb.text = cy->label;
-            out.push_back(lb);
+            labelList.push_back(lb);
             break;
         }
         default:
@@ -14878,7 +15100,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             lb.color = ObjectColor(ry->color, darkTheme);
             lb.pts = { (float)(x1 + 6 * us), (float)(y1 - 6 * us) };
             lb.text = ry->label;
-            out.push_back(lb);
+            labelList.push_back(lb);
             break;
         }
         case GeoType::Line3: {
@@ -14909,7 +15131,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             lb.color = ObjectColor(l3->color, darkTheme);
             lb.pts = { (float)(x1 + 6 * us), (float)(y1 - 6 * us) };
             lb.text = l3->label;
-            out.push_back(lb);
+            labelList.push_back(lb);
             break;
         }
         case GeoType::Segment: {
@@ -14937,7 +15159,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             lb.color = visMid > 0.999 ? sCol : rgbaOfHex(sCol, visMid);
             lb.pts = { (float)(0.5 * (x1 + x2) + 6 * us), (float)(0.5 * (y1 + y2) - 6 * us) };
             lb.text = s->label;
-            out.push_back(lb);
+            labelList.push_back(lb);
             break;
         }
         case GeoType::Vector: {
@@ -14974,13 +15196,13 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                       (float)(x2 + hl * std::cos(a1)), (float)(y2 + hl * std::sin(a1)),
                       (float)x2, (float)y2,
                       (float)(x2 + hl * std::cos(a2)), (float)(y2 + hl * std::sin(a2)) };
-            out.push_back(h);
+            strokeList.push_back(h);
             DrawCmd lb;
             lb.op = DrawOp::Text;
             lb.color = visMidV > 0.999 ? vCol : rgbaOfHex(vCol, visMidV);
             lb.pts = { (float)(0.5 * (x1 + x2) + 6 * us), (float)(0.5 * (y1 + y2) - 6 * us) };
             lb.text = v->label;
-            out.push_back(lb);
+            labelList.push_back(lb);
             break;
         }
         case GeoType::Point: {
@@ -15000,19 +15222,19 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 ring.lineWidth = 2.5f * (float)us;
                 ring.pts = { (float)px, (float)py,
                              (float)((p->pointSize + 6) * us) };
-                out.push_back(ring);
+                strokeList.push_back(ring);
             }
             DrawCmd d;
             d.op = DrawOp::FillCircle;
             d.color = visP > 0.999 ? pCol : rgbaOfHex(pCol, visP);
             d.pts = { (float)px, (float)py, (float)(p->pointSize * us) };
-            out.push_back(d);
+            strokeList.push_back(d);
             DrawCmd lb;
             lb.op = DrawOp::Text;
             lb.color = visP > 0.999 ? pCol : rgbaOfHex(pCol, visP);
             lb.pts = { (float)(px + 4 * us), (float)(py - 2 * p->pointSize * us - 2 * us) };
             lb.text = p->label;
-            out.push_back(lb);
+            labelList.push_back(lb);
             break;
         }
         default:
@@ -15026,6 +15248,15 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
     // 重定义联动）；平行面/平行线/异面/线面平行（含线在面内）/线⊥面（投影
     // 退化为点）/0° 不画。扇面在全部对象之后发射（叠于平面填充上），填充
     // 透明度按扇心 veilAt 调淡
+    // 1.1.0.4 发射：填充按深度远→近，描边按原序（扇面注记仍在其后）
+    std::stable_sort(fillList.begin(), fillList.end(),
+                     [](const std::pair<double, DrawCmd> &a,
+                        const std::pair<double, DrawCmd> &b) {
+                         return a.first > b.first;
+                     });
+    for (const auto &fpr : fillList) out.push_back(fpr.second);
+    for (const DrawCmd &dc : strokeList) out.push_back(dc);
+
     const std::string fanC = darkTheme ? "#7FD1A8" : "#1C7E54";
     for (auto &g : geos_) {
         if (g->type() != GeoType::Numeric || !g->visible) continue;
@@ -15275,8 +15506,11 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         lbv.color = fanC;
         lbv.pts = { (float)lpx, (float)lpy };
         lbv.text = FormatNum(n->value) + "°";
-        out.push_back(lbv);
+        labelList.push_back(lbv);
     }
+
+    // 1.1.0.4 标签层最后发射（注记不被体填充埋没）
+    for (const DrawCmd &dc : labelList) out.push_back(dc);
 }
 
 } // namespace dreamember
