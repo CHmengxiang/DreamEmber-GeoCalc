@@ -10520,6 +10520,13 @@ std::string Kernel::propsOf(const std::string &label) const
     } else if (g->type() == GeoType::Angle) {
         add("fill", std::to_string(
             (int)std::lround(static_cast<GeoAngle *>(g)->fillAlpha * 100.0)));
+    } else if (g->type() == GeoType::Sphere
+               || g->type() == GeoType::Cylinder) {
+        // 1.1.0.3 实心体填充透明度样式（遮挡因子联动）
+        const double fa = g->type() == GeoType::Sphere
+            ? static_cast<const GeoSphere *>(g)->fillAlpha
+            : static_cast<const GeoCylinder *>(g)->fillAlpha;
+        add("fill", std::to_string((int)std::lround(fa * 100.0)));
     }
     if (g->type() == GeoType::Numeric) {
         GeoNumeric *n = static_cast<GeoNumeric *>(g);
@@ -10624,6 +10631,14 @@ bool Kernel::setProp(const std::string &label, const std::string &key,
         }
         if (g->type() == GeoType::Angle) {
             static_cast<GeoAngle *>(g)->fillAlpha = a;
+            return true;
+        }
+        if (g->type() == GeoType::Sphere) {
+            static_cast<GeoSphere *>(g)->fillAlpha = a;
+            return true;
+        }
+        if (g->type() == GeoType::Cylinder) {
+            static_cast<GeoCylinder *>(g)->fillAlpha = a;
             return true;
         }
         lastError = "该对象没有区域填充";
@@ -13895,8 +13910,13 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         }
     };
     struct Occ3 {
+        int kind = 0;              // 0=平面（poly 网格 hit）1=球 2=圆柱
         double nx, ny, nz, dd, alpha;
         std::vector<float> poly;   // 裁剪多边形投影像素（x,y 对）
+        // kind 1 球：球心 + 半径；kind 2 圆柱：底心 + 单位轴 + 半径 + 高
+        double scx = 0, scy = 0, scz = 0, srad = 0;
+        double cbx = 0, cby = 0, cbz = 0, cwx = 0, cwy = 0, cwz = 0;
+        double crad = 0, chgt = 0;
     };
     std::vector<Occ3> occs;
     for (auto &g : geos_) {
@@ -13923,6 +13943,53 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         }
         occs.push_back(std::move(oc));
     }
+    // 1.1.0.3 球/圆柱实体遮挡体（fillAlpha>0.003；解析判据入 veilAt /
+    // drawSplitSeg 拆点）
+    for (auto &g : geos_) {
+        if (!g->visible) continue;
+        if (g->type() == GeoType::Sphere) {
+            GeoSphere *sp = static_cast<GeoSphere *>(g.get());
+            if (sp->fillAlpha < 0.003) continue;
+            double r = sp->radius;
+            if (sp->radiusNum) r = sp->radiusNum->value;
+            else if (sp->through) {
+                r = sqrt(pow(sp->through->x - sp->ccx(), 2)
+                         + pow(sp->through->y - sp->ccy(), 2)
+                         + pow(sp->through->z - sp->ccz(), 2));
+            }
+            if (!(r > 1e-12) || !std::isfinite(r)) continue;
+            Occ3 oc;
+            oc.kind = 1;
+            oc.alpha = sp->fillAlpha;
+            oc.scx = sp->ccx();
+            oc.scy = sp->ccy();
+            oc.scz = sp->ccz();
+            oc.srad = r;
+            occs.push_back(std::move(oc));
+        } else if (g->type() == GeoType::Cylinder) {
+            GeoCylinder *cy = static_cast<GeoCylinder *>(g.get());
+            if (cy->fillAlpha < 0.003) continue;
+            double r = cy->radiusNum ? cy->radiusNum->value : cy->radius;
+            if (!(r > 1e-12) || !std::isfinite(r)) continue;
+            const double bx = cy->bcx(), by = cy->bcy(), bz = cy->bcz();
+            const double wx0 = cy->tcx() - bx, wy0 = cy->tcy() - by,
+                         wz0 = cy->tcz() - bz;
+            const double wl = sqrt(wx0 * wx0 + wy0 * wy0 + wz0 * wz0);
+            if (!(wl > 1e-12)) continue;
+            Occ3 oc;
+            oc.kind = 2;
+            oc.alpha = cy->fillAlpha;
+            oc.cbx = bx;
+            oc.cby = by;
+            oc.cbz = bz;
+            oc.cwx = wx0 / wl;
+            oc.cwy = wy0 / wl;
+            oc.cwz = wz0 / wl;
+            oc.crad = r;
+            oc.chgt = wl;
+            occs.push_back(std::move(oc));
+        }
+    }
     // 投影像素点是否落在多边形内（射线交叉法）
     auto polyHit = [](const std::vector<float> &poly, double px, double py) -> bool {
         const size_t n = poly.size() / 2;
@@ -13943,6 +14010,64 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
     auto veilAt = [&](double wx2, double wy2, double wz2) -> double {
         double vis = 1.0;
         for (const Occ3 &oc : occs) {
+            if (oc.kind == 1) {
+                // 1.1.0.3 球实体：剪影判据——P 在球心沿视向深处（d·f>0）且
+                // 横向偏距 ≤ 剪影半径（|d|²−(d·f)² ≤ r²）；P 在球内（C<0）
+                // 亦遮挡
+                const double dxx = wx2 - oc.scx, dyy = wy2 - oc.scy,
+                             dzz = wz2 - oc.scz;
+                const double Bq = dxx * fx + dyy * fy + dzz * fz;
+                const double Cq = dxx * dxx + dyy * dyy + dzz * dzz
+                                  - oc.srad * oc.srad;
+                if ((Bq > 0.0 || Cq < 0.0) && Bq * Bq >= Cq) {
+                    vis *= 1.0 - oc.alpha;
+                }
+                continue;
+            }
+            if (oc.kind == 2) {
+                // 1.1.0.3 圆柱实体：半线 {P − t·f, t>0} 与实体（横向 ≤ r 且
+                // 轴向 ∈ [0,h]）相交 —— 横向二次根区间 × 轴向线性区间
+                const double dxx = wx2 - oc.cbx, dyy = wy2 - oc.cby,
+                             dzz = wz2 - oc.cbz;
+                const double ax = dxx * oc.cwx + dyy * oc.cwy + dzz * oc.cwz;
+                const double fA = fx * oc.cwx + fy * oc.cwy + fz * oc.cwz;
+                const double dpx = dxx - ax * oc.cwx, dpy = dyy - ax * oc.cwy,
+                             dpz = dzz - ax * oc.cwz;
+                const double fpx = fx - fA * oc.cwx, fpy = fy - fA * oc.cwy,
+                             fpz = fz - fA * oc.cwz;
+                const double Aq = fpx * fpx + fpy * fpy + fpz * fpz;
+                const double Bq = dpx * fpx + dpy * fpy + dpz * fpz;
+                const double Cq = dpx * dpx + dpy * dpy + dpz * dpz
+                                  - oc.crad * oc.crad;
+                double rt0, rt1;
+                if (Aq < 1e-14) {
+                    if (Cq > 0) continue;   // 视线∥轴且横向恒在柱外
+                    rt0 = -1e18;
+                    rt1 = 1e18;
+                } else {
+                    const double disc = Bq * Bq - Aq * Cq;
+                    if (disc < 0) continue;
+                    const double sq = sqrt(disc);
+                    rt0 = (Bq - sq) / Aq;
+                    rt1 = (Bq + sq) / Aq;
+                }
+                double alo, ahi;
+                if (fabs(fA) < 1e-14) {
+                    if (ax < 0 || ax > oc.chgt) continue;
+                    alo = -1e18;
+                    ahi = 1e18;
+                } else if (fA > 0) {
+                    alo = (ax - oc.chgt) / fA;
+                    ahi = ax / fA;
+                } else {
+                    alo = ax / fA;
+                    ahi = (ax - oc.chgt) / fA;
+                }
+                const double lo = std::max(rt0, std::max(alo, 0.0));
+                const double hi = std::min(rt1, ahi);
+                if (hi >= lo && hi > 0) vis *= 1.0 - oc.alpha;
+                continue;
+            }
             const double s = oc.nx * wx2 + oc.ny * wy2 + oc.nz * wz2 - oc.dd;
             if (s * (oc.nx * fx + oc.ny * fy + oc.nz * fz) <= 0) continue;
             double px, py;
@@ -13980,6 +14105,55 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         ts.push_back(0.0);
         ts.push_back(1.0);
         for (const Occ3 &oc : occs) {
+            if (oc.kind == 1) {
+                // 1.1.0.3 球面与段交（二次根）：|S1+t·d − C|² = r²
+                const double dxx = wx1 - oc.scx, dyy = wy1 - oc.scy,
+                             dzz = wz1 - oc.scz;
+                const double Aq = dx3 * dx3 + dy3 * dy3 + dz3 * dz3;
+                const double Bq = dxx * dx3 + dyy * dy3 + dzz * dz3;
+                const double Cq = dxx * dxx + dyy * dyy + dzz * dzz
+                                  - oc.srad * oc.srad;
+                const double disc = Bq * Bq - Aq * Cq;
+                if (disc >= 0 && Aq > 1e-14) {
+                    const double sq = sqrt(disc);
+                    const double r0 = (-Bq - sq) / Aq, r1 = (-Bq + sq) / Aq;
+                    if (r0 > 1e-9 && r0 < 1.0 - 1e-9) ts.push_back(r0);
+                    if (r1 > 1e-9 && r1 < 1.0 - 1e-9) ts.push_back(r1);
+                }
+                continue;
+            }
+            if (oc.kind == 2) {
+                // 1.1.0.3 柱体边界与段交：横向二次根（侧面）+ 轴向线性根（帽）
+                const double dxx = wx1 - oc.cbx, dyy = wy1 - oc.cby,
+                             dzz = wz1 - oc.cbz;
+                const double ax = dxx * oc.cwx + dyy * oc.cwy + dzz * oc.cwz;
+                const double fA = dx3 * oc.cwx + dy3 * oc.cwy + dz3 * oc.cwz;
+                const double dpx = dxx - ax * oc.cwx, dpy = dyy - ax * oc.cwy,
+                             dpz = dzz - ax * oc.cwz;
+                const double fpx = dx3 - fA * oc.cwx,
+                             fpy = dy3 - fA * oc.cwy,
+                             fpz = dz3 - fA * oc.cwz;
+                const double Aq = fpx * fpx + fpy * fpy + fpz * fpz;
+                const double Bq = dpx * fpx + dpy * fpy + dpz * fpz;
+                const double Cq = dpx * dpx + dpy * dpy + dpz * dpz
+                                  - oc.crad * oc.crad;
+                if (Aq > 1e-14) {
+                    const double disc = Bq * Bq - Aq * Cq;
+                    if (disc >= 0) {
+                        const double sq = sqrt(disc);
+                        const double r0 = (-Bq - sq) / Aq,
+                                     r1 = (-Bq + sq) / Aq;
+                        if (r0 > 1e-9 && r0 < 1.0 - 1e-9) ts.push_back(r0);
+                        if (r1 > 1e-9 && r1 < 1.0 - 1e-9) ts.push_back(r1);
+                    }
+                }
+                if (fabs(fA) > 1e-14) {
+                    const double rc0 = (0 - ax) / fA, rc1 = (oc.chgt - ax) / fA;
+                    if (rc0 > 1e-9 && rc0 < 1.0 - 1e-9) ts.push_back(rc0);
+                    if (rc1 > 1e-9 && rc1 < 1.0 - 1e-9) ts.push_back(rc1);
+                }
+                continue;
+            }
             const double den = oc.nx * dx3 + oc.ny * dy3 + oc.nz * dz3;
             if (fabs(den) > 1e-14) {
                 const double t = (oc.dd - (oc.nx * wx1 + oc.ny * wy1
@@ -14417,6 +14591,46 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             if (!(r > 0) || !std::isfinite(r)) break;
             const double cx = sp->ccx(), cy = sp->ccy(), cz = sp->ccz();
             const std::string col = ObjectColor(sp->color, darkTheme);
+            // 1.1.0.3 实心着色：剪影盘 16 环同心明暗（迎光余弦近似），填充
+            // fillAlpha；经纬线框叠加其上
+            if (sp->fillAlpha > 0.003) {
+                double cc1x, cc1y, cc2x, cc2y;
+                proj(cx, cy, cz, cc1x, cc1y);
+                proj(cx + r, cy, cz, cc2x, cc2y);
+                const double rho = sqrt(pow(cc2x - cc1x, 2)
+                                        + pow(cc2y - cc1y, 2));
+                if (rho > 1e-9) {
+                    const int NR = 16, NA = 32;
+                    for (int ring = NR; ring >= 1; --ring) {
+                        const double rO = rho * ring / NR;
+                        const double rI = rho * (ring - 1) / NR;
+                        const double mu = std::cos((ring - 0.5) / NR
+                                                   * M_PI / 2.0);
+                        const double shade = 0.55 + 0.45 * mu;
+                        DrawCmd rg;
+                        rg.op = DrawOp::FillPoly;
+                        rg.color = ShadeRgba(sp->color.r, sp->color.g,
+                                             sp->color.b, shade,
+                                             sp->fillAlpha);
+                        rg.pts.reserve((size_t)(2 * NA + 2) * 2);
+                        for (int k = 0; k < NA; ++k) {
+                            const double t2 = 2 * M_PI * k / NA;
+                            rg.pts.push_back((float)(cc1x
+                                                     + std::cos(t2) * rO));
+                            rg.pts.push_back((float)(cc1y
+                                                     + std::sin(t2) * rO));
+                        }
+                        for (int k = NA - 1; k >= 0; --k) {
+                            const double t2 = 2 * M_PI * k / NA;
+                            rg.pts.push_back((float)(cc1x
+                                                     + std::cos(t2) * rI));
+                            rg.pts.push_back((float)(cc1y
+                                                     + std::sin(t2) * rI));
+                        }
+                        out.push_back(rg);
+                    }
+                }
+            }
             // 经线 6 条（每 30°，含极点大圆）+ 纬线 5 条（-60..60 每 30°）
             const int SEG = 36;
             auto emitCircle = [&](const std::function<void(int, double &, double &, double &)> &at,
@@ -14483,6 +14697,95 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             if (e1l < 1e-9) { e1x = 1; e1y = 0; e1z = 0; }
             else { e1x /= e1l; e1y /= e1l; e1z /= e1l; }
             double e2x = uy * e1z - uz * e1y, e2y = uz * e1x - ux * e1z, e2z = ux * e1y - uy * e1x;
+            // 1.1.0.3 实心着色：侧面 16 纵条 + 顶底两椭圆帽，深度排序远→近，
+            // 法向光照（径向/轴向 · 视向）；经纬线框叠加其上
+            if (cy->fillAlpha > 0.003) {
+                struct CyQuad {
+                    std::vector<float> pts;
+                    double depth;
+                    std::string color;
+                };
+                std::vector<CyQuad> cqs;
+                cqs.reserve(18);
+                const int NS2 = 16, NA2 = 32;
+                for (int i = 0; i < NS2; ++i) {
+                    const double t0 = 2 * M_PI * i / NS2;
+                    const double t1 = 2 * M_PI * (i + 1) / NS2;
+                    const double tm = (t0 + t1) / 2.0;
+                    const double nX = std::cos(tm) * e1x + std::sin(tm) * e2x;
+                    const double nY = std::cos(tm) * e1y + std::sin(tm) * e2y;
+                    const double nZ = std::cos(tm) * e1z + std::sin(tm) * e2z;
+                    const double shade = 0.55
+                        + 0.45 * fabs(nX * fx + nY * fy + nZ * fz);
+                    CyQuad q;
+                    q.color = ShadeRgba(cy->color.r, cy->color.g, cy->color.b,
+                                        shade, cy->fillAlpha);
+                    double dsum = 0;
+                    const double cs[2] = { std::cos(t0), std::cos(t1) };
+                    const double sn[2] = { std::sin(t0), std::sin(t1) };
+                    const double c4[4][3] = {
+                        { ax + r * cs[0] * e1x + r * sn[0] * e2x,
+                          ay + r * cs[0] * e1y + r * sn[0] * e2y,
+                          az + r * cs[0] * e1z + r * sn[0] * e2z },
+                        { ax + r * cs[1] * e1x + r * sn[1] * e2x,
+                          ay + r * cs[1] * e1y + r * sn[1] * e2y,
+                          az + r * cs[1] * e1z + r * sn[1] * e2z },
+                        { bx + r * cs[1] * e1x + r * sn[1] * e2x,
+                          by + r * cs[1] * e1y + r * sn[1] * e2y,
+                          bz + r * cs[1] * e1z + r * sn[1] * e2z },
+                        { bx + r * cs[0] * e1x + r * sn[0] * e2x,
+                          by + r * cs[0] * e1y + r * sn[0] * e2y,
+                          bz + r * cs[0] * e1z + r * sn[0] * e2z },
+                    };
+                    for (auto &pt : c4) {
+                        double ppx, ppy;
+                        dsum += proj(pt[0], pt[1], pt[2], ppx, ppy);
+                        q.pts.push_back((float)ppx);
+                        q.pts.push_back((float)ppy);
+                    }
+                    q.depth = dsum / 4.0;
+                    cqs.push_back(std::move(q));
+                }
+                for (int capI = 0; capI < 2; ++capI) {
+                    const double ccx2 = capI == 0 ? ax : bx;
+                    const double ccy2 = capI == 0 ? ay : by;
+                    const double ccz2 = capI == 0 ? az : bz;
+                    const double sg = capI == 0 ? -1.0 : 1.0;
+                    const double shade = 0.55
+                        + 0.45 * fabs(sg * (ux * fx + uy * fy + uz * fz));
+                    CyQuad q;
+                    q.color = ShadeRgba(cy->color.r, cy->color.g, cy->color.b,
+                                        shade, cy->fillAlpha);
+                    double dsum = 0;
+                    double ppx, ppy;
+                    dsum += proj(ccx2, ccy2, ccz2, ppx, ppy);
+                    q.pts.push_back((float)ppx);
+                    q.pts.push_back((float)ppy);
+                    for (int k = 0; k < NA2; ++k) {
+                        const double t2 = 2 * M_PI * k / NA2;
+                        const double cr2 = r * std::cos(t2);
+                        const double sr2 = r * std::sin(t2);
+                        dsum += proj(ccx2 + cr2 * e1x + sr2 * e2x,
+                                     ccy2 + cr2 * e1y + sr2 * e2y,
+                                     ccz2 + cr2 * e1z + sr2 * e2z, ppx, ppy);
+                        q.pts.push_back((float)ppx);
+                        q.pts.push_back((float)ppy);
+                    }
+                    q.depth = dsum / (NA2 + 1.0);
+                    cqs.push_back(std::move(q));
+                }
+                std::sort(cqs.begin(), cqs.end(),
+                          [](const CyQuad &a, const CyQuad &b) {
+                              return a.depth > b.depth;
+                          });
+                for (const CyQuad &q : cqs) {
+                    DrawCmd fp2;
+                    fp2.op = DrawOp::FillPoly;
+                    fp2.color = q.color;
+                    fp2.pts = q.pts;
+                    out.push_back(fp2);
+                }
+            }
             const std::string col = ObjectColor(cy->color, darkTheme);
             const int SEG = 36;
             auto ringAt = [&](double px0, double py0, double pz0) {
@@ -15226,14 +15529,14 @@ std::string Kernel::getXml() const
         case GeoType::Sphere: {
             GeoSphere *sp = static_cast<GeoSphere *>(g);
             AppendCommandXml(o, *sp);
-            AppendElementHead(o, *sp, "sphere");
+            AppendElementHead(o, *sp, "sphere", sp->fillAlpha);
             AppendLineStyle(o, sp->lineThickness);
             break;
         }
         case GeoType::Cylinder: {
             GeoCylinder *cy = static_cast<GeoCylinder *>(g);
             AppendCommandXml(o, *cy);
-            AppendElementHead(o, *cy, "cylinder");
+            AppendElementHead(o, *cy, "cylinder", cy->fillAlpha);
             AppendLineStyle(o, cy->lineThickness);
             break;
         }
@@ -15358,6 +15661,17 @@ void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
         if (ga) {
             double a = AttrNum(t, "alpha", ga->fillAlpha);
             ga->fillAlpha = a > 0.0 ? (a > 1.0 ? 1.0 : a) : 0.12;
+        }
+        // 1.1.0.3 实心体（球/柱）：旧文件 alpha=0 占位回 1.0 实心默认
+        GeoSphere *spc = dynamic_cast<GeoSphere *>(e);
+        if (spc) {
+            double a = AttrNum(t, "alpha", spc->fillAlpha);
+            spc->fillAlpha = a > 0.0 ? (a > 1.0 ? 1.0 : a) : 1.0;
+        }
+        GeoCylinder *cyc = dynamic_cast<GeoCylinder *>(e);
+        if (cyc) {
+            double a = AttrNum(t, "alpha", cyc->fillAlpha);
+            cyc->fillAlpha = a > 0.0 ? (a > 1.0 ? 1.0 : a) : 1.0;
         }
     }
     size_t ls = inner.find("<lineStyle");

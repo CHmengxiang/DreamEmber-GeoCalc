@@ -484,6 +484,7 @@ public:
     bool cImage = false;
     double icx = 0, icy = 0, icz = 0;
     GeoPoint *through = nullptr;        // 过点形式（与 radius/radiusNum 三选一）
+    double fillAlpha = 1.0;             // 1.1.0.3 实心填充透明度（遮挡因子联动）
     GeoNumeric *radiusNum = nullptr;    // 半径引用数值对象（随其重算）
     double radius = 0;
     std::function<void(GeoSphere *)> calc;   // 依随重算（中心/过点/半径引用变动）
@@ -511,6 +512,7 @@ public:
     GeoNumeric *radiusNum = nullptr;    // 半径引用（可空）
     GeoNumeric *heightNum = nullptr;    // 高引用（可空）
     double radius = 0, height = 0;      // 静态值（顶心形式下 height=|AB|）
+    double fillAlpha = 1.0;             // 1.1.0.3 实心填充透明度（遮挡因子联动）
     double bcx() const { return bImage ? ibx : (base ? base->x : 0.0); }
     double bcy() const { return bImage ? iby : (base ? base->y : 0.0); }
     double bcz() const { return bImage ? ibz : (base ? base->z : 0.0); }
