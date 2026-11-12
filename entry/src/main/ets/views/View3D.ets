@@ -2,9 +2,14 @@
 // 画布本体：内核 render3D 出帧（底面网格/三轴/曲面网格/球柱线框/空间线/
 // 三维点，投影后与 2D 帧同协议），本组件持有帧执行器（与 CanvasView.execFrame
 // 同一套 op 语义）。
-// 交互：单指拖 = 轨道旋转（按在三维点上则视平面拖点）；双指 = 缩放+平移
+// 交互：单指拖 = 轨道旋转（按在三维点上则视平面拖点；1.1.0.6③ 拖动方向
+// 与画面移动同向——内核方位取反）；双指 = 缩放+平移
 //（1.0.8.3：质心拖动平移，距离比缩放）；
-// 点按 = 选中三维点（代数区联动）；PC 滚轮 = 缩放；「复位」= 视角回标准。
+// 点按 = 选中三维点（代数区联动）；PC 滚轮 = 缩放；右下角 ＋/－ 缩放钮
+//（1.1.0.6② 与 2D 同款）。左上 ☰↶↷ 改圆形钮风格与 2D 统一（1.1.0.6②）；
+// 原右上「复位」按钮并入 ☰ 菜单"重置视图"（1.1.0.6⑤——菜单项按当前视图
+// 给描述，3D 下复位轨道相机 yaw30/pitch20/scale50）。
+// 3D 帧已无底面网状格（1.1.0.6④：有坐标轴即可）。
 // 刷新：宿主在输入/删除/滑条动画等变更后 bump AppStorage view3dRefresh，
 // 本组件 @StorageProp+@Watch 重取帧（代数区与本视图共享同一内核构造）。
 import dreamemberKernel from 'libdreamember.so';
@@ -15,10 +20,12 @@ export struct View3D {
   @Prop dark: boolean = false;
   // 宿主变更信号（输入/删除/滑条动画）→ 重取 3D 帧
   @StorageProp('view3dRefresh') @Watch('onRefreshBump') refreshGen: number = 0;
-  // 复位按钮按压回弹 + 画布 vp 尺寸（复位按钮定位用）
-  @State private resetPressed: boolean = false;
+  // 画布 vp 尺寸（左上按钮/右下缩放钮定位用）
   @State private vpW: number = 0;
   @State private vpH: number = 0;
+  // 1.1.0.6②：左上 ☰↶↷ 与右下 ＋/－ 按压回弹（与 CanvasStage 同款 120ms）
+  @State private topPressed: string = '';
+  @State private zoomPressed: string = '';
   onCanvasReady: (w: number, h: number, s: number) => void = (_w: number, _h: number, _s: number) => {};
   // 点按/拖动命中三维点后上报宿主（代数区选中联动，'' 清除）
   onSelectLabel: (l: string) => void = (_l: string) => {};
@@ -205,12 +212,35 @@ export struct View3D {
 
   // ---- 交互 ----
 
-  private resetView(): void {
-    this.resetPressed = true;
+  // 第二十二包⑤同款：左上按钮按压回弹（'menu'|'undo'|'redo'）
+  private pressTop(id: string): void {
+    this.topPressed = id;
     setTimeout(() => {
-      this.resetPressed = false;
+      this.topPressed = '';
     }, 120);
-    this.execFrame(dreamemberKernel.kernel3DReset());
+  }
+
+  // 1.1.0.6② 右下角缩放钮：按压回弹 + 150ms 六步平滑缩放（kernel3DZoom
+  // 缩 scale，锚点屏幕中心=世界原点投影，与 CanvasStage.zoomAtCenter 同口径）
+  private zoomAtCenter3D(factor: number): void {
+    if (this.canvasW <= 1 || this.canvasH <= 1) {
+      return;
+    }
+    this.zoomPressed = factor > 1 ? 'in' : 'out';
+    setTimeout(() => {
+      this.zoomPressed = '';
+    }, 120);
+    const steps = 6;
+    const stepF = Math.pow(factor, 1 / steps);
+    let done = 0;
+    const tick = (): void => {
+      this.execFrame(dreamemberKernel.kernel3DZoom(stepF));
+      done++;
+      if (done < steps) {
+        setTimeout(tick, 25);
+      }
+    };
+    tick();
   }
 
   // PC 滚轮缩放（方向语义与 CanvasStage 同：轴值增大 = 下滚 = 缩小）
@@ -352,59 +382,153 @@ export struct View3D {
         .onTouch((ev: TouchEvent) => this.handleTouch(ev))
         .onAxisEvent((ev: AxisEvent) => this.onCanvasAxis(ev))
 
-      // 左上浮层 ☰ ↶ ↷（与 CanvasStage 同款：3D 视图下保住主菜单/撤销入口）
-      Row({ space: 6 }) {
-        Text('☰')
-          .fontSize(18)
-          .fontColor(Theme.sub(this.dark))
-          .width(34)
-          .height(34)
-          .textAlign(TextAlign.Center)
-          .borderRadius(8)
-          .backgroundColor(this.dark ? 'rgba(30,32,36,0.72)' : 'rgba(255,255,255,0.72)')
-          .onClick(() => this.onMenuAct())
-        Text('↶')
-          .fontSize(16)
-          .fontColor(this.canUndo ? Theme.sub(this.dark)
-            : (this.dark ? '#4A4D52' : '#C8CBD0'))
-          .width(34)
-          .height(34)
-          .textAlign(TextAlign.Center)
-          .borderRadius(8)
-          .backgroundColor(this.dark ? 'rgba(30,32,36,0.72)' : 'rgba(255,255,255,0.72)')
-          .onClick(() => this.onUndoAct())
-        Text('↷')
-          .fontSize(16)
-          .fontColor(this.canRedo ? Theme.sub(this.dark)
-            : (this.dark ? '#4A4D52' : '#C8CBD0'))
-          .width(34)
-          .height(34)
-          .textAlign(TextAlign.Center)
-          .borderRadius(8)
-          .backgroundColor(this.dark ? 'rgba(30,32,36,0.72)' : 'rgba(255,255,255,0.72)')
-          .onClick(() => this.onRedoAct())
+      // 左上浮层 ☰ ↶ ↷（1.1.0.6②：与 2D CanvasStage 同款圆形钮风格——
+      // 40×40 圆形、描边+阴影+按压回弹 scale 0.86，☰ 三横条自绘；无可回退/
+      // 重做步置灰不响应。状态/动作均为宿主直传回调）
+      if (this.vpW > 200) {
+        Row({ space: 8 }) {
+          Column({ space: 3 }) {
+            Text('')
+              .width(16)
+              .height(1.6)
+              .borderRadius(1)
+              .backgroundColor(Theme.text(this.dark))
+            Text('')
+              .width(16)
+              .height(1.6)
+              .borderRadius(1)
+              .backgroundColor(Theme.text(this.dark))
+            Text('')
+              .width(16)
+              .height(1.6)
+              .borderRadius(1)
+              .backgroundColor(Theme.text(this.dark))
+          }
+          .justifyContent(FlexAlign.Center)
+          .width(40)
+          .height(40)
+          .borderRadius(20)
+          .backgroundColor(this.dark ? 'rgba(42,45,49,0.9)' : 'rgba(255,255,255,0.9)')
+          .borderWidth(1)
+          .borderColor(Theme.border(this.dark))
+          .shadow({ radius: 8, color: 'rgba(0,0,0,0.18)', offsetX: 0, offsetY: 1 })
+          .scale({
+            x: this.topPressed === 'menu' ? 0.86 : 1,
+            y: this.topPressed === 'menu' ? 0.86 : 1
+          })
+          .animation({ duration: 120, curve: Curve.EaseOut })
+          .onClick(() => {
+            this.pressTop('menu');
+            this.onMenuAct();
+          })
+          Text('↶')
+            .fontSize(18)
+            .fontColor(this.canUndo ? Theme.text(this.dark)
+              : (this.dark ? '#6E747D' : '#BBBBBB'))
+            .width(40)
+            .height(40)
+            .textAlign(TextAlign.Center)
+            .borderRadius(20)
+            .opacity(this.canUndo ? 1 : 0.55)
+            .backgroundColor(this.dark ? 'rgba(42,45,49,0.9)' : 'rgba(255,255,255,0.9)')
+            .borderWidth(1)
+            .borderColor(Theme.border(this.dark))
+            .shadow({ radius: 8, color: 'rgba(0,0,0,0.18)', offsetX: 0, offsetY: 1 })
+            .scale({
+              x: this.topPressed === 'undo' ? 0.86 : 1,
+              y: this.topPressed === 'undo' ? 0.86 : 1
+            })
+            .animation({ duration: 120, curve: Curve.EaseOut })
+            .onClick(() => {
+              if (this.canUndo) {
+                this.pressTop('undo');
+                this.onUndoAct();
+              }
+            })
+          Text('↷')
+            .fontSize(18)
+            .fontColor(this.canRedo ? Theme.text(this.dark)
+              : (this.dark ? '#6E747D' : '#BBBBBB'))
+            .width(40)
+            .height(40)
+            .textAlign(TextAlign.Center)
+            .borderRadius(20)
+            .opacity(this.canRedo ? 1 : 0.55)
+            .backgroundColor(this.dark ? 'rgba(42,45,49,0.9)' : 'rgba(255,255,255,0.9)')
+            .borderWidth(1)
+            .borderColor(Theme.border(this.dark))
+            .shadow({ radius: 8, color: 'rgba(0,0,0,0.18)', offsetX: 0, offsetY: 1 })
+            .scale({
+              x: this.topPressed === 'redo' ? 0.86 : 1,
+              y: this.topPressed === 'redo' ? 0.86 : 1
+            })
+            .animation({ duration: 120, curve: Curve.EaseOut })
+            .onClick(() => {
+              if (this.canRedo) {
+                this.pressTop('redo');
+                this.onRedoAct();
+              }
+            })
+        }
+        .position({ x: 10, y: 10 })
       }
-      .margin({ left: 8, top: 44 })
 
-      // 左上提示条（交互说明；深浅色自适应半透明底）
+      // 左上提示条（交互说明；1.1.0.6② 移到按钮组下方，与 2D toolHint 同位）
       Text('单指拖=旋转 · 双指=缩放/平移 · 点选/拖动三维点')
         .fontSize(11)
-        .fontColor(Theme.sub(this.dark))
-        .padding({ left: 10, right: 10, top: 4, bottom: 4 })
+        .fontColor(Theme.text(this.dark))
+        .maxLines(2)
+        .padding({ left: 8, right: 8, top: 4, bottom: 4 })
         .borderRadius(6)
-        .backgroundColor(this.dark ? 'rgba(30,32,36,0.72)' : 'rgba(255,255,255,0.72)')
-        .margin({ left: 122, top: 8 })
+        .backgroundColor(this.dark ? 'rgba(42,45,49,0.92)' : 'rgba(255,255,255,0.92)')
+        .constraintSize({ maxWidth: this.vpW > 16 ? this.vpW - 16 : 300 })
+        .position({ x: 10, y: 58 })
 
-      // 右上复位视角
-      Text('复位')
-        .fontSize(12)
-        .fontColor(this.resetPressed ? Theme.accent(this.dark) : Theme.sub(this.dark))
-        .padding({ left: 12, right: 12, top: 5, bottom: 5 })
-        .borderRadius(6)
-        .backgroundColor(this.dark ? 'rgba(30,32,36,0.72)' : 'rgba(255,255,255,0.72)')
-        .scale({ x: this.resetPressed ? 0.94 : 1, y: this.resetPressed ? 0.94 : 1 })
-        .margin({ left: this.vpW > 0 ? this.vpW - 64 : 300 })
-        .onClick(() => this.resetView())
+      // 右下角 ＋/－ 缩放按钮（1.1.0.6②：与 2D CanvasStage 同款圆形样式；
+      // kernel3DZoom 缩 scale，屏幕中心即世界原点投影=锚点中心）
+      if (this.vpW > 120 && this.vpH > 200) {
+        Column({ space: 8 }) {
+          Text('＋')
+            .fontSize(22)
+            .fontColor(Theme.text(this.dark))
+            .width(44)
+            .height(44)
+            .textAlign(TextAlign.Center)
+            .borderRadius(22)
+            .backgroundColor(this.dark ? 'rgba(42,45,49,0.9)' : 'rgba(255,255,255,0.9)')
+            .borderWidth(1)
+            .borderColor(Theme.border(this.dark))
+            .shadow({ radius: 8, color: 'rgba(0,0,0,0.18)', offsetX: 0, offsetY: 1 })
+            .scale({
+              x: this.zoomPressed === 'in' ? 0.86 : 1,
+              y: this.zoomPressed === 'in' ? 0.86 : 1
+            })
+            .animation({ duration: 120, curve: Curve.EaseOut })
+            .onClick(() => this.zoomAtCenter3D(1.25))
+          Text('－')
+            .fontSize(22)
+            .fontColor(Theme.text(this.dark))
+            .width(44)
+            .height(44)
+            .textAlign(TextAlign.Center)
+            .borderRadius(22)
+            .backgroundColor(this.dark ? 'rgba(42,45,49,0.9)' : 'rgba(255,255,255,0.9)')
+            .borderWidth(1)
+            .borderColor(Theme.border(this.dark))
+            .shadow({ radius: 8, color: 'rgba(0,0,0,0.18)', offsetX: 0, offsetY: 1 })
+            .scale({
+              x: this.zoomPressed === 'out' ? 0.86 : 1,
+              y: this.zoomPressed === 'out' ? 0.86 : 1
+            })
+            .animation({ duration: 120, curve: Curve.EaseOut })
+            .onClick(() => this.zoomAtCenter3D(0.8))
+        }
+        .position({ x: this.vpW - 60, y: this.vpH - 112 })
+        .transition(TransitionEffect.asymmetric(
+          TransitionEffect.opacity(0).combine(TransitionEffect.scale({ x: 0.6, y: 0.6 })),
+          TransitionEffect.opacity(0).combine(TransitionEffect.scale({ x: 0.6, y: 0.6 }))
+        ).animation({ duration: 180, curve: Curve.EaseOut }))
+      }
     }
     .width('100%')
     .height('100%')

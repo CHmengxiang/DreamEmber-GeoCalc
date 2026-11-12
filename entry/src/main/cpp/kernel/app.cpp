@@ -13994,7 +13994,6 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
     const double fx = ca * cb, fy = sa * cb, fz = sb;
 
     const std::string axisC = darkTheme ? "#C9CDD4" : "#000000";
-    const std::string gridC = darkTheme ? "#3A3D42" : "#B8BCC2";
     const std::string textC = darkTheme ? "#9AA0A8" : "#555555";
     const std::string selRing = darkTheme ? "#8FB6FF" : "#007DFF";
     const double us = V.uiScale;
@@ -14002,26 +14001,8 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
     // 视口裁剪矩形（外扩 24px 缓冲）
     const double xmn = -24, ymn = -24, xmx = V.width + 24, ymx = V.height + 24;
 
-    // ---- 底面网格（z=0 平面，[-5,5]²，步长 1） ----
-    if (showGrid) {
-        DrawCmd gm;
-        gm.op = DrawOp::MultiSeg;
-        gm.color = gridC;
-        gm.lineWidth = 0.9f * (float)us;
-        gm.pts.reserve(88 * 4);
-        for (int i = -5; i <= 5; ++i) {
-            double x1, y1, x2, y2;
-            proj((double)i, -5.0, 0.0, x1, y1);
-            proj((double)i, 5.0, 0.0, x2, y2);
-            gm.pts.insert(gm.pts.end(),
-                          { (float)x1, (float)y1, (float)x2, (float)y2 });
-            proj(-5.0, (double)i, 0.0, x1, y1);
-            proj(5.0, (double)i, 0.0, x2, y2);
-            gm.pts.insert(gm.pts.end(),
-                          { (float)x1, (float)y1, (float)x2, (float)y2 });
-        }
-        out.push_back(gm);
-    }
+    // ---- 底面网状格已移除（1.1.0.6④ 用户反馈：3D 不需要网状格，有坐标轴
+    // 即可；2D 视图的 showGrid 不受影响）----
 
     // ---- 三轴（贯穿 [-R-0.6, R+0.6]）+ 刻度 + 端部箭头 + 轴名 ----
     struct AxisDef { double dx, dy, dz; const char *name; };

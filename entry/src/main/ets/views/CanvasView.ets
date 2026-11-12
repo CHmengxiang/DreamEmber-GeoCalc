@@ -1629,6 +1629,13 @@ export struct CanvasView {
   }
 
   private onResetViewEvt(): void {
+    // 1.1.0.6⑤：3D 视图下菜单重置 = 复位轨道相机（yaw30/pitch20/scale50，
+    // 原右上「复位」按钮并入本菜单项），bump 让挂载中的 View3D 重取帧
+    if (this.view3dOn) {
+      dreamemberKernel.kernel3DReset();
+      this.bump3D();
+      return;
+    }
     const frame = dreamemberKernel.kernelResetView();
     if (this.canvasW > 1 && this.canvasH > 1) {
       this.execFrame(frame);
@@ -2286,16 +2293,6 @@ export struct CanvasView {
   // 还焦点用；系统键盘模式浮层搜索框弹 IME 不走此路（与旧版一致）
   private kbReopenAfterOverlay: boolean = false;
 
-  // 七十包①：搜索框 IME 抑制空壳（AlgebraPanel.emptyKb 同构）——1px 透明
-  // 行挂 customKeyboard 即压制系统 IME，浮层期间键盘观感恒定
-  @Builder
-  private emptyKbShell() {
-    Row()
-      .width('100%')
-      .height(1)
-      .opacity(0)
-  }
-
   @Builder
   private commandOverlay() {
     Stack({ alignContent: Alignment.Top }) {
@@ -2355,11 +2352,11 @@ export struct CanvasView {
             .onChange((v: string) => {
               this.commandQuery = v;
             })
-            // 七十包①（真机复测键盘仍收）：搜索框抢焦会弹系统 IME——窗口
-            // 缩放 + 代数行 customKeyboard 空壳随失焦卸载 =「键盘收起」观感
-            //（系统键盘模式则是 IME 换焦弹跳）。挂同款 1px 空壳抑制 IME：
-            // 浮层期间键盘观感恒定，物理键盘输入搜索框照常工作
-            .customKeyboard(this.emptyKbShell())
+            // 1.1.0.6⑥（用户反馈：手机端指令搜索框拉不起系统输入法）：移除
+            // 七十包①的 1px 空壳 IME 抑制。空壳是「键盘挂浮层下」旧方案的
+            // 防跳变手段——七十一包③改为开面板先收键盘（syncKbSpacer 在浮层
+            // 期间冻结键盘管线）后跳变源头已不存在，点按搜索框系统 IME 原生
+            // 弹出；PC 物理键盘输入不受影响
         }
         .width('100%')
         .padding({ left: 12, right: 14, top: 8, bottom: 8 })

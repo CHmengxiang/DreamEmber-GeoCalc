@@ -99,10 +99,13 @@ public:
         wy = (ca * dxPx + -sa * sb * dyPx) / scale;
         wz = (cb * dyPx) / scale;
     }
-    // 轨道旋转：拖像素增量（dx 转方位、dy 转仰角，仰角钳位防翻转）
+    // 轨道旋转：拖像素增量（dx 转方位、dy 转仰角，仰角钳位防翻转）。
+    // 1.1.0.6③（用户实测反馈）：拖右画面须跟手右移——固定点屏幕 X=p·r，
+    // 近端点（X>0 侧）随 yaw 增大向左移（如 +y 端 X=3cosα 递减），故方位
+    // 取负号；仰角原语义保留（拖上画面上移，已跟手）
     void rotateBy(double dxPx, double dyPx)
     {
-        yaw += dxPx * 0.4;
+        yaw -= dxPx * 0.4;
         pitch += dyPx * 0.4;
         if (pitch > 89.9) pitch = 89.9;
         if (pitch < -89.9) pitch = -89.9;

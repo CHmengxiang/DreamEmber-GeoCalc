@@ -23,9 +23,6 @@ import { CanvasView } from '../views/CanvasView';
  */
 const DOMAIN: number = 0x0001;
 const TAG: string = 'DreamEmber';
-// 七十包⑤：隐私政策线上地址（与关于页同源）
-const PRIVACY_POLICY_URL: string =
-  'https://gitee.com/CH_mengxiang/DreamEmber-GeoCalc/blob/master/docs/privacy-policy.md';
 // 七十一包④：隐私政策版本号（日期式）——政策内容有任何变更时同步改这里，
 // 全量用户下次启动重弹确认弹窗；确认记录（privacyPolicyVersion）存本地
 // preferences，与包内版本一致才免弹
@@ -389,12 +386,9 @@ struct Index {
           .width('100%')
           .margin({ top: 4 })
           .onClick(() => {
-            try {
-              const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
-              ctx.openLink(PRIVACY_POLICY_URL, { appLinkingOnly: false });
-            } catch (err) {
-              hilog.warn(DOMAIN, TAG, 'open privacy url failed: %{public}s', JSON.stringify(err));
-            }
+            // 1.1.0.6①：改跳应用内隐私政策页（开鸿系统实测 openLink 打不开
+            // 系统浏览器——政策全文随包内置，与关于页同源跳转 pages/Privacy）
+            router.pushUrl({ url: 'pages/Privacy' });
           })
         Text('本应用完全离线运行：您的几何文件、计算数据仅保存在本机，我们不会收集、上传任何个人数据。点击「同意并继续」即表示您已阅读并同意上述政策。')
           .fontSize(13)
@@ -532,10 +526,14 @@ struct Index {
             this.menuOpen = false;
             this.fireEvt('evt.openCas');
           })
-          this.MenuRow('重置视图', '回到标准缩放与原点居中', () => {
-            this.menuOpen = false;
-            this.fireEvt('evt.resetView');
-          })
+          // 1.1.0.6⑤：3D 的视角复位并入本项（原 3D 右上「复位」按钮已删）
+          // ——描述按当前视图给出：2D 回标准缩放与原点，3D 回标准轨道视角
+          this.MenuRow('重置视图',
+            this.view3dOn ? '回到标准视角（方位 30° · 仰角 20°）'
+              : '回到标准缩放与原点居中', () => {
+              this.menuOpen = false;
+              this.fireEvt('evt.resetView');
+            })
 
           Divider().color(this.cDivider())
 
