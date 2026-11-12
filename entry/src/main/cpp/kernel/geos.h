@@ -12,7 +12,7 @@
 namespace dreamember {
 
 enum class GeoType { Point, Segment, Line, Ray, Vector, Circle, Polygon, Function, Numeric, Angle, List, Text,
-                     Surface, Sphere, Cylinder, Line3, Plane, Circle3, Conic3 };
+                     Surface, Sphere, Cylinder, Line3, Plane, Circle3, Conic3, Cone };
 
 struct GeoColor {
     int r = 0, g = 0, b = 0;
@@ -525,6 +525,32 @@ public:
                                : bcz() + (heightNum ? heightNum->value : height));
     }
     std::function<void(GeoCylinder *)> calc;
+    void update() override { if (calc) calc(this); }
+    std::string valueText() const override;
+    std::string definitionText() const override;
+};
+
+// 圆锥面（Cone(V, B, r)：顶点 V、底心 B、底半径 r；代数上无限双锥——
+// GGB 二次曲面口径，渲染裁剪到顶点→底面）。1.1.0.5
+class GeoCone : public GeoElement {
+public:
+    GeoCone() : GeoElement(GeoType::Cone) { color = {0x2C, 0x6B, 0xD4}; }
+    GeoPoint *apexPt = nullptr;         // 顶点（三维点）
+    bool aImage = false;
+    double iax = 0, iay = 0, iaz = 0;
+    GeoPoint *basePt = nullptr;         // 底心（三维点）
+    bool bImage = false;
+    double ibx = 0, iby = 0, ibz = 0;
+    GeoNumeric *radiusNum = nullptr;    // 底半径引用（可空）
+    double radius = 0;
+    double fillAlpha = 1.0;             // 实心填充透明度（遮挡因子联动）
+    std::function<void(GeoCone *)> calc;
+    double avx() const { return aImage ? iax : (apexPt ? apexPt->x : 0.0); }
+    double avy() const { return aImage ? iay : (apexPt ? apexPt->y : 0.0); }
+    double avz() const { return aImage ? iaz : (apexPt ? apexPt->z : 0.0); }
+    double bcx() const { return bImage ? ibx : (basePt ? basePt->x : 0.0); }
+    double bcy() const { return bImage ? iby : (basePt ? basePt->y : 0.0); }
+    double bcz() const { return bImage ? ibz : (basePt ? basePt->z : 0.0); }
     void update() override { if (calc) calc(this); }
     std::string valueText() const override;
     std::string definitionText() const override;

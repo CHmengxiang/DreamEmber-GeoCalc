@@ -4034,6 +4034,59 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         made = std::move(cy);
         return true;
     }
+    // 1.1.0.5 Cone(顶点, 底心, 底半径)：GGB 同款（代数上无限双锥，渲染
+    // 裁剪到顶点→底面）；字面量点元组与引用皆可
+    if (cmdLower == "cone" && a.size() == 3) {
+        CmdPt v0;
+        if (!cmdPointArg(a[0], v0)) {
+            lastError = "未找到点 " + a[0];
+            made = nullptr;
+            return true;
+        }
+        CmdPt b0;
+        if (!cmdPointArg(a[1], b0)) {
+            lastError = "未找到点 " + a[1];
+            made = nullptr;
+            return true;
+        }
+        auto cn = std::make_unique<GeoCone>();
+        if (v0.lit) {
+            cn->aImage = true;
+            cn->iax = v0.x;
+            cn->iay = v0.y;
+            cn->iaz = v0.z;
+        } else {
+            cn->apexPt = v0.ref;
+        }
+        if (b0.lit) {
+            cn->bImage = true;
+            cn->ibx = b0.x;
+            cn->iby = b0.y;
+            cn->ibz = b0.z;
+        } else {
+            cn->basePt = b0.ref;
+        }
+        if (GeoNumeric *rn = dynamic_cast<GeoNumeric *>(lookup(a[2]))) {
+            cn->radiusNum = rn;
+        } else {
+            Expr re;
+            std::string err;
+            if (!re.parse(a[2], err) || re.containsX()) {
+                lastError = "半径不是数: " + a[2];
+                made = nullptr;
+                return true;
+            }
+            cn->radius = re.eval(0.0);
+            if (!(cn->radius > 0)) { lastError = "半径必须为正数"; made = nullptr; return true; }
+        }
+        if (v0.ref) cn->inputs.push_back(v0.ref);
+        if (b0.ref) cn->inputs.push_back(b0.ref);
+        if (cn->radiusNum) cn->inputs.push_back(cn->radiusNum);
+        cn->cmdName = "Cone";
+        cn->cmdArgs = a;
+        made = std::move(cn);
+        return true;
+    }
     if (cmdLower == "perpendicularline" && a.size() == 2) {
         // PerpendicularLine(点, 基准) — 上游 参数序：点在前，基准（直线/线段/
         // 一次函数图像）在后。先按点,基准解；若第一个参数不是点再试反序（容错）。
@@ -5294,6 +5347,205 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                 g->vx = R * (e2x - (b1 / c) * w1);
                 g->vy = R * (e2y - (b1 / c) * w2);
                 g->vz = R * (e2z - (b1 / c) * w3);
+            };
+            cn->update();
+            made = std::move(cn);
+            return true;
+        }
+        // 1.1.0.5 交圆锥曲线（GGB 无限二次锥口径）：Intersect(平面, 圆锥)
+        // → 圆（面⊥轴）/ 椭圆（斜交，c²>σ²）/ 抛物线（c²=σ²，面∥母线）/
+        // 双曲线（c²<σ²，双支）；过顶点退化（双线/切线/点）暂未定义——候选
+        GeoCone *co1 = dynamic_cast<GeoCone *>(o1);
+        GeoCone *co2 = dynamic_cast<GeoCone *>(o2);
+        if ((pa1 && co2) || (co1 && pa2)) {
+            GeoPlane *PP = pa1 ? pa1 : pa2;
+            GeoCone *CO = co1 ? co1 : co2;
+            auto cn = std::make_unique<GeoConic3>();
+            cn->inputs = { PP, CO };
+            cn->cmdName = "Intersect";
+            cn->cmdArgs = { a[0], a[1] };
+            GeoPlane *P2 = PP;
+            GeoCone *C2 = CO;
+            cn->calc = [P2, C2](GeoConic3 *g) {
+                g->kind = 0;
+                g->tangent = false;
+                g->cx = g->cy = g->cz = g->ux = g->uy = g->uz =
+                    g->vx = g->vy = g->vz = g->p1x = g->p1y = g->p1z =
+                    g->p2x = g->p2y = g->p2z = g->wx = g->wy = g->wz = NAN;
+                const double nl = sqrt(P2->a * P2->a + P2->b * P2->b
+                                       + P2->c * P2->c);
+                if (!(nl > 1e-12)) return;
+                const double n1 = P2->a / nl, n2 = P2->b / nl, n3 = P2->c / nl;
+                const double dd = P2->d / nl;
+                const double vx = C2->avx(), vy = C2->avy(), vz = C2->avz();
+                const double bx = C2->bcx(), by = C2->bcy(), bz = C2->bcz();
+                double wx0 = bx - vx, wy0 = by - vy, wz0 = bz - vz;
+                const double wl = sqrt(wx0 * wx0 + wy0 * wy0 + wz0 * wz0);
+                if (!(wl > 1e-12)) return;
+                const double w1 = wx0 / wl, w2 = wy0 / wl, w3 = wz0 / wl;
+                double R = C2->radius;
+                if (C2->radiusNum) R = C2->radiusNum->value;
+                if (!std::isfinite(R) || !(R > 1e-12)) return;
+                // γ=cos半顶角, σ=sin半顶角（半顶角=轴与母线夹角）
+                const double gam = wl / sqrt(wl * wl + R * R);
+                const double sg = R / sqrt(wl * wl + R * R);
+                const double c = n1 * w1 + n2 * w2 + n3 * w3;
+                const double k = (n1 * vx + n2 * vy + n3 * vz) - dd;
+                if (fabs(k) < 1e-12) return;   // 过顶点退化——候选
+                // 轴正交基（最小分量叉积法）
+                double e1x, e1y, e1z;
+                if (fabs(w1) <= fabs(w2) && fabs(w1) <= fabs(w3)) {
+                    e1x = 0; e1y = w3; e1z = -w2;
+                } else if (fabs(w2) <= fabs(w3)) {
+                    e1x = -w3; e1y = 0; e1z = w1;
+                } else {
+                    e1x = w2; e1y = -w1; e1z = 0;
+                }
+                const double el = sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+                if (!(el > 1e-12)) return;
+                e1x /= el; e1y /= el; e1z /= el;
+                const double e2x = w2 * e1z - w3 * e1y;
+                const double e2y = w3 * e1x - w1 * e1z;
+                const double e2z = w1 * e1y - w2 * e1x;
+                const double a1 = n1 * e1x + n2 * e1y + n3 * e1z;
+                const double b1 = n1 * e2x + n2 * e2y + n3 * e2z;
+                if (fabs(fabs(c) - 1.0) < 1e-9) {
+                    // 面 ⊥ 轴 → 圆（无限双锥恒有圆；s=母线长，可负=对面叶）
+                    const double s = -k / (gam * c);
+                    if (!(fabs(s * sg) > 1e-12)) return;
+                    g->kind = 0;
+                    g->cx = vx + s * gam * w1;
+                    g->cy = vy + s * gam * w2;
+                    g->cz = vz + s * gam * w3;
+                    g->ux = fabs(s) * sg * e1x;
+                    g->uy = fabs(s) * sg * e1y;
+                    g->uz = fabs(s) * sg * e1z;
+                    g->vx = fabs(s) * sg * e2x;
+                    g->vy = fabs(s) * sg * e2y;
+                    g->vz = fabs(s) * sg * e2z;
+                    return;
+                }
+                // 平面内正交基 p1, p2（n 最小分量叉积 + n×p1）
+                double p1x, p1y, p1z;
+                if (fabs(n1) <= fabs(n2) && fabs(n1) <= fabs(n3)) {
+                    p1x = 0; p1y = n3; p1z = -n2;
+                } else if (fabs(n2) <= fabs(n3)) {
+                    p1x = -n3; p1y = 0; p1z = n1;
+                } else {
+                    p1x = n2; p1y = -n1; p1z = 0;
+                }
+                const double pl = sqrt(p1x * p1x + p1y * p1y + p1z * p1z);
+                if (!(pl > 1e-12)) return;
+                p1x /= pl; p1y /= pl; p1z /= pl;
+                const double p2x = n2 * p1z - n3 * p1y;
+                const double p2y = n3 * p1x - n1 * p1z;
+                const double p2z = n1 * p1y - n2 * p1x;
+                // 轴在平面内投影坐标 w' = (w·p1, w·p2)，|w'| = √(1−c²)
+                const double w1p = w1 * p1x + w2 * p1y + w3 * p1z;
+                const double w2p = w1 * p2x + w2 * p2y + w3 * p2z;
+                const double q11 = w1p * w1p - gam * gam;
+                const double q12 = w1p * w2p;
+                const double q22 = w2p * w2p - gam * gam;
+                const double det = q11 * q22 - q12 * q12;   // = γ²(c²−σ²)
+                // 中心 u_c = k·c·Q⁻¹·w'（平面坐标），世界 = P0 + u_cx·p1 + …
+                const double P0x = vx - k * n1, P0y = vy - k * n2,
+                             P0z = vz - k * n3;
+                if (fabs(det) < 1e-15) {
+                    // 抛物线（c² = σ²，面∥母线）：旋转标架 e_x = w'/γ,
+                    // e_y = n × e_x；ξ' = k(c²−γ²)/(2cγ) − γη'²/(2kc)
+                    if (fabs(c) < 1e-12) return;
+                    const double ginv = 1.0 / gam;
+                    const double exX = (w1 - c * n1) * ginv;
+                    const double exY = (w2 - c * n2) * ginv;
+                    const double exZ = (w3 - c * n3) * ginv;
+                    const double eyX = n2 * exZ - n3 * exY;
+                    const double eyY = n3 * exX - n1 * exZ;
+                    const double eyZ = n1 * exY - n2 * exX;
+                    const double xiv = k * (c * c - gam * gam) / (2.0 * c * gam);
+                    g->kind = 3;
+                    g->cx = P0x + xiv * exX;
+                    g->cy = P0y + xiv * exY;
+                    g->cz = P0z + xiv * exZ;
+                    g->ux = -(gam / (2.0 * k * c)) * exX;
+                    g->uy = -(gam / (2.0 * k * c)) * exY;
+                    g->uz = -(gam / (2.0 * k * c)) * exZ;
+                    g->vx = eyX;
+                    g->vy = eyY;
+                    g->vz = eyZ;
+                    return;
+                }
+                // 椭圆（c²>σ²） / 双曲线（c²<σ²）：二次型特征分解
+                const double ucx2 = k * c * (q22 * w1p - q12 * w2p) / det;
+                const double ucy2 = k * c * (-q12 * w1p + q11 * w2p) / det;
+                const double fu = ucx2 * (q11 * ucx2 + q12 * ucy2)
+                                  + ucy2 * (q12 * ucx2 + q22 * ucy2)
+                                  - 2.0 * k * c * (w1p * ucx2 + w2p * ucy2)
+                                  + k * k * (c * c - gam * gam);
+                const double H = -fu;
+                if (!std::isfinite(H)) return;
+                const double tr = q11 + q22;
+                const double dfq = sqrt(std::max(
+                    0.0, (q11 - q22) * (q11 - q22) / 4.0 + q12 * q12));
+                double l1 = tr / 2.0 + dfq;
+                double l2 = tr / 2.0 - dfq;
+                if (l1 < l2) { const double tmp = l1; l1 = l2; l2 = tmp; }
+                if (fabs(l1) < 1e-15 || fabs(l2) < 1e-15) return;
+                // 特征向量（平面坐标）：λ 的 (q12, λ−q11) / (λ−q22, q12)
+                double v1x, v1y, v2x, v2y;
+                if (fabs(q12) > 1e-12) {
+                    v1x = q12; v1y = l1 - q11;
+                    v2x = q12; v2y = l2 - q11;
+                } else {
+                    v1x = 1.0; v1y = 0.0;
+                    v2x = 0.0; v2y = 1.0;
+                }
+                const double v1l = sqrt(v1x * v1x + v1y * v1y);
+                const double v2l = sqrt(v2x * v2x + v2y * v2y);
+                if (!(v1l > 1e-12) || !(v2l > 1e-12)) return;
+                v1x /= v1l; v1y /= v1l;
+                v2x /= v2l; v2y /= v2l;
+                const double sa1 = sqrt(fabs(H) / fabs(l1));
+                const double sa2 = sqrt(fabs(H) / fabs(l2));
+                if (!std::isfinite(sa1) || !std::isfinite(sa2)) return;
+                // 平面坐标 → 世界
+                const double e1wX = p1x, e1wY = p1y, e1wZ = p1z;
+                const double e2wX = p2x, e2wY = p2y, e2wZ = p2z;
+                if (det > 0) {
+                    // 椭圆：Q 负定 → H<0；长半轴=小|λ|方向，半轴=√(−H/|λ|)
+                    if (!(H < -1e-15)) return;
+                    g->kind = 1;
+                    g->cx = P0x + ucx2 * p1x + ucy2 * p2x;
+                    g->cy = P0y + ucx2 * p1y + ucy2 * p2y;
+                    g->cz = P0z + ucx2 * p1z + ucy2 * p2z;
+                    if (sa1 >= sa2) {
+                        g->ux = sa1 * (v1x * e1wX + v1y * e2wX);
+                        g->uy = sa1 * (v1x * e1wY + v1y * e2wY);
+                        g->uz = sa1 * (v1x * e1wZ + v1y * e2wZ);
+                        g->vx = sa2 * (v2x * e1wX + v2y * e2wX);
+                        g->vy = sa2 * (v2x * e1wY + v2y * e2wY);
+                        g->vz = sa2 * (v2x * e1wZ + v2y * e2wZ);
+                    } else {
+                        g->ux = sa2 * (v2x * e1wX + v2y * e2wX);
+                        g->uy = sa2 * (v2x * e1wY + v2y * e2wY);
+                        g->uz = sa2 * (v2x * e1wZ + v2y * e2wZ);
+                        g->vx = sa1 * (v1x * e1wX + v1y * e2wX);
+                        g->vy = sa1 * (v1x * e1wY + v1y * e2wY);
+                        g->vz = sa1 * (v1x * e1wZ + v1y * e2wZ);
+                    }
+                    return;
+                }
+                // 双曲线：横轴=λ1>0 方向（H/λ1），共轭=|λ2| 方向；双支 ±
+                if (!(H > 1e-15)) return;
+                g->kind = 4;
+                g->cx = P0x + ucx2 * p1x + ucy2 * p2x;
+                g->cy = P0y + ucx2 * p1y + ucy2 * p2y;
+                g->cz = P0z + ucx2 * p1z + ucy2 * p2z;
+                g->ux = sqrt(H / l1) * (v1x * e1wX + v1y * e2wX);
+                g->uy = sqrt(H / l1) * (v1x * e1wY + v1y * e2wY);
+                g->uz = sqrt(H / l1) * (v1x * e1wZ + v1y * e2wZ);
+                g->vx = sqrt(H / fabs(l2)) * (v2x * e1wX + v2y * e2wX);
+                g->vy = sqrt(H / fabs(l2)) * (v2x * e1wY + v2y * e2wY);
+                g->vz = sqrt(H / fabs(l2)) * (v2x * e1wZ + v2y * e2wZ);
             };
             cn->update();
             made = std::move(cn);
@@ -9879,6 +10131,7 @@ void Kernel::algebraRows(std::vector<AlgebraRow> &out) const
         case GeoType::Circle3: r.type = "circle"; break;
         // 1.1.0.1 圆锥曲线独立行类型（入「圆锥曲线」分组）
         case GeoType::Conic3: r.type = "conic"; break;
+        case GeoType::Cone: r.type = "cone"; break;
         case GeoType::Numeric: {
             GeoNumeric *n = static_cast<GeoNumeric *>(g.get());
             r.type = n->isSlider ? "slider" : "numeric";
@@ -10497,6 +10750,7 @@ std::string Kernel::propsOf(const std::string &label) const
     case GeoType::Plane: ty = "plane"; break;
     case GeoType::Circle3: ty = "circle"; break;
     case GeoType::Conic3: ty = "circle"; break;
+    case GeoType::Cone: ty = "cylinder"; break;
     }
     add("type", ty);
     add("vis", g->visible ? "1" : "0");
@@ -11050,6 +11304,27 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->heightNum = s->heightNum;
             d->radius = s->radius;
             d->height = s->height;
+            d->fillAlpha = s->fillAlpha;
+            d->calc = s->calc;
+            break;
+        }
+        case GeoType::Cone: {
+            // 1.1.0.5 圆锥重定义搬运（指针/缓存/闭包）
+            GeoCone *d = static_cast<GeoCone *>(dst);
+            GeoCone *s = static_cast<GeoCone *>(src);
+            d->apexPt = s->apexPt;
+            d->aImage = s->aImage;
+            d->iax = s->iax;
+            d->iay = s->iay;
+            d->iaz = s->iaz;
+            d->basePt = s->basePt;
+            d->bImage = s->bImage;
+            d->ibx = s->ibx;
+            d->iby = s->iby;
+            d->ibz = s->ibz;
+            d->radiusNum = s->radiusNum;
+            d->radius = s->radius;
+            d->fillAlpha = s->fillAlpha;
             d->calc = s->calc;
             break;
         }
@@ -13671,6 +13946,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
         case GeoType::Plane:
         case GeoType::Circle3:
         case GeoType::Conic3:
+        case GeoType::Cone:
             break;
         }
     }
@@ -13922,6 +14198,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         double scx = 0, scy = 0, scz = 0, srad = 0;
         double cbx = 0, cby = 0, cbz = 0, cwx = 0, cwy = 0, cwz = 0;
         double crad = 0, chgt = 0;
+        double cgam = 0, csig = 0;   // kind4 圆锥：cos/sin 半顶角
         // kind 3 曲面格片：poly + 平均深度
         double qdep = 0;
         const void *owner = nullptr;   // 所属对象（源实体背向面豁免用）
@@ -14056,6 +14333,34 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             }
         }
     }
+    // 1.1.0.5 圆锥实体遮挡体（解析：角域二次 × 轴向带）
+    for (auto &g : geos_) {
+        if (!g->visible || g->type() != GeoType::Cone) continue;
+        GeoCone *cn = static_cast<GeoCone *>(g.get());
+        if (cn->fillAlpha < 0.003) continue;
+        double r = cn->radiusNum ? cn->radiusNum->value : cn->radius;
+        if (!(r > 1e-12) || !std::isfinite(r)) continue;
+        const double bx = cn->avx(), by = cn->avy(), bz = cn->avz();
+        const double wx0 = cn->bcx() - bx, wy0 = cn->bcy() - by,
+                     wz0 = cn->bcz() - bz;
+        const double wl = sqrt(wx0 * wx0 + wy0 * wy0 + wz0 * wz0);
+        if (!(wl > 1e-12)) continue;
+        Occ3 oc;
+        oc.kind = 4;
+        oc.owner = cn;
+        oc.alpha = cn->fillAlpha;
+        oc.cbx = bx;
+        oc.cby = by;
+        oc.cbz = bz;
+        oc.cwx = wx0 / wl;
+        oc.cwy = wy0 / wl;
+        oc.cwz = wz0 / wl;
+        oc.crad = r;
+        oc.chgt = wl;
+        oc.cgam = wl / sqrt(wl * wl + r * r);
+        oc.csig = r / sqrt(wl * wl + r * r);
+        occs.push_back(std::move(oc));
+    }
     // 投影像素点是否落在多边形内（射线交叉法）
     auto polyHit = [](const std::vector<float> &poly, double px, double py) -> bool {
         const size_t n = poly.size() / 2;
@@ -14076,6 +14381,56 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
     auto veilAt = [&](double wx2, double wy2, double wz2) -> double {
         double vis = 1.0;
         for (const Occ3 &oc : occs) {
+            if (oc.kind == 4) {
+                // 1.1.0.5 圆锥实体：半线 {P−t·f, t>0} 与实体（角域
+                // (u·w)² ≥ γ²|u|² 且轴向 ∈ [0,h]）相交
+                const double dxx = wx2 - oc.cbx, dyy = wy2 - oc.cby,
+                             dzz = wz2 - oc.cbz;
+                const double dw = dxx * oc.cwx + dyy * oc.cwy
+                                  + dzz * oc.cwz;
+                const double fw = fx * oc.cwx + fy * oc.cwy + fz * oc.cwz;
+                const double g2 = oc.cgam * oc.cgam;
+                const double dF = dxx * fx + dyy * fy + dzz * fz;
+                const double aq = g2 - fw * fw;
+                const double bq = g2 * dF - dw * fw;
+                const double cq = g2 * (dxx * dxx + dyy * dyy + dzz * dzz)
+                                  - dw * dw;
+                double rt0, rt1;
+                if (fabs(aq) < 1e-14) {
+                    if (fabs(bq) < 1e-14) {
+                        if (cq > 0) continue;
+                        rt0 = -1e18;
+                        rt1 = 1e18;
+                    } else {
+                        const double r0 = -cq / bq;
+                        if (cq <= 0) { rt0 = r0; rt1 = 1e18; }
+                        else { rt0 = -1e18; rt1 = r0; }
+                    }
+                } else {
+                    const double disc = bq * bq - aq * cq;
+                    if (disc < 0) continue;
+                    const double sq = sqrt(disc);
+                    rt0 = (-bq - sq) / aq;
+                    rt1 = (-bq + sq) / aq;
+                    if (aq < 0) { const double tmp = rt0; rt0 = rt1; rt1 = tmp; }
+                }
+                double alo, ahi;
+                if (fabs(fw) < 1e-14) {
+                    if (dw < 0 || dw > oc.chgt) continue;
+                    alo = -1e18;
+                    ahi = 1e18;
+                } else if (fw > 0) {
+                    alo = (dw - oc.chgt) / fw;
+                    ahi = dw / fw;
+                } else {
+                    alo = dw / fw;
+                    ahi = (dw - oc.chgt) / fw;
+                }
+                const double lo = std::max(rt0, std::max(alo, 0.0));
+                const double hi = std::min(rt1, ahi);
+                if (hi >= lo && hi > 0) vis *= 1.0 - oc.alpha;
+                continue;
+            }
             if (oc.kind == 3) {
                 // 1.1.0.4 曲面格片：投影命中且 P 深于格片 → 遮挡
                 double px3, py3;
@@ -14175,6 +14530,19 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                                  dpy = dyy - ax * oc.cwy,
                                  dpz = dzz - ax * oc.cwz;
                     if ((dpx * fx + dpy * fy + dpz * fz) > 0) {
+                        vis *= 1.0 - oc.alpha;
+                    }
+                } else if (oc.kind == 4) {
+                    // 圆锥背向面：外法向 N = (u·w)w − γ²u，N·f > 0 → 背向
+                    const double dxx = wx2 - oc.cbx, dyy = wy2 - oc.cby,
+                                 dzz = wz2 - oc.cbz;
+                    const double dw = dxx * oc.cwx + dyy * oc.cwy
+                                      + dzz * oc.cwz;
+                    const double dF = dxx * fx + dyy * fy + dzz * fz;
+                    const double fwc = fx * oc.cwx + fy * oc.cwy
+                                       + fz * oc.cwz;
+                    const double g2 = oc.cgam * oc.cgam;
+                    if ((dw * fwc - g2 * dF) > 0) {
                         vis *= 1.0 - oc.alpha;
                     }
                 } else {
@@ -14299,6 +14667,39 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                     const double r0 = (-Bq - sq) / Aq, r1 = (-Bq + sq) / Aq;
                     if (r0 > 1e-9 && r0 < 1.0 - 1e-9) ts.push_back(r0);
                     if (r1 > 1e-9 && r1 < 1.0 - 1e-9) ts.push_back(r1);
+                }
+                continue;
+            }
+            if (oc.kind == 4) {
+                // 1.1.0.5 锥体边界与段交：角域二次根（侧面）+ 轴向线性根（底）
+                const double dxx = wx1 - oc.cbx, dyy = wy1 - oc.cby,
+                             dzz = wz1 - oc.cbz;
+                const double dw = dxx * oc.cwx + dyy * oc.cwy
+                                  + dzz * oc.cwz;
+                const double fw = dx3 * oc.cwx + dy3 * oc.cwy
+                                  + dz3 * oc.cwz;
+                const double g2 = oc.cgam * oc.cgam;
+                const double dF = dxx * dx3 + dyy * dy3 + dzz * dz3;
+                const double aq = g2 - fw * fw;
+                const double bq = g2 * dF - dw * fw;
+                const double cq = g2 * (dxx * dxx + dyy * dyy + dzz * dzz)
+                                  - dw * dw;
+                if (fabs(aq) > 1e-14) {
+                    const double disc = bq * bq - aq * cq;
+                    if (disc >= 0) {
+                        const double sq = sqrt(disc);
+                        const double r0 = (-bq - sq) / aq,
+                                     r1 = (-bq + sq) / aq;
+                        if (r0 > 1e-9 && r0 < 1.0 - 1e-9) ts.push_back(r0);
+                        if (r1 > 1e-9 && r1 < 1.0 - 1e-9) ts.push_back(r1);
+                    }
+                } else if (fabs(bq) > 1e-14) {
+                    const double r0 = -cq / bq;
+                    if (r0 > 1e-9 && r0 < 1.0 - 1e-9) ts.push_back(r0);
+                }
+                if (fabs(fw) > 1e-14) {
+                    const double r0 = (oc.chgt - dw) / fw;
+                    if (r0 > 1e-9 && r0 < 1.0 - 1e-9) ts.push_back(r0);
                 }
                 continue;
             }
@@ -14684,11 +15085,102 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 labelList.push_back(lb1);
                 break;
             }
+            const void *srcSolid = nullptr;
+            if (cn->inputs.size() > 1) {
+                if (dynamic_cast<GeoCylinder *>(cn->inputs[1]) != nullptr) {
+                    srcSolid = cn->inputs[1];
+                } else if (dynamic_cast<GeoCone *>(cn->inputs[1]) != nullptr) {
+                    srcSolid = cn->inputs[1];
+                }
+            }
+            if (cn->kind == 3 || cn->kind == 4) {
+                // 1.1.0.5 抛物线 X = C + s²U + s·V（s 视域相关）；双曲线
+                // X = C ± (cosh t·U + sinh t·V) 双支；逐段走 A4 遮挡拆段
+                const double au = sqrt(cn->ux * cn->ux + cn->uy * cn->uy
+                                       + cn->uz * cn->uz);
+                const double av = sqrt(cn->vx * cn->vx + cn->vy * cn->vy
+                                       + cn->vz * cn->vz);
+                double Lx = sqrt((double)V.width * V.width
+                                 + (double)V.height * V.height) / V.scale
+                            + 5.0;
+                if (cn->kind == 3) {
+                    double S = 1e4;
+                    if (au > 1e-9) S = std::min(S, sqrt(2.0 * Lx / au));
+                    if (av > 1e-9) S = std::min(S, Lx / av);
+                    const int NS = 64;
+                    double qx = cn->cx + (-S) * (-S) * cn->ux
+                                + (-S) * cn->vx;
+                    double qy = cn->cy + (-S) * (-S) * cn->uy
+                                + (-S) * cn->vy;
+                    double qz = cn->cz + (-S) * (-S) * cn->uz
+                                + (-S) * cn->vz;
+                    for (int i = 1; i <= NS; ++i) {
+                        const double t2 = -S + 2.0 * S * i / NS;
+                        const double nx2 = cn->cx + t2 * t2 * cn->ux
+                                           + t2 * cn->vx;
+                        const double ny2 = cn->cy + t2 * t2 * cn->uy
+                                           + t2 * cn->vy;
+                        const double nz2 = cn->cz + t2 * t2 * cn->uz
+                                           + t2 * cn->vz;
+                        drawSplitSeg(qx, qy, qz, nx2, ny2, nz2, cnCol,
+                                     cn->lineThickness / 3.0f, srcSolid);
+                        qx = nx2;
+                        qy = ny2;
+                        qz = nz2;
+                    }
+                } else {
+                    const double Xr = (au > 1e-9) ? Lx / au : 8.0;
+                    double T = 3.0;
+                    if (Xr > 1.0) {
+                        T = log(Xr + 1.0 + sqrt(std::max(
+                            0.0, (Xr + 1.0) * (Xr + 1.0) - 1.0)));
+                    }
+                    T = std::min(8.0, std::max(0.3, T));
+                    const int NS = 32;
+                    for (int br = 0; br < 2; ++br) {
+                        const double sgn = br == 0 ? 1.0 : -1.0;
+                        double qx = cn->cx
+                                    + sgn * (std::cosh(-T) * cn->ux
+                                             + std::sinh(-T) * cn->vx);
+                        double qy = cn->cy
+                                    + sgn * (std::cosh(-T) * cn->uy
+                                             + std::sinh(-T) * cn->vy);
+                        double qz = cn->cz
+                                    + sgn * (std::cosh(-T) * cn->uz
+                                             + std::sinh(-T) * cn->vz);
+                        for (int i = 1; i <= NS; ++i) {
+                            const double t2 = -T + 2.0 * T * i / NS;
+                            const double ch = std::cosh(t2);
+                            const double sh = std::sinh(t2);
+                            const double nx2 = cn->cx
+                                               + sgn * (ch * cn->ux
+                                                        + sh * cn->vx);
+                            const double ny2 = cn->cy
+                                               + sgn * (ch * cn->uy
+                                                        + sh * cn->vy);
+                            const double nz2 = cn->cz
+                                               + sgn * (ch * cn->uz
+                                                        + sh * cn->vz);
+                            drawSplitSeg(qx, qy, qz, nx2, ny2, nz2, cnCol,
+                                         cn->lineThickness / 3.0f, srcSolid);
+                            qx = nx2;
+                            qy = ny2;
+                            qz = nz2;
+                        }
+                    }
+                }
+                DrawCmd lb2;
+                lb2.op = DrawOp::Text;
+                lb2.color = cnCol;
+                double lpx2, lpy2;
+                proj(cn->cx + cn->ux, cn->cy + cn->uy, cn->cz + cn->uz,
+                     lpx2, lpy2);
+                lb2.pts = { (float)(lpx2 + 6 * us), (float)(lpy2 - 6 * us) };
+                lb2.text = cn->label;
+                labelList.push_back(lb2);
+                break;
+            }
             const int NC = 64;
-            const GeoCylinder *srcCyl =
-                dynamic_cast<GeoCylinder *>(cn->inputs.size() > 1
-                                                ? cn->inputs[1]
-                                                : nullptr);
             double labX2 = 0, labY2 = 0;
             {
                 double ppx, ppy;
@@ -14707,7 +15199,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                     cn->cx + std::cos(t1) * cn->ux + std::sin(t1) * cn->vx,
                     cn->cy + std::cos(t1) * cn->uy + std::sin(t1) * cn->vy,
                     cn->cz + std::cos(t1) * cn->uz + std::sin(t1) * cn->vz,
-                    cnCol, cn->lineThickness / 3.0f, srcCyl);
+                    cnCol, cn->lineThickness / 3.0f, srcSolid);
             }
             DrawCmd lb3;
             lb3.op = DrawOp::Text;
@@ -15053,6 +15545,166 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             proj((ax + bx) / 2 + r, (ay + by) / 2, (az + bz) / 2, lpx, lpy);
             lb.pts = { (float)(lpx + 6 * us), (float)lpy };
             lb.text = cy->label;
+            labelList.push_back(lb);
+            break;
+        }
+        case GeoType::Cone: {
+            // 1.1.0.5 圆锥实心：侧面 16 三角（顶点→底弧，母向法向光照）+
+            // 底盘（轴向法向），深度排序远→近；线框=底圆+8 母线
+            GeoCone *cn = static_cast<GeoCone *>(g.get());
+            double r = cn->radiusNum ? cn->radiusNum->value : cn->radius;
+            if (!(r > 1e-12) || !std::isfinite(r)) break;
+            const double ax = cn->avx(), ay = cn->avy(), az = cn->avz();
+            const double bx = cn->bcx(), by = cn->bcy(), bz = cn->bcz();
+            double ux = bx - ax, uy = by - ay, uz = bz - az;
+            const double L = sqrt(ux * ux + uy * uy + uz * uz);
+            if (!(L > 1e-12)) break;
+            ux /= L; uy /= L; uz /= L;
+            double e1x = uy * 1.0 - uz * 0.0, e1y = uz * 0.0 - ux * 1.0,
+                   e1z = ux * 0.0 - uy * 0.0;
+            const double e1l = sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+            if (e1l < 1e-9) { e1x = 1; e1y = 0; e1z = 0; }
+            else { e1x /= e1l; e1y /= e1l; e1z /= e1l; }
+            const double e2x = uy * e1z - uz * e1y;
+            const double e2y = uz * e1x - ux * e1z;
+            const double e2z = ux * e1y - uy * e1x;
+            const std::string cnCol = ObjectColor(cn->color, darkTheme);
+            if (cn->fillAlpha > 0.003) {
+                struct CnTri {
+                    std::vector<float> pts;
+                    double depth;
+                    std::string color;
+                };
+                std::vector<CnTri> cts;
+                cts.reserve(17);
+                const int NS2 = 16, NA2 = 32;
+                for (int i = 0; i < NS2; ++i) {
+                    const double t0 = 2 * M_PI * i / NS2;
+                    const double t1 = 2 * M_PI * (i + 1) / NS2;
+                    const double tm = (t0 + t1) / 2.0;
+                    const double rX = std::cos(tm) * e1x + std::sin(tm) * e2x;
+                    const double rY = std::cos(tm) * e1y + std::sin(tm) * e2y;
+                    const double rZ = std::cos(tm) * e1z + std::sin(tm) * e2z;
+                    double shade = 0.85;
+                    const double cg2 = L / sqrt(L * L + r * r);
+                    const double sg2 = r / sqrt(L * L + r * r);
+                    const double nX = sg2 * rX - cg2 * ux;
+                    const double nY = sg2 * rY - cg2 * uy;
+                    const double nZ = sg2 * rZ - cg2 * uz;
+                    const double nl3 = sqrt(nX * nX + nY * nY + nZ * nZ);
+                    if (nl3 > 1e-12) {
+                        shade = 0.55 + 0.45
+                                * fabs((nX * fx + nY * fy + nZ * fz) / nl3);
+                    }
+                    CnTri q;
+                    q.color = ShadeRgba(cn->color.r, cn->color.g, cn->color.b,
+                                        shade, cn->fillAlpha);
+                    double dsum = 0;
+                    const double c4[3][3] = {
+                        { ax, ay, az },
+                        { bx + r * std::cos(t0) * e1x + r * std::sin(t0) * e2x,
+                          by + r * std::cos(t0) * e1y + r * std::sin(t0) * e2y,
+                          bz + r * std::cos(t0) * e1z + r * std::sin(t0) * e2z },
+                        { bx + r * std::cos(t1) * e1x + r * std::sin(t1) * e2x,
+                          by + r * std::cos(t1) * e1y + r * std::sin(t1) * e2y,
+                          bz + r * std::cos(t1) * e1z + r * std::sin(t1) * e2z },
+                    };
+                    for (auto &pt : c4) {
+                        double ppx, ppy;
+                        dsum += proj(pt[0], pt[1], pt[2], ppx, ppy);
+                        q.pts.push_back((float)ppx);
+                        q.pts.push_back((float)ppy);
+                    }
+                    q.depth = dsum / 3.0;
+                    cts.push_back(std::move(q));
+                }
+                {
+                    CnTri q;
+                    const double shade = 0.55 + 0.45 * fabs(ux * fx + uy * fy
+                                                            + uz * fz);
+                    q.color = ShadeRgba(cn->color.r, cn->color.g, cn->color.b,
+                                        shade, cn->fillAlpha);
+                    double dsum = 0;
+                    double ppx, ppy;
+                    dsum += proj(bx, by, bz, ppx, ppy);
+                    q.pts.push_back((float)ppx);
+                    q.pts.push_back((float)ppy);
+                    for (int k = 0; k < NA2; ++k) {
+                        const double t2 = 2 * M_PI * k / NA2;
+                        const double cr2 = r * std::cos(t2);
+                        const double sr2 = r * std::sin(t2);
+                        dsum += proj(bx + cr2 * e1x + sr2 * e2x,
+                                     by + cr2 * e1y + sr2 * e2y,
+                                     bz + cr2 * e1z + sr2 * e2z, ppx, ppy);
+                        q.pts.push_back((float)ppx);
+                        q.pts.push_back((float)ppy);
+                    }
+                    q.depth = dsum / (NA2 + 1.0);
+                    cts.push_back(std::move(q));
+                }
+                std::sort(cts.begin(), cts.end(),
+                          [](const CnTri &a, const CnTri &b) {
+                              return a.depth > b.depth;
+                          });
+                for (const CnTri &q : cts) {
+                    DrawCmd fp3;
+                    fp3.op = DrawOp::FillPoly;
+                    fp3.color = q.color;
+                    fp3.pts = q.pts;
+                    fillList.push_back({ q.depth, fp3 });
+                }
+            }
+            {
+                DrawCmd rg;
+                rg.op = DrawOp::Polyline;
+                rg.color = cnCol;
+                rg.lineWidth = cn->lineThickness / 3.0f;
+                double rdepX, rdepY;
+                const double rdep = proj(bx, by, bz, rdepX, rdepY);
+                for (int k = 0; k <= 36; ++k) {
+                    const double t2 = 2 * M_PI * k / 36;
+                    const double cr2 = r * std::cos(t2);
+                    const double sr2 = r * std::sin(t2);
+                    double ppx, ppy;
+                    proj(bx + cr2 * e1x + sr2 * e2x,
+                         by + cr2 * e1y + sr2 * e2y,
+                         bz + cr2 * e1z + sr2 * e2z, ppx, ppy);
+                    rg.pts.push_back((float)ppx);
+                    rg.pts.push_back((float)ppy);
+                }
+                fillList.push_back({ rdep, rg });
+                DrawCmd gn;
+                gn.op = DrawOp::MultiSeg;
+                gn.color = cnCol;
+                gn.lineWidth = cn->lineThickness / 3.0f;
+                for (int m2 = 0; m2 < 8; ++m2) {
+                    const double t2 = 2 * M_PI * m2 / 8;
+                    const double cr2 = r * std::cos(t2);
+                    const double sr2 = r * std::sin(t2);
+                    double p1x, p1y, p2x, p2y;
+                    proj(ax, ay, az, p1x, p1y);
+                    proj(bx + cr2 * e1x + sr2 * e2x,
+                         by + cr2 * e1y + sr2 * e2y,
+                         bz + cr2 * e1z + sr2 * e2z, p2x, p2y);
+                    gn.pts.insert(gn.pts.end(),
+                                  { (float)p1x, (float)p1y,
+                                    (float)p2x, (float)p2y });
+                }
+                double gdep = 0;
+                {
+                    double tx, ty;
+                    gdep = proj((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2,
+                                tx, ty);
+                }
+                fillList.push_back({ gdep, gn });
+            }
+            DrawCmd lb;
+            lb.op = DrawOp::Text;
+            lb.color = cnCol;
+            double lpx, lpy;
+            proj(ax, ay, az, lpx, lpy);
+            lb.pts = { (float)(lpx + 6 * us), (float)(lpy - 6 * us) };
+            lb.text = cn->label;
             labelList.push_back(lb);
             break;
         }
@@ -15772,6 +16424,14 @@ std::string Kernel::getXml() const
             AppendCommandXml(o, *cy);
             AppendElementHead(o, *cy, "cylinder", cy->fillAlpha);
             AppendLineStyle(o, cy->lineThickness);
+            break;
+        }
+        case GeoType::Cone: {
+            // 1.1.0.5 圆锥：命令产物走通用重放
+            GeoCone *cn = static_cast<GeoCone *>(g);
+            AppendCommandXml(o, *cn);
+            AppendElementHead(o, *cn, "cone", cn->fillAlpha);
+            AppendLineStyle(o, cn->lineThickness);
             break;
         }
         case GeoType::Line3: {

@@ -526,6 +526,8 @@ std::string GeoConic3::valueText() const
     // 长轴 R/|cos∠(法,轴)| 短轴 R）；平行直线=条数口径
     if (!defined()) return "未定义";
     if (kind == 2) return tangent ? "一条直线（切线）" : "两条平行直线";
+    if (kind == 3) return "抛物线";
+    if (kind == 4) return "双曲线";
     const double gu = ux * ux + uy * uy + uz * uz;
     const double gv = vx * vx + vy * vy + vz * vz;
     const double guv = ux * vx + uy * vy + uz * vz;
@@ -546,6 +548,21 @@ std::string GeoConic3::definitionText() const
 {
     std::string d = cmdDefText();
     return d.empty() ? "Conic3" : d;
+}
+
+std::string GeoCone::valueText() const
+{
+    // 与圆柱同口径：r=底半径，h=顶点到底心现值
+    double r = radiusNum ? radiusNum->value : radius;
+    double h = sqrt(pow(bcx() - avx(), 2.0) + pow(bcy() - avy(), 2.0)
+                    + pow(bcz() - avz(), 2.0));
+    return "r=" + FormatNum(r) + "，h=" + FormatNum(h);
+}
+
+std::string GeoCone::definitionText() const
+{
+    std::string d = cmdDefText();
+    return d.empty() ? "Cone" : d;
 }
 
 std::string GeoSphere::valueText() const
