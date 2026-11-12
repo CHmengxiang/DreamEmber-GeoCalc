@@ -5391,7 +5391,47 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                 const double sg = R / sqrt(wl * wl + R * R);
                 const double c = n1 * w1 + n2 * w2 + n3 * w3;
                 const double k = (n1 * vx + n2 * vy + n3 * vz) - dd;
-                if (fabs(k) < 1e-12) return;   // 过顶点退化——候选
+                if (fabs(k) < 1e-12) {
+                    // 1.1.0.7① 过顶点退化（无限双锥口径）：面内方向 u 满足
+                    // |u·a|=γ|u|；记 ê⊥=n×w（单位），面内单位方向
+                    // u=cosθ·ê+sinθ·ê⊥ 的 u·a=cosθ·ap（ê⊥⊥a 恒成立），
+                    // 解存在 ⟺ ap≥γ ⟺ c²≤σ²。dq=σ²−c²>0 两条母线
+                    // d±=(γ·(w−c·n)±√dq·(n×w))/(1−c²)（kind 5，恒为单位、
+                    // 在面内、d·a=±γ）；dq≈0 切平面沿母线重合单线
+                    // （kind 5+tangent）；dq<0 面比母线陡，仅交顶点单点
+                    // （kind 5 零方向，值列「顶点（单点）」，渲染只落标签）
+                    const double ap2 = 1.0 - c * c;
+                    const double dq = sg * sg - c * c;
+                    const double crx = n2 * w3 - n3 * w2;
+                    const double cry = n3 * w1 - n1 * w3;
+                    const double crz = n1 * w2 - n2 * w1;
+                    g->kind = 5;
+                    g->p1x = vx; g->p1y = vy; g->p1z = vz;
+                    if (dq > 1e-9) {
+                        const double sq = sqrt(dq);
+                        g->tangent = false;
+                        g->ux = (gam * (w1 - c * n1) + sq * crx) / ap2;
+                        g->uy = (gam * (w2 - c * n2) + sq * cry) / ap2;
+                        g->uz = (gam * (w3 - c * n3) + sq * crz) / ap2;
+                        g->vx = (gam * (w1 - c * n1) - sq * crx) / ap2;
+                        g->vy = (gam * (w2 - c * n2) - sq * cry) / ap2;
+                        g->vz = (gam * (w3 - c * n3) - sq * crz) / ap2;
+                        return;
+                    }
+                    if (dq >= -1e-9) {
+                        // 切平面：d=γ·(w−c·n)/ap²；此时 ap=γ，d 恒为单位
+                        g->tangent = true;
+                        g->ux = gam * (w1 - c * n1) / ap2;
+                        g->uy = gam * (w2 - c * n2) / ap2;
+                        g->uz = gam * (w3 - c * n3) / ap2;
+                        g->vx = g->ux; g->vy = g->uy; g->vz = g->uz;
+                        return;
+                    }
+                    g->tangent = false;
+                    g->ux = g->uy = g->uz = 0.0;
+                    g->vx = g->vy = g->vz = 0.0;
+                    return;
+                }
                 // 轴正交基（最小分量叉积法）
                 double e1x, e1y, e1z;
                 if (fabs(w1) <= fabs(w2) && fabs(w1) <= fabs(w3)) {
@@ -15057,6 +15097,49 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                                  cn->p2z - tE2 * dwz, cn->p2x + tE2 * dwx,
                                  cn->p2y + tE2 * dwy, cn->p2z + tE2 * dwz,
                                  cnCol, cn->lineThickness / 3.0f);
+                }
+                DrawCmd lb1;
+                lb1.op = DrawOp::Text;
+                lb1.color = cnCol;
+                lb1.pts = { (float)(lx1 + 6 * us), (float)(ly1 - 6 * us) };
+                lb1.text = cn->label;
+                labelList.push_back(lb1);
+                break;
+            }
+            if (cn->kind == 5) {
+                // 1.1.0.7① 过顶点退化：两线过公共点 p1（=锥顶），方向 u/v；
+                // tangent→只画 u 单线；u/v 零向量（仅顶点单点）→不画线只落
+                // 标签。延伸长度口径与 kind 2 相同
+                double lx1, ly1;
+                proj(cn->p1x, cn->p1y, cn->p1z, lx1, ly1);
+                double diag2 = sqrt((double)V.width * V.width
+                                    + (double)V.height * V.height);
+                const double uln = sqrt(cn->ux * cn->ux + cn->uy * cn->uy
+                                        + cn->uz * cn->uz);
+                if (uln > 1e-12) {
+                    const double dux = cn->ux / uln, duy = cn->uy / uln,
+                                 duz = cn->uz / uln;
+                    double Lx1 = sqrt(lx1 * lx1 + ly1 * ly1) + 2 * diag2 + 20;
+                    const double tE1 = Lx1 / V.scale + 1.0;
+                    drawSplitSeg(cn->p1x - tE1 * dux, cn->p1y - tE1 * duy,
+                                 cn->p1z - tE1 * duz, cn->p1x + tE1 * dux,
+                                 cn->p1y + tE1 * duy, cn->p1z + tE1 * duz,
+                                 cnCol, cn->lineThickness / 3.0f);
+                }
+                if (!cn->tangent) {
+                    const double vln = sqrt(cn->vx * cn->vx + cn->vy * cn->vy
+                                            + cn->vz * cn->vz);
+                    if (vln > 1e-12) {
+                        const double dvx = cn->vx / vln, dvy = cn->vy / vln,
+                                     dvz = cn->vz / vln;
+                        double Lx2 = sqrt(lx1 * lx1 + ly1 * ly1)
+                                     + 2 * diag2 + 20;
+                        const double tE2 = Lx2 / V.scale + 1.0;
+                        drawSplitSeg(cn->p1x - tE2 * dvx, cn->p1y - tE2 * dvy,
+                                     cn->p1z - tE2 * dvz, cn->p1x + tE2 * dvx,
+                                     cn->p1y + tE2 * dvy, cn->p1z + tE2 * dvz,
+                                     cnCol, cn->lineThickness / 3.0f);
+                    }
                 }
                 DrawCmd lb1;
                 lb1.op = DrawOp::Text;

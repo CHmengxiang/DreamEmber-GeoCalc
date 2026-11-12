@@ -528,6 +528,13 @@ std::string GeoConic3::valueText() const
     if (kind == 2) return tangent ? "一条直线（切线）" : "两条平行直线";
     if (kind == 3) return "抛物线";
     if (kind == 4) return "双曲线";
+    if (kind == 5) {
+        // 1.1.0.7① 过顶点退化：方向零向量 → 仅顶点单点；否则按条数口径
+        const double un = sqrt(ux * ux + uy * uy + uz * uz);
+        const double vn = sqrt(vx * vx + vy * vy + vz * vz);
+        if (!(un > 1e-12) && !(vn > 1e-12)) return "顶点（单点）";
+        return tangent ? "一条直线（切线）" : "两条相交直线（过顶点）";
+    }
     const double gu = ux * ux + uy * uy + uz * uz;
     const double gv = vx * vx + vy * vy + vz * vz;
     const double guv = ux * vx + uy * vy + uz * vz;

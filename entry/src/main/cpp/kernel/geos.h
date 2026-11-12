@@ -624,15 +624,16 @@ public:
 // 圆锥曲线 3D（1.1.0.1 Intersect(平面, 圆柱)：GGB 无限二次曲面口径——柱面
 // 代数上无限，截线不裁高度）。kind 0=圆（面⊥轴）| 1=椭圆（斜交，整周参数
 // X = C + cos t·U + sin t·V，U/V 非正交但张成截面）| 2=两条平行直线（面∥轴，
-// ∥柱轴，相切合一）。未定义 → 全 NaN（相离/退化）
+// ∥柱轴，相切合一）| 5=过顶点退化（1.1.0.7①：两相交直线过公共点 p1=锥顶，
+// 方向 u/v；tangent→重合单线；u/v≈0→仅顶点单点）。未定义 → 全 NaN（相离）
 class GeoConic3 : public GeoElement {
 public:
     GeoConic3() : GeoElement(GeoType::Conic3) { color = {0, 0, 0}; }
     int kind = 0;
     double cx = 0, cy = 0, cz = 0;   // 中心（圆心）
-    double ux = 0, uy = 0, uz = 0;   // U（t=0 向）
-    double vx = 0, vy = 0, vz = 0;   // V
-    // kind 2：两直线过点 + 公共方向（∥柱轴）
+    double ux = 0, uy = 0, uz = 0;   // U（t=0 向；kind 5=直线 1 方向）
+    double vx = 0, vy = 0, vz = 0;   // V（kind 5=直线 2 方向）
+    // kind 2：两直线过点 + 公共方向（∥柱轴）；kind 5：两线过公共点 p1
     double p1x = 0, p1y = 0, p1z = 0;
     double p2x = 0, p2y = 0, p2z = 0;
     double wx = 0, wy = 0, wz = 0;
@@ -644,6 +645,11 @@ public:
             return std::isfinite(p1x) && std::isfinite(p1y) && std::isfinite(p1z)
                 && std::isfinite(p2x) && std::isfinite(p2y) && std::isfinite(p2z)
                 && std::isfinite(wx) && std::isfinite(wy) && std::isfinite(wz);
+        }
+        if (kind == 5) {
+            return std::isfinite(p1x) && std::isfinite(p1y) && std::isfinite(p1z)
+                && std::isfinite(ux) && std::isfinite(uy) && std::isfinite(uz)
+                && std::isfinite(vx) && std::isfinite(vy) && std::isfinite(vz);
         }
         return std::isfinite(cx) && std::isfinite(cy) && std::isfinite(cz)
             && std::isfinite(ux) && std::isfinite(uy) && std::isfinite(uz)
