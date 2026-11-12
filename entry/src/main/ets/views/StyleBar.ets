@@ -74,8 +74,11 @@ export struct StyleBar {
   }
 
   private isStylable(): boolean {
+    // 1.1.0.8③ 3D 实体贯通：sphere/cylinder/cone 入清单（fill 滑杆走
+    // propsOf 已出的 fill 键；显隐/色板/线宽同口径生效）
     return ['point', 'segment', 'line', 'ray', 'vector', 'circle',
-      'polygon', 'angle', 'function', 'text'].indexOf(this.pType) >= 0;
+      'polygon', 'angle', 'function', 'text', 'sphere', 'cylinder',
+      'cone'].indexOf(this.pType) >= 0;
   }
 
   private hasSize(): boolean {

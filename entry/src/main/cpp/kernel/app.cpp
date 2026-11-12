@@ -10201,6 +10201,20 @@ void Kernel::algebraRows(std::vector<AlgebraRow> &out) const
         } else if (g->type() == GeoType::Angle) {
             r.fillAlphaPct =
                 (int)std::lround(static_cast<GeoAngle *>(g.get())->fillAlpha * 100.0);
+        } else if (g->type() == GeoType::Sphere
+                   || g->type() == GeoType::Cylinder
+                   || g->type() == GeoType::Cone) {
+            // 1.1.0.8③ 实心体行滑杆贯通（球/柱 1.1.0.3 只通了 propsOf，
+            // 行协议列当时未接；锥同口径补齐）
+            double fa = 0;
+            if (g->type() == GeoType::Sphere) {
+                fa = static_cast<GeoSphere *>(g.get())->fillAlpha;
+            } else if (g->type() == GeoType::Cylinder) {
+                fa = static_cast<GeoCylinder *>(g.get())->fillAlpha;
+            } else {
+                fa = static_cast<GeoCone *>(g.get())->fillAlpha;
+            }
+            r.fillAlphaPct = (int)std::lround(fa * 100.0);
         }
         out.push_back(std::move(r));
     }
@@ -10790,7 +10804,7 @@ std::string Kernel::propsOf(const std::string &label) const
     case GeoType::Plane: ty = "plane"; break;
     case GeoType::Circle3: ty = "circle"; break;
     case GeoType::Conic3: ty = "circle"; break;
-    case GeoType::Cone: ty = "cylinder"; break;
+    case GeoType::Cone: ty = "cone"; break;   // 1.1.0.8③ 归一（原误借 cylinder）
     }
     add("type", ty);
     add("vis", g->visible ? "1" : "0");
@@ -10815,11 +10829,14 @@ std::string Kernel::propsOf(const std::string &label) const
         add("fill", std::to_string(
             (int)std::lround(static_cast<GeoAngle *>(g)->fillAlpha * 100.0)));
     } else if (g->type() == GeoType::Sphere
-               || g->type() == GeoType::Cylinder) {
-        // 1.1.0.3 实心体填充透明度样式（遮挡因子联动）
+               || g->type() == GeoType::Cylinder
+               || g->type() == GeoType::Cone) {
+        // 1.1.0.3 实心体填充透明度样式（遮挡因子联动）；1.1.0.8③ 补 Cone
         const double fa = g->type() == GeoType::Sphere
             ? static_cast<const GeoSphere *>(g)->fillAlpha
-            : static_cast<const GeoCylinder *>(g)->fillAlpha;
+            : (g->type() == GeoType::Cylinder
+                   ? static_cast<const GeoCylinder *>(g)->fillAlpha
+                   : static_cast<const GeoCone *>(g)->fillAlpha);
         add("fill", std::to_string((int)std::lround(fa * 100.0)));
     }
     if (g->type() == GeoType::Numeric) {
@@ -10933,6 +10950,11 @@ bool Kernel::setProp(const std::string &label, const std::string &key,
         }
         if (g->type() == GeoType::Cylinder) {
             static_cast<GeoCylinder *>(g)->fillAlpha = a;
+            return true;
+        }
+        if (g->type() == GeoType::Cone) {
+            // 1.1.0.8③ 圆锥实心填充透明度（遮挡因子联动，球/柱同口径）
+            static_cast<GeoCone *>(g)->fillAlpha = a;
             return true;
         }
         lastError = "该对象没有区域填充";
@@ -16630,6 +16652,13 @@ void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
         if (cyc) {
             double a = AttrNum(t, "alpha", cyc->fillAlpha);
             cyc->fillAlpha = a > 0.0 ? (a > 1.0 ? 1.0 : a) : 1.0;
+        }
+        // 1.1.0.8③ 圆锥同口径（1.1.0.5 写侧带 alpha、读侧漏恢复——本包探针
+        // BE3 实证修复）
+        GeoCone *cnc = dynamic_cast<GeoCone *>(e);
+        if (cnc) {
+            double a = AttrNum(t, "alpha", cnc->fillAlpha);
+            cnc->fillAlpha = a > 0.0 ? (a > 1.0 ? 1.0 : a) : 1.0;
         }
     }
     size_t ls = inner.find("<lineStyle");
