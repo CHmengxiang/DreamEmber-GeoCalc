@@ -4,15 +4,14 @@
     "type": "entry",
     "description": "$string:module_desc",
     "mainElement": "EntryAbility",
-    // 第二十包③：追加 2in1——PC/2in1（DevEco 鸿蒙PC虚拟机、KaihongOS x86）
-    // 上未声明 2in1 的应用进手机兼容容器，窗口恒手机比例、最大化只顶满高
-    // 度（十七包观察）；声明后跑原生桌面自由窗口，可任意缩放，≥640vp 自动
-    // 切宽屏布局（CanvasView/Index 双断点，十七包①机制）。保留 default：
-    // 用户真机为 default 形态（Ability 设备信息日志佐证），不可动
+    // 1.1.2：default→phone——华为 AGC 以「设备类型不符」打回 1.1.1（1000066）
+    // 实证：default 是 OpenHarmony 阵营叫法，HarmonyOS NEXT 手机认的是
+    // phone，default 清单在华为手机上不可装。改为 phone/tablet/2in1 后，
+    // 开鸿侧是否仍可装由本轮真机实测（用户令：留包验证）
     "deviceTypes": [
-      "default",
       // 四十二包：追加 tablet——华为平板（MatePad 等）直装直跑；宽窄布局
       // 随窗口宽度断点自适应（与 2in1 同一断点机制），无需额外代码
+      "phone",
       "tablet",
       "2in1"
     ],
