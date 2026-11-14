@@ -6,8 +6,9 @@
     "mainElement": "EntryAbility",
     // 1.1.2：default→phone——华为 AGC 以「设备类型不符」打回 1.1.1（1000066）
     // 实证：default 是 OpenHarmony 阵营叫法，HarmonyOS NEXT 手机认的是
-    // phone，default 清单在华为手机上不可装。改为 phone/tablet/2in1 后，
-    // 开鸿侧是否仍可装由本轮真机实测（用户令：留包验证）
+    // phone，default 清单在华为手机上不可装。改为 phone/tablet/2in1 后经
+    // 开鸿真机实测（1.1.2 hap 1000069）可装：华为/开鸿双渠道一包通吃，
+    // 此口径固定，不再单独改单独出包
     "deviceTypes": [
       // 四十二包：追加 tablet——华为平板（MatePad 等）直装直跑；宽窄布局
       // 随窗口宽度断点自适应（与 2in1 同一断点机制），无需额外代码
