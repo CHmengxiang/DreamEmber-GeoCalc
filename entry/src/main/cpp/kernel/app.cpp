@@ -14244,6 +14244,8 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         double cgam = 0, csig = 0;   // kind4 圆锥：cos/sin 半顶角
         // kind 3 曲面格片：poly + 平均深度
         double qdep = 0;
+        // 1.1.2.1 亚格片细化：四角深度（命中点局部深度插值替代均值判定）
+        double qd00 = 0, qd10 = 0, qd11 = 0, qd01 = 0;
         const void *owner = nullptr;   // 所属对象（源实体背向面豁免用）
     };
     std::vector<Occ3> occs;
@@ -14368,6 +14370,10 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 oc.owner = sf;
                 oc.alpha = sf->fillAlpha;
                 oc.qdep = (pds[k00] + pds[k10] + pds[k11] + pds[k01]) / 4.0;
+                oc.qd00 = pds[k00];
+                oc.qd10 = pds[k10];
+                oc.qd11 = pds[k11];
+                oc.qd01 = pds[k01];
                 oc.poly = { (float)pxs[k00], (float)pys[k00],
                             (float)pxs[k10], (float)pys[k10],
                             (float)pxs[k11], (float)pys[k11],
@@ -14418,6 +14424,37 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             }
         }
         return inside;
+    };
+    // 1.1.2.1 亚格片细化：kind3 命中点局部深度——格片沿 k00–k11 对角线
+    // 拆两三角形（poly 顶点序 00,10,11,01），重心线性插值角深度。正交
+    // 投影是仿射像，深度近线性时插值精确；投影退化（四点共线等）回退
+    // 均值 qdep（1.1.0.4 平均深度口径）
+    auto facetLocalDepth = [](const Occ3 &oc, double px, double py) -> double {
+        const double x00 = oc.poly[0], y00 = oc.poly[1];
+        const double x10 = oc.poly[2], y10 = oc.poly[3];
+        const double x11 = oc.poly[4], y11 = oc.poly[5];
+        const double x01 = oc.poly[6], y01 = oc.poly[7];
+        // 三角形 (A,B,C) 重心坐标：λ1/λ2/den；命中（含 ±eps 边容差）
+        // 即按角深度线性合成
+        auto tri = [&](double ax, double ay, double bx, double by,
+                       double cx, double cy,
+                       double da, double db, double dc) -> double {
+            const double den = (by - cy) * (ax - cx) + (cx - bx) * (ay - cy);
+            if (fabs(den) < 1e-12) return NAN;
+            const double l1 = ((by - cy) * (px - cx)
+                               + (cx - bx) * (py - cy)) / den;
+            const double l2 = ((cy - ay) * (px - cx)
+                               + (ax - cx) * (py - cy)) / den;
+            if (l1 < -1e-9 || l2 < -1e-9 || l1 + l2 > 1.0 + 1e-9) return NAN;
+            return l1 * da + l2 * db + (1.0 - l1 - l2) * dc;
+        };
+        double d = tri(x00, y00, x10, y10, x11, y11,
+                       oc.qd00, oc.qd10, oc.qd11);
+        if (!std::isnan(d)) return d;
+        d = tri(x00, y00, x11, y11, x01, y01,
+                oc.qd00, oc.qd11, oc.qd01);
+        if (!std::isnan(d)) return d;
+        return oc.qdep;
     };
     // 点在世界 P 的剩余可见率：1=完全可见；<1 = 落在遮挡体远侧且投影入
     // 填充多边形（值 = Π(1−fillAlpha)，半透明平面后透视变淡）
@@ -14476,9 +14513,11 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             }
             if (oc.kind == 3) {
                 // 1.1.0.4 曲面格片：投影命中且 P 深于格片 → 遮挡
+                // （1.1.2.1 深度判定细化：均值 → 命中点局部深度）
                 double px3, py3;
                 const double pdp = proj(wx2, wy2, wz2, px3, py3);
-                if (pdp > oc.qdep && polyHit(oc.poly, px3, py3)) {
+                if (polyHit(oc.poly, px3, py3)
+                    && pdp > facetLocalDepth(oc, px3, py3)) {
                     vis *= 1.0 - oc.alpha;
                 }
                 continue;
@@ -14598,9 +14637,11 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 continue;
             }
             if (oc.kind == 3) {
+                // 1.1.2.1 局部深度判定（veilAt 同口径）
                 double px3, py3;
                 const double pdp = proj(wx2, wy2, wz2, px3, py3);
-                if (pdp > oc.qdep && polyHit(oc.poly, px3, py3)) {
+                if (polyHit(oc.poly, px3, py3)
+                    && pdp > facetLocalDepth(oc, px3, py3)) {
                     vis *= 1.0 - oc.alpha;
                 }
                 continue;
@@ -14775,6 +14816,40 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                     const double rc0 = (0 - ax) / fA, rc1 = (oc.chgt - ax) / fA;
                     if (rc0 > 1e-9 && rc0 < 1.0 - 1e-9) ts.push_back(rc0);
                     if (rc1 > 1e-9 && rc1 < 1.0 - 1e-9) ts.push_back(rc1);
+                }
+                continue;
+            }
+            if (oc.kind == 3) {
+                // 1.1.2.1 亚格片拆段：投影弦 = 2D 边界交点定界 + 弦内 3 个
+                // 四分拆点——弦内逐段由 veilAt 局部深度判定，掠面穿越的
+                // 可见/遮挡边界细化到亚格片。显式分支不再落入平面
+                // fall-through 误读未初始化 nx/ny/nz（1.1.0.4 起 UB 隐患
+                // 顺手修复）
+                const size_t pn = oc.poly.size() / 2;
+                double tmin = 2.0, tmax = -1.0;
+                for (size_t e = 0; e < pn; ++e) {
+                    const size_t e2 = (e + 1) % pn;
+                    const double ex0 = oc.poly[2 * e],
+                                 ey0 = oc.poly[2 * e + 1];
+                    const double ex1 = oc.poly[2 * e2],
+                                 ey1 = oc.poly[2 * e2 + 1];
+                    const double eex = ex1 - ex0, eey = ey1 - ey0;
+                    const double dcross = sdx * eey - sdy * eex;
+                    if (fabs(dcross) < 1e-12) continue;
+                    const double gx = ex0 - ppx1, gy = ey0 - ppy1;
+                    const double t = (gx * eey - gy * eex) / dcross;
+                    const double sg2 = (gx * sdy - gy * sdx) / dcross;
+                    if (t > 1e-9 && t < 1.0 - 1e-9
+                        && sg2 > -1e-9 && sg2 < 1.0 + 1e-9) {
+                        ts.push_back(t);
+                        if (t < tmin) tmin = t;
+                        if (t > tmax) tmax = t;
+                    }
+                }
+                if (tmax > tmin) {
+                    for (int q3 = 1; q3 <= 3; ++q3) {
+                        ts.push_back(tmin + (tmax - tmin) * q3 / 4.0);
+                    }
                 }
                 continue;
             }
