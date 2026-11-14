@@ -14246,6 +14246,10 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         double qdep = 0;
         // 1.1.2.1 亚格片细化：四角深度（命中点局部深度插值替代均值判定）
         double qd00 = 0, qd10 = 0, qd11 = 0, qd01 = 0;
+        // 1.1.2.2 四角像素 double 版（poly 是 float32：~3.6e-5px 舍入经
+        // 重心坐标放大 ~1e-6 深度噪声，会淹掉 1e-9 贴面容差；插值须用
+        // double 角点，poly 仍供 polyHit/求交）
+        double dpoly[8] = {};
         const void *owner = nullptr;   // 所属对象（源实体背向面豁免用）
     };
     std::vector<Occ3> occs;
@@ -14378,6 +14382,14 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                             (float)pxs[k10], (float)pys[k10],
                             (float)pxs[k11], (float)pys[k11],
                             (float)pxs[k01], (float)pys[k01] };
+                oc.dpoly[0] = pxs[k00];
+                oc.dpoly[1] = pys[k00];
+                oc.dpoly[2] = pxs[k10];
+                oc.dpoly[3] = pys[k10];
+                oc.dpoly[4] = pxs[k11];
+                oc.dpoly[5] = pys[k11];
+                oc.dpoly[6] = pxs[k01];
+                oc.dpoly[7] = pys[k01];
                 occs.push_back(std::move(oc));
             }
         }
@@ -14430,10 +14442,12 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
     // 投影是仿射像，深度近线性时插值精确；投影退化（四点共线等）回退
     // 均值 qdep（1.1.0.4 平均深度口径）
     auto facetLocalDepth = [](const Occ3 &oc, double px, double py) -> double {
-        const double x00 = oc.poly[0], y00 = oc.poly[1];
-        const double x10 = oc.poly[2], y10 = oc.poly[3];
-        const double x11 = oc.poly[4], y11 = oc.poly[5];
-        const double x01 = oc.poly[6], y01 = oc.poly[7];
+        // 1.1.2.2 角点像素取 double 版 dpoly（float32 poly 的舍入经重心
+        // 坐标放大成 ~1e-6 深度噪声，见 Occ3 注记）
+        const double x00 = oc.dpoly[0], y00 = oc.dpoly[1];
+        const double x10 = oc.dpoly[2], y10 = oc.dpoly[3];
+        const double x11 = oc.dpoly[4], y11 = oc.dpoly[5];
+        const double x01 = oc.dpoly[6], y01 = oc.dpoly[7];
         // 三角形 (A,B,C) 重心坐标：λ1/λ2/den；命中（含 ±eps 边容差）
         // 即按角深度线性合成
         auto tri = [&](double ax, double ay, double bx, double by,
@@ -14513,11 +14527,14 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             }
             if (oc.kind == 3) {
                 // 1.1.0.4 曲面格片：投影命中且 P 深于格片 → 遮挡
-                // （1.1.2.1 深度判定细化：均值 → 命中点局部深度）
+                // （1.1.2.1 深度判定细化：均值 → 命中点局部深度；
+                // 1.1.2.2 贴面容差：深度差 ≤1e-9 视为贴面免遮——贴在
+                // 面上的线/点/面面交线 δ≈0 浮点抖动 ±1e-15 不再逐段
+                // 掷硬币式闪烁变淡）
                 double px3, py3;
                 const double pdp = proj(wx2, wy2, wz2, px3, py3);
                 if (polyHit(oc.poly, px3, py3)
-                    && pdp > facetLocalDepth(oc, px3, py3)) {
+                    && pdp - facetLocalDepth(oc, px3, py3) > 1e-9) {
                     vis *= 1.0 - oc.alpha;
                 }
                 continue;
@@ -14581,7 +14598,8 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 continue;
             }
             const double s = oc.nx * wx2 + oc.ny * wy2 + oc.nz * wz2 - oc.dd;
-            if (s * (oc.nx * fx + oc.ny * fy + oc.nz * fz) <= 0) continue;
+            // 1.1.2.2 贴面容差（kind3 同口径）：面内线/点浮点抖动不再误遮
+            if (s * (oc.nx * fx + oc.ny * fy + oc.nz * fz) <= 1e-9) continue;
             double px, py;
             proj(wx2, wy2, wz2, px, py);
             if (!polyHit(oc.poly, px, py)) continue;
@@ -14630,18 +14648,19 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 } else {
                     const double s = oc.nx * wx2 + oc.ny * wy2 + oc.nz * wz2
                                      - oc.dd;
-                    if (s * (oc.nx * fx + oc.ny * fy + oc.nz * fz) > 0) {
+                    // 1.1.2.2 贴面容差：躺在源平面上的交线不再抖动误遮
+                    if (s * (oc.nx * fx + oc.ny * fy + oc.nz * fz) > 1e-9) {
                         vis *= 1.0 - oc.alpha;
                     }
                 }
                 continue;
             }
             if (oc.kind == 3) {
-                // 1.1.2.1 局部深度判定（veilAt 同口径）
+                // 1.1.2.1 局部深度判定（veilAt 同口径；1.1.2.2 贴面容差）
                 double px3, py3;
                 const double pdp = proj(wx2, wy2, wz2, px3, py3);
                 if (polyHit(oc.poly, px3, py3)
-                    && pdp > facetLocalDepth(oc, px3, py3)) {
+                    && pdp - facetLocalDepth(oc, px3, py3) > 1e-9) {
                     vis *= 1.0 - oc.alpha;
                 }
                 continue;
@@ -14700,7 +14719,8 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 continue;
             }
             const double s = oc.nx * wx2 + oc.ny * wy2 + oc.nz * wz2 - oc.dd;
-            if (s * (oc.nx * fx + oc.ny * fy + oc.nz * fz) <= 0) continue;
+            // 1.1.2.2 贴面容差（kind3 同口径）：面内线/点浮点抖动不再误遮
+            if (s * (oc.nx * fx + oc.ny * fy + oc.nz * fz) <= 1e-9) continue;
             double px, py;
             proj(wx2, wy2, wz2, px, py);
             if (!polyHit(oc.poly, px, py)) continue;
@@ -14729,8 +14749,10 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                             const void *exempt = nullptr) -> bool {
         const double dx3 = wx2 - wx1, dy3 = wy2 - wy1, dz3 = wz2 - wz1;
         double ppx1, ppy1, ppx2, ppy2;
-        proj(wx1, wy1, wz1, ppx1, ppy1);
-        proj(wx2, wy2, wz2, ppx2, ppy2);
+        // 1.1.2.2 端点深度留档：正交投影下段深度沿 t 线性，kind3 精确
+        // 求根 δ(t)=段深度−格片局部深度 用
+        const double dep1 = proj(wx1, wy1, wz1, ppx1, ppy1);
+        const double dep2 = proj(wx2, wy2, wz2, ppx2, ppy2);
         const double sdx = ppx2 - ppx1, sdy = ppy2 - ppy1;
         std::vector<double> ts;
         ts.reserve(occs.size() * 3 + 2);
@@ -14820,11 +14842,14 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 continue;
             }
             if (oc.kind == 3) {
-                // 1.1.2.1 亚格片拆段：投影弦 = 2D 边界交点定界 + 弦内 3 个
-                // 四分拆点——弦内逐段由 veilAt 局部深度判定，掠面穿越的
-                // 可见/遮挡边界细化到亚格片。显式分支不再落入平面
+                // 1.1.2.2 亚格片精确求根：投影弦仍由 2D 边界交点定界（弦
+                // 端入 ts），弦内可见/遮挡边界不再盲拆固定四分（1.1.2.1
+                // 口径），改为解析求根——δ(t)=段深度−格片局部深度：正交
+                // 投影下段像素路径是直线，局部深度沿 k00–k11 对角线分两
+                // 片线性 → δ 在弦内至多两片线性，逐片端点定号+线性内插
+                // 得精确根，中点判类对全弦严格成立。显式分支不落入平面
                 // fall-through 误读未初始化 nx/ny/nz（1.1.0.4 起 UB 隐患
-                // 顺手修复）
+                // 顺手修复，保持）
                 const size_t pn = oc.poly.size() / 2;
                 double tmin = 2.0, tmax = -1.0;
                 for (size_t e = 0; e < pn; ++e) {
@@ -14847,8 +14872,47 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                     }
                 }
                 if (tmax > tmin) {
-                    for (int q3 = 1; q3 <= 3; ++q3) {
-                        ts.push_back(tmin + (tmax - tmin) * q3 / 4.0);
+                    // δ 分片断点 = 像素路径与对角线（poly 顶点 0→2）交点
+                    double tdiag = -1.0;
+                    const double dgx0 = oc.poly[0], dgy0 = oc.poly[1];
+                    const double dgx1 = oc.poly[4], dgy1 = oc.poly[5];
+                    const double dgex = dgx1 - dgx0, dgey = dgy1 - dgy0;
+                    const double dgcr = sdx * dgey - sdy * dgex;
+                    if (fabs(dgcr) > 1e-12) {
+                        const double ggx = dgx0 - ppx1, ggy = dgy0 - ppy1;
+                        const double t = (ggx * dgey - ggy * dgex) / dgcr;
+                        const double sg2 = (ggx * sdy - ggy * sdx) / dgcr;
+                        if (t > tmin + 1e-9 && t < tmax - 1e-9
+                            && sg2 > -1e-9 && sg2 < 1.0 + 1e-9) {
+                            tdiag = t;
+                        }
+                    }
+                    // 逐片端点定号：|δ|≤1e-9 视为贴面零不产伪根；异号则
+                    // 线性内插（片内 δ 严格线性 → 根精确）
+                    const double DEPS = 1e-9;
+                    const double bp[2] = { tdiag > tmin ? tdiag : tmax,
+                                           tmax };
+                    const int nbp = tdiag > tmin ? 2 : 1;
+                    auto deltaAt = [&](double t) -> double {
+                        const double px = ppx1 + sdx * t;
+                        const double py = ppy1 + sdy * t;
+                        return dep1 + (dep2 - dep1) * t
+                               - facetLocalDepth(oc, px, py);
+                    };
+                    double ta = tmin, da0 = deltaAt(ta);
+                    for (int pc = 0; pc < nbp; ++pc) {
+                        const double tb = bp[pc];
+                        const double db0 = deltaAt(tb);
+                        if ((da0 < -DEPS && db0 > DEPS)
+                            || (da0 > DEPS && db0 < -DEPS)) {
+                            const double tr = ta + (tb - ta) * da0
+                                              / (da0 - db0);
+                            if (tr > 1e-9 && tr < 1.0 - 1e-9) {
+                                ts.push_back(tr);
+                            }
+                        }
+                        ta = tb;
+                        da0 = db0;
                     }
                 }
                 continue;
