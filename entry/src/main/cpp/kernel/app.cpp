@@ -3206,6 +3206,13 @@ static bool NativeFactorPoly(const Expr &body, std::string &out)
 // 命令表：N2 graphing 基础集 + N5 作图核心（求交/变换/多边形/角/切线/滑动条等）。
 // 返回 true=命令名命中。args 为逗号分隔原文；name 为用户指定标签（可为空）。
 // 命中命令统一回填 cmdName/cmdArgs（.ggb 保存重放 + 代数区定义列）。
+namespace {
+// 前置声明：定义在 render3D 前的匿名命名空间（垂线/平行线 3D 命令面共用）
+static bool Line3EndpointsOf(GeoElement *base, double &bx1, double &by1,
+                             double &bz1, double &bx2, double &by2,
+                             double &bz2);
+}
+
 bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                         const std::string &name, std::unique_ptr<GeoElement> &made)
 {
@@ -3795,6 +3802,60 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             bool ok = pt && base && base->type() != GeoType::Point
                 && (dynamic_cast<GeoLine *>(base) || dynamic_cast<GeoSegment *>(base)
                     || (fn && fn->body.linearCoef()));
+            // 1.1.3.6 空间直线族基准（Line3 / 3D 线段 / 3D 射线）→ 过点平行
+            // GeoLine3（方向随基准现值重算，image 闭包）
+            double b1x, b1y, b1z, b2x, b2y, b2z;
+            const bool base3D = base
+                && Line3EndpointsOf(base, b1x, b1y, b1z, b2x, b2y, b2z);
+            if (base3D) {
+                // 点参数收引用/字面量（cmdPointArg）
+                CmdPt cp0;
+                const bool p0ok = pt
+                    ? (cp0.ref = pt, cp0.x = pt->x, cp0.y = pt->y,
+                       cp0.z = pt->z, true)
+                    : (cmdPointArg(a[0], cp0) && (cp0.ref || cp0.lit));
+                if (!p0ok) {
+                    lastError = "Line 需要（点, 点）或（点, 直线/线段/一次函数）";
+                    made = nullptr;
+                    return true;
+                }
+                auto l3 = std::make_unique<GeoLine3>();
+                l3->image = true;
+                if (cp0.ref) l3->inputs.push_back(cp0.ref);
+                l3->inputs.push_back(base);
+                l3->cmdName = "Line";
+                l3->cmdArgs = { a[0], a[1] };
+                const CmdPt P0 = cp0;
+                GeoElement *BASE = base;
+                l3->calc = [P0, BASE](GeoLine3 *L) {
+                    double b1x, b1y, b1z, b2x, b2y, b2z;
+                    if (!Line3EndpointsOf(BASE, b1x, b1y, b1z, b2x, b2y, b2z)) {
+                        L->ix1 = L->iy1 = L->iz1 = L->ix2 = L->iy2 = L->iz2
+                            = NAN;
+                        return;
+                    }
+                    const double dx = b2x - b1x, dy = b2y - b1y,
+                                 dz = b2z - b1z;
+                    const double l2 = dx * dx + dy * dy + dz * dz;
+                    if (!(l2 > 1e-18)) {
+                        L->ix1 = L->iy1 = L->iz1 = L->ix2 = L->iy2 = L->iz2
+                            = NAN;
+                        return;
+                    }
+                    const double pxx = P0.ref ? P0.ref->x : P0.x;
+                    const double pyy = P0.ref ? P0.ref->y : P0.y;
+                    const double pzz = P0.ref ? P0.ref->z : P0.z;
+                    L->ix1 = pxx;
+                    L->iy1 = pyy;
+                    L->iz1 = pzz;
+                    L->ix2 = pxx + dx;
+                    L->iy2 = pyy + dy;
+                    L->iz2 = pzz + dz;
+                };
+                l3->update();
+                made = std::move(l3);
+                return true;
+            }
             if (!ok) {
                 lastError = lastError.empty() ? "Line 需要（点, 点）或（点, 直线/线段/一次函数）" : lastError;
                 made = nullptr;
@@ -4136,6 +4197,63 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             l3->update();
             made = std::move(l3);
             return true;
+        }
+        // 1.1.3.6 空间直线族基准（Line3 / 3D 线段 / 3D 射线）：垂足取支撑线
+        // 上最近点，垂线过垂足与点——3D 过点垂线有无穷多，GGB 取与基准共面
+        // 相交的最短距一条；随点/基准现值重算（image 闭包）
+        if (baseArg) {
+            double b1x, b1y, b1z, b2x, b2y, b2z;
+            if (Line3EndpointsOf(baseArg, b1x, b1y, b1z, b2x, b2y, b2z)) {
+                // 点参数收引用/字面量（cmdPointArg；引用随动、字面量冻结）
+                CmdPt cp0;
+                const bool p0ok = pt
+                    ? (cp0.ref = pt, cp0.x = pt->x, cp0.y = pt->y,
+                       cp0.z = pt->z, true)
+                    : (cmdPointArg(a[pi], cp0) && (cp0.ref || cp0.lit));
+                if (p0ok) {
+                    auto l3 = std::make_unique<GeoLine3>();
+                    l3->image = true;
+                    if (cp0.ref) l3->inputs.push_back(cp0.ref);
+                    l3->inputs.push_back(baseArg);
+                    l3->cmdName = "PerpendicularLine";
+                    l3->cmdArgs = { a[pi], a[bi] };
+                    const CmdPt P0 = cp0;
+                    GeoElement *BASE = baseArg;
+                    l3->calc = [P0, BASE](GeoLine3 *L) {
+                        double b1x, b1y, b1z, b2x, b2y, b2z;
+                        if (!Line3EndpointsOf(BASE, b1x, b1y, b1z, b2x, b2y,
+                                              b2z)) {
+                            L->ix1 = L->iy1 = L->iz1 = L->ix2 = L->iy2
+                                = L->iz2 = NAN;
+                            return;
+                        }
+                        const double dx = b2x - b1x, dy = b2y - b1y,
+                                     dz = b2z - b1z;
+                        const double l2 = dx * dx + dy * dy + dz * dz;
+                        if (!(l2 > 1e-18)) {
+                            L->ix1 = L->iy1 = L->iz1 = L->ix2 = L->iy2
+                                = L->iz2 = NAN;
+                            return;
+                        }
+                        // 垂足 = 支撑线上最近点；垂线两端 = 垂足与点
+                        const double pxx = P0.ref ? P0.ref->x : P0.x;
+                        const double pyy = P0.ref ? P0.ref->y : P0.y;
+                        const double pzz = P0.ref ? P0.ref->z : P0.z;
+                        const double t = ((pxx - b1x) * dx
+                                          + (pyy - b1y) * dy
+                                          + (pzz - b1z) * dz) / l2;
+                        L->ix1 = b1x + t * dx;
+                        L->iy1 = b1y + t * dy;
+                        L->iz1 = b1z + t * dz;
+                        L->ix2 = pxx;
+                        L->iy2 = pyy;
+                        L->iz2 = pzz;
+                    };
+                    l3->update();
+                    made = std::move(l3);
+                    return true;
+                }
+            }
         }
         if (!pt || (!baseLine && !baseSeg && !fnLinear)) {
             if (baseFn && !fnLinear) {
@@ -10817,6 +10935,62 @@ std::string Kernel::toolTap3D(double px, double py)
                 + toolPts_[1]->label + ", " + toolPts_[2]->label + ")";
             toolPts_.clear();
             r = finishInput(expr);
+        } else if (tool_ == "perpLine3D" || tool_ == "parLine3D") {
+            // 1.1.3.6 垂线/平行线（3D）：点 + 基准对象（先后不限，2D
+            // perpLine/parLine 同构）。基准域：Line3 / 3D 线段 / 3D 射线
+            // （垂线另收平面——PerpendicularLine 平面形式 1.0.8.4 已有）。
+            // 空白点按先建三维点
+            const char *name = tool_ == "perpLine3D" ? "垂线" : "平行线";
+            GeoElement *o = pickObject3D(px, py);
+            bool oIsBase = false;
+            if (o) {
+                if (o->type() == GeoType::Line3) oIsBase = true;
+                else if (o->type() == GeoType::Plane) oIsBase = tool_ == "perpLine3D";
+                else if (o->type() == GeoType::Segment) {
+                    GeoSegment *sg = static_cast<GeoSegment *>(o);
+                    oIsBase = sg->p1 && sg->p1->is3D;
+                } else if (o->type() == GeoType::Ray) {
+                    GeoRay *ry = static_cast<GeoRay *>(o);
+                    oIsBase = ry->p1 && ry->p1->is3D;
+                }
+            }
+            // 3D 点优先于基准：平面盘内命中覆盖大半屏（裁剪四边形），基准
+            // 先序会吞掉一切点按（2D 无平面无此问题）
+            if (hit) {
+                if (!toolPts_.empty() && toolPts_[0] != hit) {
+                    toolPts_[0]->selected = false;
+                    toolPts_.clear();
+                }
+                hit->selected = true;
+                toolPts_.push_back(hit);
+            } else if (oIsBase) {
+                if (toolObj_ && toolObj_ != o) toolObj_->selected = false;
+                toolObj_ = o;
+                o->selected = true;
+            } else {
+                if (!toolPts_.empty()) {
+                    toolPts_[0]->selected = false;
+                    toolPts_.clear();
+                }
+                GeoPoint *np = make3D();
+                if (!np) return "err|无法在空白处建点";
+                np->selected = true;
+                toolPts_.push_back(np);
+            }
+            if (toolPts_.empty() || !toolObj_) {
+                return toolPts_.empty()
+                    ? "need|" + std::string(name) + "：再点选一个三维点"
+                    : "need|" + std::string(name) + "：再点选直线/线段/射线"
+                      + std::string(tool_ == "perpLine3D" ? "/平面" : "");
+            }
+            GeoPoint *P = toolPts_[0];
+            GeoElement *L = toolObj_;
+            toolPts_.clear();
+            toolObj_ = nullptr;
+            r = finishInput(std::string(tool_ == "perpLine3D"
+                                            ? "PerpendicularLine"
+                                            : "Line")
+                            + "(" + P->label + ", " + L->label + ")");
         } else if (tool_ == "intersect3D") {
             // 1.1.3.4 交点工具（3D）：两对象拾取（pickObject3D 非点对象域：
             // 线族/面/球柱锥/曲面），Intersect(a, b) 命令组装——面∩面→线、
@@ -14553,6 +14727,33 @@ std::string ShadeRgba(int r, int g, int b, double shade, double alpha)
     return std::string(buf);
 }
 
+
+// 基准对象的支撑线端点（1.1.3.6 垂线/平行线共用）：Line3 / 3D 线段 / 3D
+// 射线 → 现值端点（image 感知）；其余返回 false。2D 对象不在域内
+static bool Line3EndpointsOf(GeoElement *base, double &bx1, double &by1,
+                             double &bz1, double &bx2, double &by2,
+                             double &bz2)
+{
+    if (GeoLine3 *l3 = dynamic_cast<GeoLine3 *>(base)) {
+        if (!l3->defined()) return false;
+        bx1 = l3->ex1(); by1 = l3->ey1(); bz1 = l3->ez1();
+        bx2 = l3->ex2(); by2 = l3->ey2(); bz2 = l3->ez2();
+        return true;
+    }
+    if (GeoSegment *sg = dynamic_cast<GeoSegment *>(base)) {
+        if (!(sg->p1 && sg->p1->is3D)) return false;
+        bx1 = sg->ex1(); by1 = sg->ey1(); bz1 = sg->ez1();
+        bx2 = sg->ex2(); by2 = sg->ey2(); bz2 = sg->ez2();
+        return true;
+    }
+    if (GeoRay *ry = dynamic_cast<GeoRay *>(base)) {
+        if (!(ry->p1 && ry->p1->is3D)) return false;
+        bx1 = ry->ex1(); by1 = ry->ey1(); bz1 = ry->ez1();
+        bx2 = ry->ex2(); by2 = ry->ey2(); bz2 = ry->ez2();
+        return true;
+    }
+    return false;
+}
 
 // 平面 ∩ 视图立方体 [-5,5]³ → 凸多边形顶点（质心角向排序）。1.0.8.4 由
 // render3D 内 lambda 提取共享（A4 遮挡体收集同源）；1.1.3.4 三维对象拾取

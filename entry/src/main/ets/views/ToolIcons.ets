@@ -197,14 +197,14 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     dot(9, 9, 3.4);
     dot(33, 27, 3.4);
     dot(21, 18, 3);
-  } else if (id === 'perpLine') {
+  } else if (id === 'perpLine' || id === 'perpLine3D') {
     seg(6, 26, 36, 26, 2);
     seg(23, 5, 23, 31, 2);
     shape([18.5, 26, 18.5, 21.5, 23, 21.5], '', 1.4, false);
     dot(23, 26, 3.2);
     dot(9, 26, 2.6);
     dot(34, 26, 2.6);
-  } else if (id === 'parLine') {
+  } else if (id === 'parLine' || id === 'parLine3D') {
     seg(6, 24, 28, 6, 2);
     seg(14, 30, 36, 12, 2);
     dot(12, 19.1, 3);

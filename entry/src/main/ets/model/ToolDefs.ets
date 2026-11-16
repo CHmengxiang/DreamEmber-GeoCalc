@@ -57,7 +57,9 @@ export const TOOLS: ToolDef[] = [
   { id: 'vector3D', icon: '⇢', name: '向量（3D）' },
   { id: 'midpoint3D', icon: '⊙', name: '中点（3D）' },
   { id: 'sphere3D', icon: '◉', name: '球（3D）' },
-  { id: 'intersect3D', icon: '∩', name: '交点（3D）' }
+  { id: 'intersect3D', icon: '∩', name: '交点（3D）' },
+  { id: 'perpLine3D', icon: '┴', name: '垂线（3D）' },
+  { id: 'parLine3D', icon: '∥', name: '平行线（3D）' }
 ];
 
 // 轮 C 工具分组（上游 工具页样式）：分组头 + 每行 4 个按钮的网格。
@@ -79,7 +81,8 @@ export const TOOL_GROUPS: ToolGroup[] = [
   { name: '变换', ids: ['translate', 'reflect', 'reflectPoint', 'rotate', 'dilate'] },
   { name: '特殊', ids: ['tangent', 'slider'] },
   { name: '三维', ids: ['point3D', 'segment3D', 'line3D', 'ray3D', 'vector3D',
-    'midpoint3D', 'sphere3D', 'plane3D', 'intersect3D'] }
+    'midpoint3D', 'sphere3D', 'plane3D', 'intersect3D', 'perpLine3D',
+    'parLine3D'] }
 ];
 
 // 按 id 查工具（选择工具的用法提示等场景）
@@ -183,6 +186,12 @@ export function toolUsage(id: string): string {
   }
   if (id === 'intersect3D') {
     return '依次点选两个 3D 对象（线/面/球柱锥/曲面）取交';
+  }
+  if (id === 'perpLine3D') {
+    return '点选一个三维点和一条基准（直线/线段/射线/平面，先后不限）作垂线';
+  }
+  if (id === 'parLine3D') {
+    return '点选一个三维点和一条基准直线/线段/射线（先后不限）作平行线';
   }
   if (id === 'plane3D') {
     return '依次点选三个三维点作平面';
