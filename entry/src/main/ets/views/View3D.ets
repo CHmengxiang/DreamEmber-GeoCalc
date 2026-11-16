@@ -29,6 +29,11 @@ export struct View3D {
   onCanvasReady: (w: number, h: number, s: number) => void = (_w: number, _h: number, _s: number) => {};
   // 点按/拖动命中三维点后上报宿主（代数区选中联动，'' 清除）
   onSelectLabel: (l: string) => void = (_l: string) => {};
+  // 1.1.3.2 三维工具：宿主当前工具 id（'' = 选择/移动）；非空时点按路由
+  // kernelToolTap3D 状态机（拖动/旋转手势不受影响）
+  @Prop tool: string = '';
+  // 工具结果回报宿主（提示条 + 画布/代数区刷新，同 CanvasStage.onToolResult）
+  onToolResult: (r: string) => void = (_r: string) => {};
   // 宿主统一提交待输入行/收键盘（点画布语义与 2D 一致）
   onCommitPending: () => void = () => {};
   onDismissKeyboard: () => void = () => {};
@@ -281,8 +286,9 @@ export struct View3D {
           this.tapMoved = false;
           const p = this.toPx(ev.touches[0].x, ev.touches[0].y);
           const hit: string = dreamemberKernel.kernel3DPick(p[0], p[1]);
-          if (hit.startsWith('+|')) {
-            this.mode = 1;   // 拖三维点（kernel 内已记住命中点）
+          if (hit.startsWith('+|') && this.tool === '') {
+            this.mode = 1;   // 拖三维点（kernel 内已记住命中点）；工具态不
+                             // 升级——点按须交给 kernelToolTap3D 拾取
           }
         } else if (ev.touches.length >= 2) {
           this.mode = 3;   // 双指：捏合缩放 + 质心拖动平移（GGB 3D 口径）
@@ -347,14 +353,19 @@ export struct View3D {
         if (this.mode === 1 || this.mode === 2) {
           dreamemberKernel.kernelEndDrag();
         }
-        // 点按（未移动未捏合）：拾取三维点选中，未命中清除选中
+        // 点按（未移动未捏合）：工具态走 kernelToolTap3D 状态机（1.1.3.2）；
+        // 选择态拾取三维点选中，未命中清除选中
         if (ev.type === TouchType.Up && this.mode === 2 && !this.tapMoved) {
           const p = this.toPx(this.downX, this.downY);
-          const hit: string = dreamemberKernel.kernel3DPick(p[0], p[1]);
-          if (hit.startsWith('+|')) {
-            this.onSelectLabel(hit.substring(2));
+          if (this.tool !== '') {
+            this.onToolResult(dreamemberKernel.kernelToolTap3D(p[0], p[1]));
           } else {
-            this.onSelectLabel('');
+            const hit: string = dreamemberKernel.kernel3DPick(p[0], p[1]);
+            if (hit.startsWith('+|')) {
+              this.onSelectLabel(hit.substring(2));
+            } else {
+              this.onSelectLabel('');
+            }
           }
         }
         this.mode = 0;

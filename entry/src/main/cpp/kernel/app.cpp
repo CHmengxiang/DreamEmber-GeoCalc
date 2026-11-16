@@ -10376,6 +10376,113 @@ void Kernel::movePoint3D(GeoPoint *p, double dxPx, double dyPx)
     recomputeAll();
 }
 
+// ---------- 1.1.3.2 三维工具状态机（3D 交互一期） ----------
+
+// 屏幕 (px,py) 反解视射线 ∩ z=0：project 口径 p = X·r̂ + Y·û + s·f̂（正交
+// 基 r̂=(−sa,ca,0)、û=(−ca·sb,−sa·sb,cb)、f̂=(ca·cb,sa·cb,sb)，X=p·r、
+// Y=p·u 由屏幕坐标反解），z(s)=Y·cb+s·sb=0 → s=−Y·cb/sb。仰角≈0 时射线
+// 平行 xy 面（sb→0），退化取 s=0 的过原点视平面点（GGB 同退化，探针固定
+// 口径）。返回 false=不可得有限点
+static bool ScreenToWorldZ0(const EuclidianView3D &V, double px, double py,
+                            double &wx, double &wy, double &wz)
+{
+    const double sa = std::sin(V.yaw * M_PI / 180.0);
+    const double ca = std::cos(V.yaw * M_PI / 180.0);
+    const double sb = std::sin(V.pitch * M_PI / 180.0);
+    const double cb = std::cos(V.pitch * M_PI / 180.0);
+    const double sc = V.scale > 1e-12 ? V.scale : 1.0;
+    const double X = (px - V.cx()) / sc + V.r0;   // p·r
+    const double Y = (V.cy() - py) / sc + V.u0;   // p·u
+    if (std::fabs(sb) < 1e-9) {
+        wx = X * (-sa) + Y * (-ca * sb);
+        wy = X * (ca) + Y * (-sa * sb);
+        wz = Y * cb;
+    } else {
+        const double s = -(Y * cb) / sb;
+        wx = X * (-sa) + Y * (-ca * sb) + s * (ca * cb);
+        wy = X * (ca) + Y * (-sa * sb) + s * (sa * cb);
+        wz = Y * cb + s * sb;
+    }
+    return std::isfinite(wx) && std::isfinite(wy) && std::isfinite(wz);
+}
+
+std::string Kernel::toolTap3D(double px, double py)
+{
+    if (tool_.empty()) return "err|未选择工具";
+    if (!askKind_.empty()) return "need|请先在弹窗输入参数，或取消后重画";
+
+    // 空白点按先建三维点（工具内多次用；独立一步撤销与 2D makeFreePoint 同规）
+    auto make3D = [&]() -> GeoPoint * {
+        double wx, wy, wz;
+        if (!ScreenToWorldZ0(view3d, px, py, wx, wy, wz)) return nullptr;
+        const std::string pre = getXml();
+        auto p = std::make_unique<GeoPoint>();
+        p->x = wx;
+        p->y = wy;
+        p->z = wz;
+        p->is3D = true;
+        GeoElement *made = add(std::move(p), "");
+        if (made) commitUndoSnapshot(pre);
+        return dynamic_cast<GeoPoint *>(made);
+    };
+    auto finishInput = [&](const std::string &expr) -> std::string {
+        const size_t before = geos_.size();
+        if (!input(expr)) {
+            return "err|" + (lastError.empty() ? "无法创建" : lastError);
+        }
+        return "done|" + geos_[before]->label;
+    };
+
+    GeoPoint *hit = pickPoint3D(px, py);
+
+    std::string r;
+    if (tool_ == "point3D") {
+        GeoPoint *p = hit ? hit : make3D();
+        r = p ? "done|" + p->label : "err|无法在空白处建点";
+    } else {
+        // 两点工具：线段/直线/射线（点空白处先建三维点，与 2D 两点工具同构）
+        const char *twoCmd = nullptr;
+        if (tool_ == "segment3D") twoCmd = "Segment";
+        else if (tool_ == "line3D") twoCmd = "Line";
+        else if (tool_ == "ray3D") twoCmd = "Ray";
+        if (twoCmd) {
+            if (!hit) hit = make3D();
+            if (!hit) return "err|无法在空白处建点";
+            hit->selected = true;
+            toolPts_.push_back(hit);
+            if (toolPts_.size() < 2) {
+                return "need|" + std::string(twoCmd)
+                    + "：还差 1 个点（点空白处会先建三维点）";
+            }
+            std::string expr = std::string(twoCmd) + "(" + toolPts_[0]->label
+                + ", " + toolPts_[1]->label + ")";
+            toolPts_.clear();
+            r = finishInput(expr);
+        } else if (tool_ == "plane3D") {
+            // 三点工具：平面（Plane(A,B,C) 三点式，1.0.8.2 命令面）
+            if (!hit) hit = make3D();
+            if (!hit) return "err|无法在空白处建点";
+            hit->selected = true;
+            toolPts_.push_back(hit);
+            if (toolPts_.size() < 3) {
+                return "need|Plane：还差 "
+                    + std::to_string(3 - (int)toolPts_.size()) + " 个点";
+            }
+            std::string expr = "Plane(" + toolPts_[0]->label + ", "
+                + toolPts_[1]->label + ", " + toolPts_[2]->label + ")";
+            toolPts_.clear();
+            r = finishInput(expr);
+        } else {
+            return "err|该工具暂不支持三维视图";
+        }
+    }
+    // done/err 清点亮（与 2D toolTap 包装同构）；need 保持点亮待续
+    if (r.rfind("done|", 0) == 0 || r.rfind("err|", 0) == 0) {
+        for (auto &g : geos_) g->selected = false;
+    }
+    return r;
+}
+
 // ---------- 四十五包 附着/脱离点 ----------
 
 bool Kernel::attachPoint(GeoPoint *p, GeoElement *path, double wx, double wy)

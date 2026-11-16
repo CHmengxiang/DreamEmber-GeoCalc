@@ -3685,6 +3685,7 @@ export struct CanvasView {
         // 1.0.8.1 3D 视图：同画布位替换（代数区/工具面板照常共用）
         View3D({
           dark: this.dark,
+          tool: this.tool,
           canUndo: this.canUndo,
           canRedo: this.canRedo,
           onCanvasReady: (w: number, h: number, s: number): void => {
@@ -3693,6 +3694,7 @@ export struct CanvasView {
             this.uiScale = s;
           },
           onSelectLabel: (l: string): void => this.canvasSelect(l),
+          onToolResult: (r: string): void => this.applyToolResult(r),
           onCommitPending: (): void => this.commitPending(),
           onDismissKeyboard: (): void => this.dismissKeyboard(),
           onMenuAct: (): void => this.onMenuRequest(),

@@ -105,11 +105,11 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
       ink, 1.2, true);
   } else if (id === 'point') {
     dot(21, 18, 5);
-  } else if (id === 'segment') {
+  } else if (id === 'segment' || id === 'segment3D') {
     seg(10, 26, 32, 10, 2);
     dot(10, 26, 3.4);
     dot(32, 10, 3.4);
-  } else if (id === 'line') {
+  } else if (id === 'line' || id === 'line3D') {
     seg(5, 29.5, 37, 6.5, 2);
     dot(14, 24, 3.4);
     dot(28, 12, 3.4);
@@ -269,6 +269,16 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     shape([26, 9, 37, 9, 37, 20, 26, 20], soft, 1.8, true);
     dash(7, 29, 25, 11, 1.4);
     dot(7, 29, 2.8);
+  } else if (id === 'point3D') {
+    // 三维点：斜置平面（平行四边形，soft 填充）+ 蓝点
+    shape([12, 25, 30, 29, 36, 14, 18, 10], soft, 1.2, true);
+    dot(23, 19, 4.5);
+  } else if (id === 'plane3D') {
+    // 平面：斜置平行四边形（soft 填充 + ink 描边）+ 三点标
+    shape([9, 26, 28, 30, 37, 12, 18, 8], soft, 1.2, true);
+    dot(14, 24, 3);
+    dot(30, 24, 3);
+    dot(26, 12, 3);
   } else if (id === 'slider') {
     seg(8, 19, 34, 19, 2);
     seg(8, 15, 8, 23, 1.5);

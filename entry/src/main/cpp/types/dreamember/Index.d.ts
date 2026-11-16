@@ -20,6 +20,8 @@ export const kernel3DReset: () => string;
 export const kernel3DPan: (dx: number, dy: number) => string;
 export const kernel3DPick: (px: number, py: number) => string;
 export const kernel3DDragPoint: (dx: number, dy: number) => string;
+// 1.1.3.2 三维工具状态机点按（3D 视图路由，工具名与 2D 共用 kernelTool）
+export const kernelToolTap3D: (px: number, py: number) => string;
 export const kernelPickPoint: (px: number, py: number) => string;
 export const kernelDragPointTo: (px: number, py: number) => string;
 export const kernelEndDrag: () => void;

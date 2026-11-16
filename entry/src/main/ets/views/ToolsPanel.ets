@@ -702,6 +702,93 @@ export struct ToolsPanel {
             .onClick(() => this.onSetTool('slider'))
           }
           .width('100%')
+
+          // ---- 三维（1.1.3.2：3D 视图专用工具，View3D 点按路由
+          // kernelToolTap3D；2D 画布上选这些工具走 2D toolTap 报暂不支持）----
+          Text('三维')
+            .fontSize(11)
+            .fontColor(Theme.sub(this.dark))
+            .width('100%')
+            .padding({ left: 6, top: 4 })
+          Row() {
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'point3D', dark: this.dark, selected: this.tool === 'point3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'point3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('点（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'point3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'point3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('point3D'))
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'segment3D', dark: this.dark, selected: this.tool === 'segment3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'segment3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('线段（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'segment3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'segment3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('segment3D'))
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'line3D', dark: this.dark, selected: this.tool === 'line3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'line3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('直线（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'line3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'line3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('line3D'))
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'plane3D', dark: this.dark, selected: this.tool === 'plane3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'plane3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('平面（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'plane3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'plane3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('plane3D'))
+          }
+          .width('100%')
         }
         .width('100%')
         .padding({ left: 8, right: 8, bottom: 8 })

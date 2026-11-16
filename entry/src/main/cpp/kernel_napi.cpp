@@ -458,6 +458,22 @@ napi_value KernelToolTap(napi_env env, napi_callback_info info)
     return ToNapi(env, g_kernel.toolTap(wx, wy, a[0], a[1]));
 }
 
+// kernelToolTap3D(px, py): string — 1.1.3.2 三维工具状态机点按（3D 视图路由，
+// 工具名与 2D 共用 tool_）。返回 "done|标签" / "need|提示" / "err|原因"
+napi_value KernelToolTap3D(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 2) {
+        napi_throw_error(env, nullptr, "kernelToolTap3D requires (px, py)");
+        return nullptr;
+    }
+    double a[2] = {0, 0};
+    for (int i = 0; i < 2; ++i) napi_get_value_double(env, argv[i], &a[i]);
+    return ToNapi(env, g_kernel.toolTap3D(a[0], a[1]));
+}
+
 // kernelToolParam(v): string — 二十六包 工具第二批：toolTap 返回 "ask|" 后，
 // 宿主参数弹窗确认时把输入文本送回内核完成构造。返回 "done|标签,.." / "err|原因"
 // （失败保留内核 ask 态，弹窗可改再确认）
@@ -922,6 +938,7 @@ void DreamemberRegisterKernelApis(napi_env env, napi_value exports)
         { "kernelLoadGgb", nullptr, KernelLoadGgb, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelTool", nullptr, KernelTool, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelToolTap", nullptr, KernelToolTap, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelToolTap3D", nullptr, KernelToolTap3D, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelToolParam", nullptr, KernelToolParam, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelPickObj", nullptr, KernelPickObj, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelSetVisible", nullptr, KernelSetVisible, nullptr, nullptr, nullptr, napi_default, nullptr },

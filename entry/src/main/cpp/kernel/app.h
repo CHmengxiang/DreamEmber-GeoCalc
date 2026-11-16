@@ -144,6 +144,12 @@ public:
     // 时 setTool 复位。中间拾取的对象点亮 selected 特效，done/err/取消时
     // 统一清除，ask 态保持点亮
     std::string toolTap(double wx, double wy, double px, double py);
+    // 1.1.3.2 三维工具状态机（3D 交互一期）：3D 视图点按路由，工具名与 2D
+    // 共用 tool_（point3D/segment3D/line3D/ray3D/plane3D，setTool 复位共用）。
+    // 点拾取走 pickPoint3D（吸附已有三维点）；空白点按先建三维点——屏幕反解
+    // 视射线 ∩ z=0（仰角≈0 射线平行 xy 面时退化取过原点视平面点）。返回协议
+    // 同 toolTap（done|/need|/err|）
+    std::string toolTap3D(double px, double py);
     // 二十六包 工具第二批：toolTap 返回 "ask|" 后由宿主把用户输入的参数
     // （数字或对象引用，原样进命令表达式）送回这里完成构造。返回协议同
     // toolTap 的 "done|" / "err|"；失败保留 ask 态（弹窗不关、可改再确认），

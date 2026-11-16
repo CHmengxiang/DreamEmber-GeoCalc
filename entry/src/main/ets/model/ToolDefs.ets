@@ -45,7 +45,13 @@ export const TOOLS: ToolDef[] = [
   // 二十七包 滑动条工具（点画布建 Slider，代数区滑杆驱动参数联动）；
   // 二十七包③起 icon 字段不再用于渲染（工具图标改 ToolIcon Canvas 绘制），
   // 保留作数据完整性
-  { id: 'slider', icon: '⌁', name: '滑动条' }
+  { id: 'slider', icon: '⌁', name: '滑动条' },
+  // 1.1.3.2 三维工具第一批（3D 视图专用：View3D 点按路由 kernelToolTap3D；
+  // 2D 画布上选中会走 2D toolTap 报「暂不支持」，互不干扰）
+  { id: 'point3D', icon: '⊕', name: '点（3D）' },
+  { id: 'segment3D', icon: '╱', name: '线段（3D）' },
+  { id: 'line3D', icon: '─', name: '直线（3D）' },
+  { id: 'plane3D', icon: '▱', name: '平面（3D）' }
 ];
 
 // 轮 C 工具分组（上游 工具页样式）：分组头 + 每行 4 个按钮的网格。
@@ -65,7 +71,8 @@ export const TOOL_GROUPS: ToolGroup[] = [
   { name: '构造', ids: ['midpoint', 'perpBisector', 'angleBisector', 'angle', 'intersect', 'angleSize', 'attachDetach'] },
   { name: '测量', ids: ['dist', 'area', 'slope'] },
   { name: '变换', ids: ['translate', 'reflect', 'reflectPoint', 'rotate', 'dilate'] },
-  { name: '特殊', ids: ['tangent', 'slider'] }
+  { name: '特殊', ids: ['tangent', 'slider'] },
+  { name: '三维', ids: ['point3D', 'segment3D', 'line3D', 'plane3D'] }
 ];
 
 // 按 id 查工具（选择工具的用法提示等场景）
@@ -153,6 +160,15 @@ export function toolUsage(id: string): string {
   }
   if (id === 'dilate') {
     return '先点选对象，再点位似中心，弹窗输入比例';
+  }
+  if (id === 'point3D') {
+    return '点按画布创建 xy 面上的三维点；点已有三维点则选中';
+  }
+  if (id === 'segment3D' || id === 'line3D' || id === 'ray3D') {
+    return '点选两个三维点（点空白处会先建 xy 面上的点）';
+  }
+  if (id === 'plane3D') {
+    return '依次点选三个三维点作平面';
   }
   if (id === 'slider') {
     return '点按画布创建滑动条（−5~5），在代数区拖动驱动参数';
