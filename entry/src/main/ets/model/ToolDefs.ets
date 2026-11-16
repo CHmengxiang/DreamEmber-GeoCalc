@@ -51,7 +51,12 @@ export const TOOLS: ToolDef[] = [
   { id: 'point3D', icon: '⊕', name: '点（3D）' },
   { id: 'segment3D', icon: '╱', name: '线段（3D）' },
   { id: 'line3D', icon: '─', name: '直线（3D）' },
-  { id: 'plane3D', icon: '▱', name: '平面（3D）' }
+  { id: 'plane3D', icon: '▱', name: '平面（3D）' },
+  // 1.1.3.3 两点族扩容（内核 toolTap3D twoCmd 直配，零新机制）
+  { id: 'ray3D', icon: '→', name: '射线（3D）' },
+  { id: 'vector3D', icon: '⇢', name: '向量（3D）' },
+  { id: 'midpoint3D', icon: '⊙', name: '中点（3D）' },
+  { id: 'sphere3D', icon: '◉', name: '球（3D）' }
 ];
 
 // 轮 C 工具分组（上游 工具页样式）：分组头 + 每行 4 个按钮的网格。
@@ -72,7 +77,8 @@ export const TOOL_GROUPS: ToolGroup[] = [
   { name: '测量', ids: ['dist', 'area', 'slope'] },
   { name: '变换', ids: ['translate', 'reflect', 'reflectPoint', 'rotate', 'dilate'] },
   { name: '特殊', ids: ['tangent', 'slider'] },
-  { name: '三维', ids: ['point3D', 'segment3D', 'line3D', 'plane3D'] }
+  { name: '三维', ids: ['point3D', 'segment3D', 'line3D', 'ray3D', 'vector3D',
+    'midpoint3D', 'sphere3D', 'plane3D'] }
 ];
 
 // 按 id 查工具（选择工具的用法提示等场景）
@@ -164,8 +170,15 @@ export function toolUsage(id: string): string {
   if (id === 'point3D') {
     return '点按画布创建 xy 面上的三维点；点已有三维点则选中';
   }
-  if (id === 'segment3D' || id === 'line3D' || id === 'ray3D') {
+  if (id === 'segment3D' || id === 'line3D' || id === 'ray3D'
+    || id === 'vector3D') {
     return '点选两个三维点（点空白处会先建 xy 面上的点）';
+  }
+  if (id === 'midpoint3D') {
+    return '点选两点（或点空白处先建三维点）取中点';
+  }
+  if (id === 'sphere3D') {
+    return '点选球心与球面一点（点空白处会先建 xy 面上的点）';
   }
   if (id === 'plane3D') {
     return '依次点选三个三维点作平面';

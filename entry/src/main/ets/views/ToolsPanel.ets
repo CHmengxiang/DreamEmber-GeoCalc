@@ -789,6 +789,85 @@ export struct ToolsPanel {
             .onClick(() => this.onSetTool('plane3D'))
           }
           .width('100%')
+          Row() {
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'ray3D', dark: this.dark, selected: this.tool === 'ray3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'ray3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('射线（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'ray3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'ray3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('ray3D'))
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'vector3D', dark: this.dark, selected: this.tool === 'vector3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'vector3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('向量（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'vector3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'vector3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('vector3D'))
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'midpoint3D', dark: this.dark, selected: this.tool === 'midpoint3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'midpoint3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('中点（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'midpoint3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'midpoint3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('midpoint3D'))
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'sphere3D', dark: this.dark, selected: this.tool === 'sphere3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'sphere3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('球（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'sphere3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'sphere3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('sphere3D'))
+          }
+          .width('100%')
         }
         .width('100%')
         .padding({ left: 8, right: 8, bottom: 8 })

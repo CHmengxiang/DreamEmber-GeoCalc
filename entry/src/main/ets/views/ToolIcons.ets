@@ -118,7 +118,7 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     // 起点圆点 + 延伸到画布边的半线（线=两个内部点、线段=两个端点）
     seg(9, 27, 37, 6.5, 2);
     dot(9, 27, 3.4);
-  } else if (id === 'vector') {
+  } else if (id === 'vector' || id === 'vector3D') {
     seg(9, 27, 30, 8.5, 2);
     arrow(9, 27, 33, 6);
     dot(9, 27, 3);
@@ -130,7 +130,7 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     ctx.stroke();
     dot(20, 18, 3);
     dot(27.8, 10.2, 3);
-  } else if (id === 'midpoint') {
+  } else if (id === 'midpoint' || id === 'midpoint3D') {
     seg(7, 27, 35, 9, 2);
     dot(8.5, 26.2, 3);
     dot(33.5, 9.8, 3);
@@ -269,6 +269,15 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     shape([26, 9, 37, 9, 37, 20, 26, 20], soft, 1.8, true);
     dash(7, 29, 25, 11, 1.4);
     dot(7, 29, 2.8);
+  } else if (id === 'sphere3D') {
+    // 球：圆 + 球心蓝点 + 球面标点（GGB 球心点工具同语汇）
+    ctx.beginPath();
+    ctx.arc(21, 18, 11, 0, Math.PI * 2);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = ink;
+    ctx.stroke();
+    dot(21, 18, 3);
+    dot(29, 12, 3);
   } else if (id === 'point3D') {
     // 三维点：斜置平面（平行四边形，soft 填充）+ 蓝点
     shape([12, 25, 30, 29, 36, 14, 18, 10], soft, 1.2, true);

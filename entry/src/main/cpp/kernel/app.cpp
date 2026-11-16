@@ -10445,6 +10445,11 @@ std::string Kernel::toolTap3D(double px, double py)
         if (tool_ == "segment3D") twoCmd = "Segment";
         else if (tool_ == "line3D") twoCmd = "Line";
         else if (tool_ == "ray3D") twoCmd = "Ray";
+        else if (tool_ == "vector3D") twoCmd = "Vector";
+        // 1.1.3.3 两点族扩容：Midpoint/Sphere 两点形均支持 3D 端点（内核
+        // 既有命令面，工具零改动直接组装）
+        else if (tool_ == "midpoint3D") twoCmd = "Midpoint";
+        else if (tool_ == "sphere3D") twoCmd = "Sphere";
         if (twoCmd) {
             if (!hit) hit = make3D();
             if (!hit) return "err|无法在空白处建点";
