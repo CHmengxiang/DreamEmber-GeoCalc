@@ -161,7 +161,7 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     dot(21, 5, 2.8);
     dot(8, 29, 2.8);
     dot(34, 29, 2.8);
-  } else if (id === 'intersect') {
+  } else if (id === 'intersect' || id === 'intersect3D') {
     seg(7, 25, 35, 11, 2);
     seg(14, 9, 28, 27, 2);
     dot(21, 18, 4.4);

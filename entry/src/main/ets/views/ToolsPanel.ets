@@ -868,6 +868,29 @@ export struct ToolsPanel {
             .onClick(() => this.onSetTool('sphere3D'))
           }
           .width('100%')
+          // 第三行：交点（3D）单格（Row 不换行，5 格 25% 会溢出行外裁掉）
+          Row() {
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'intersect3D', dark: this.dark, selected: this.tool === 'intersect3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'intersect3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('交点（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'intersect3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'intersect3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('intersect3D'))
+          }
+          .width('100%')
         }
         .width('100%')
         .padding({ left: 8, right: 8, bottom: 8 })

@@ -10376,6 +10376,346 @@ void Kernel::movePoint3D(GeoPoint *p, double dxPx, double dyPx)
     recomputeAll();
 }
 
+namespace {
+// 前置声明：CubeClipPlane 定义在 render3D 前（匿名命名空间同 TU 共享）
+void CubeClipPlane(double nx, double ny, double nz, double dd,
+                   std::vector<double> &vx, std::vector<double> &vy,
+                   std::vector<double> &vz);
+}
+
+// ---------- 1.1.3.4 三维非点对象拾取 ----------
+GeoElement *Kernel::pickObject3D(double px, double py)
+{
+    GeoElement *best = nullptr;
+    double bestD = 1e9;       // 边距类命中（线族/环采样/多边形边）
+    double bestDep = 1e9;     // 盘内类命中（平面盘内/球剪影盘内）：深度小=近
+    GeoElement *bestStrong = nullptr;
+    const double grab = 14.0 * view3d.uiScale;
+    auto segDist = [](double ax, double ay, double bx, double by,
+                      double qx, double qy, double &out) {
+        const double dx = bx - ax, dy = by - ay;
+        const double l2 = dx * dx + dy * dy;
+        double t = l2 > 1e-12 ? ((qx - ax) * dx + (qy - ay) * dy) / l2 : 0.0;
+        t = t < 0 ? 0 : (t > 1 ? 1 : t);
+        const double cx = ax + t * dx - qx, cy = ay + t * dy - qy;
+        out = sqrt(cx * cx + cy * cy);
+    };
+    auto consider = [&](GeoElement *g, double d) {
+        if (std::isfinite(d) && d < grab && d < bestD) { bestD = d; best = g; }
+    };
+    for (auto &g : geos_) {
+        switch (g->type()) {
+        case GeoType::Segment: {
+            GeoSegment *sg = static_cast<GeoSegment *>(g.get());
+            if (!((sg->p1 && sg->p1->is3D) || (sg->p2 && sg->p2->is3D))) break;
+            double sx1, sy1, sx2, sy2;
+            view3d.project(sg->ex1(), sg->ey1(), sg->ez1(), sx1, sy1);
+            view3d.project(sg->ex2(), sg->ey2(), sg->ez2(), sx2, sy2);
+            double d;
+            segDist(sx1, sy1, sx2, sy2, px, py, d);
+            consider(g.get(), d);
+            break;
+        }
+        case GeoType::Ray: {
+            GeoRay *ry = static_cast<GeoRay *>(g.get());
+            if (!((ry->p1 && ry->p1->is3D) || (ry->p2 && ry->p2->is3D))) break;
+            // 半线：终点正向延伸 10 倍（起点不延伸，t<0 不命中）
+            double dx3 = ry->ex2() - ry->ex1(), dy3 = ry->ey2() - ry->ey1(),
+                   dz3 = ry->ez2() - ry->ez1();
+            double sx1, sy1, sx2, sy2;
+            view3d.project(ry->ex1(), ry->ey1(), ry->ez1(), sx1, sy1);
+            view3d.project(ry->ex2() + 10 * dx3, ry->ey2() + 10 * dy3,
+                           ry->ez2() + 10 * dz3, sx2, sy2);
+            double d;
+            segDist(sx1, sy1, sx2, sy2, px, py, d);
+            consider(g.get(), d);
+            break;
+        }
+        case GeoType::Vector: {
+            GeoVector *v = static_cast<GeoVector *>(g.get());
+            if (!((v->p1 && v->p1->is3D) || (v->p2 && v->p2->is3D)
+                  || v->ez1() != 0.0 || v->ez2() != 0.0)) break;
+            double sx1, sy1, sx2, sy2;
+            view3d.project(v->ex1(), v->ey1(), v->ez1(), sx1, sy1);
+            view3d.project(v->ex2(), v->ey2(), v->ez2(), sx2, sy2);
+            double d;
+            segDist(sx1, sy1, sx2, sy2, px, py, d);
+            consider(g.get(), d);
+            break;
+        }
+        case GeoType::Line3: {
+            GeoLine3 *l3 = static_cast<GeoLine3 *>(g.get());
+            if (!l3->defined()) break;
+            // 无限直线：两端各外延 10 倍再段距（与渲染视口裁剪视觉一致）
+            double dx3 = l3->ex2() - l3->ex1(), dy3 = l3->ey2() - l3->ey1(),
+                   dz3 = l3->ez2() - l3->ez1();
+            double sx1, sy1, sx2, sy2;
+            view3d.project(l3->ex1() - 10 * dx3, l3->ey1() - 10 * dy3,
+                           l3->ez1() - 10 * dz3, sx1, sy1);
+            view3d.project(l3->ex2() + 10 * dx3, l3->ey2() + 10 * dy3,
+                           l3->ez2() + 10 * dz3, sx2, sy2);
+            double d;
+            segDist(sx1, sy1, sx2, sy2, px, py, d);
+            consider(g.get(), d);
+            break;
+        }
+        case GeoType::Circle3: {
+            GeoCircle3 *c3 = static_cast<GeoCircle3 *>(g.get());
+            if (!c3->defined()) break;
+            const double anl = sqrt(c3->nx * c3->nx + c3->ny * c3->ny
+                                    + c3->nz * c3->nz);
+            if (!(anl > 1e-12)) break;
+            const double axn = c3->nx / anl, ayn = c3->ny / anl,
+                         azn = c3->nz / anl;
+            double e1x, e1y, e1z;
+            if (fabs(axn) <= fabs(ayn) && fabs(axn) <= fabs(azn)) {
+                e1x = 0; e1y = azn; e1z = -ayn;
+            } else if (fabs(ayn) <= fabs(azn)) {
+                e1x = -azn; e1y = 0; e1z = axn;
+            } else {
+                e1x = ayn; e1y = -axn; e1z = 0;
+            }
+            const double el = sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+            e1x /= el; e1y /= el; e1z /= el;
+            const double e2x = ayn * e1z - azn * e1y;
+            const double e2y = azn * e1x - axn * e1z;
+            const double e2z = axn * e1y - ayn * e1x;
+            double dmin = 1e9;
+            for (int i = 0; i < 24; ++i) {
+                const double t0 = 2.0 * M_PI * i / 24.0;
+                double sx1, sy1;
+                view3d.project(c3->cx + c3->r * (std::cos(t0) * e1x
+                    + std::sin(t0) * e2x), c3->cy + c3->r * (std::cos(t0) * e1y
+                    + std::sin(t0) * e2y), c3->cz + c3->r * (std::cos(t0) * e1z
+                    + std::sin(t0) * e2z), sx1, sy1);
+                double d;
+                segDist(sx1, sy1, sx1, sy1, px, py, d);
+                if (d < dmin) dmin = d;
+            }
+            consider(g.get(), dmin);
+            break;
+        }
+        case GeoType::Conic3: {
+            GeoConic3 *cn = static_cast<GeoConic3 *>(g.get());
+            if (!cn->defined()) break;
+            double dmin = 1e9;
+            if (cn->kind == 0 || cn->kind == 1) {
+                for (int i = 0; i < 24; ++i) {
+                    const double t0 = 2.0 * M_PI * i / 24.0;
+                    double sx1, sy1;
+                    view3d.project(cn->cx + std::cos(t0) * cn->ux
+                        + std::sin(t0) * cn->vx, cn->cy + std::cos(t0) * cn->uy
+                        + std::sin(t0) * cn->vy, cn->cz + std::cos(t0) * cn->uz
+                        + std::sin(t0) * cn->vz, sx1, sy1);
+                    double d;
+                    segDist(sx1, sy1, sx1, sy1, px, py, d);
+                    if (d < dmin) dmin = d;
+                }
+            } else if (cn->kind == 2 || cn->kind == 5) {
+                // 两直线族：t∈[−8,8] 端点段距（kind2 过 (cx,cy,cz) 方向 u，
+                // kind5 两线过 p1 方向 u/v）
+                auto lineD = [&](double ox, double oy, double oz,
+                                 double dx2, double dy2, double dz2) {
+                    double s1x, s1y, s2x, s2y, d;
+                    view3d.project(ox - 8 * dx2, oy - 8 * dy2, oz - 8 * dz2,
+                                   s1x, s1y);
+                    view3d.project(ox + 8 * dx2, oy + 8 * dy2, oz + 8 * dz2,
+                                   s2x, s2y);
+                    segDist(s1x, s1y, s2x, s2y, px, py, d);
+                    if (d < dmin) dmin = d;
+                };
+                if (cn->kind == 2) {
+                    lineD(cn->cx, cn->cy, cn->cz, cn->ux, cn->uy, cn->uz);
+                } else {
+                    lineD(cn->p1x, cn->p1y, cn->p1z, cn->ux, cn->uy, cn->uz);
+                    lineD(cn->p1x, cn->p1y, cn->p1z, cn->vx, cn->vy, cn->vz);
+                }
+            } else {
+                break;
+            }
+            consider(g.get(), dmin);
+            break;
+        }
+        case GeoType::Sphere: {
+            GeoSphere *sp = static_cast<GeoSphere *>(g.get());
+            if (!sp->center && !sp->cImage) break;
+            double r = sp->radius;
+            if (sp->radiusNum) r = sp->radiusNum->value;
+            else if (sp->through) {
+                const double dx = sp->through->x - sp->ccx();
+                const double dy = sp->through->y - sp->ccy();
+                const double dz = sp->through->z - sp->ccz();
+                r = sqrt(dx * dx + dy * dy + dz * dz);
+            }
+            if (!(r > 0) || !std::isfinite(r)) break;
+            double scx, scy;
+            view3d.project(sp->ccx(), sp->ccy(), sp->ccz(), scx, scy);
+            const double d = sqrt((px - scx) * (px - scx)
+                                  + (py - scy) * (py - scy));
+            // 剪影盘（正交投影半径 = R·scale）；盘内命中，度=到心距取最近
+            const double rs = r * view3d.scale;
+            if (d <= rs) {
+                double tdep = view3d.project(sp->ccx(), sp->ccy(), sp->ccz(),
+                                             scx, scy);
+                if (tdep < bestDep) {
+                    bestDep = tdep;
+                    bestStrong = g.get();
+                }
+            }
+            break;
+        }
+        case GeoType::Plane: {
+            GeoPlane *pl = static_cast<GeoPlane *>(g.get());
+            const double nl = sqrt(pl->a * pl->a + pl->b * pl->b + pl->c * pl->c);
+            if (!(nl > 1e-12)) break;
+            std::vector<double> ix, iy, iz;
+            CubeClipPlane(pl->a / nl, pl->b / nl, pl->c / nl, pl->d / nl,
+                          ix, iy, iz);
+            const int npts = (int)ix.size();
+            if (npts < 3) break;
+            std::vector<std::pair<double, double>> poly;
+            for (int q = 0; q < npts; ++q) {
+                double ppx, ppy;
+                view3d.project(ix[q], iy[q], iz[q], ppx, ppy);
+                poly.emplace_back(ppx, ppy);
+            }
+            // 射线法点含（盘内=命中）+ 边界最近距（盘外贴边也可拾）
+            bool inside = false;
+            double dEdge = 1e9;
+            for (int q = 0; q < npts; ++q) {
+                const auto &a2 = poly[q];
+                const auto &b2 = poly[(q + 1) % npts];
+                double d;
+                segDist(a2.first, a2.second, b2.first, b2.second, px, py, d);
+                if (d < dEdge) dEdge = d;
+                if ((a2.second > py) != (b2.second > py)) {
+                    const double xint = a2.first + (py - a2.second)
+                        / (b2.second - a2.second) * (b2.first - a2.first);
+                    if (px < xint) inside = !inside;
+                }
+            }
+            if (inside) {
+                // 盘内=强命中：深度小=相机近者胜（GGB 前表面语义）
+                double cx3 = 0, cy3 = 0, cz3 = 0;
+                for (int q = 0; q < npts; ++q) {
+                    cx3 += ix[q]; cy3 += iy[q]; cz3 += iz[q];
+                }
+                double scx, scy;
+                const double tdep = view3d.project(cx3 / npts, cy3 / npts,
+                                                   cz3 / npts, scx, scy);
+                if (tdep < bestDep) {
+                    bestDep = tdep;
+                    bestStrong = g.get();
+                }
+            } else if (dEdge < grab) {
+                consider(g.get(), dEdge);
+            }
+            break;
+        }
+        case GeoType::Cylinder: {
+            GeoCylinder *cy = static_cast<GeoCylinder *>(g.get());
+            const double ax2 = cy->tcx() - cy->bcx(), ay2 = cy->tcy() - cy->bcy(),
+                         az2 = cy->tcz() - cy->bcz();
+            const double al = sqrt(ax2 * ax2 + ay2 * ay2 + az2 * az2);
+            if (!(al > 1e-12) || !(cy->radius > 1e-12)) break;
+            // 轴向单位 + 垂直基
+            const double ux2 = ax2 / al, uy2 = ay2 / al, uz2 = az2 / al;
+            double p1x, p1y, p1z;
+            if (fabs(ux2) <= fabs(uy2) && fabs(ux2) <= fabs(uz2)) {
+                p1x = 0; p1y = uz2; p1z = -uy2;
+            } else if (fabs(uy2) <= fabs(uz2)) {
+                p1x = -uz2; p1y = 0; p1z = ux2;
+            } else {
+                p1x = uy2; p1y = -ux2; p1z = 0;
+            }
+            const double pl2 = sqrt(p1x * p1x + p1y * p1y + p1z * p1z);
+            p1x /= pl2; p1y /= pl2; p1z /= pl2;
+            const double p2x = uy2 * p1z - uz2 * p1y;
+            const double p2y = uz2 * p1x - ux2 * p1z;
+            const double p2z = ux2 * p1y - uy2 * p1x;
+            double dmin = 1e9;
+            for (int hq = 0; hq <= 4; ++hq) {
+                const double hf = hq / 4.0;
+                for (int i = 0; i < 12; ++i) {
+                    const double t0 = 2.0 * M_PI * i / 12.0;
+                    const double rr = cy->radius * std::cos(t0);
+                    const double rs = cy->radius * std::sin(t0);
+                    double sx1, sy1;
+                    view3d.project(cy->bcx() + hf * ax2 + rr * p1x + rs * p2x,
+                                   cy->bcy() + hf * ay2 + rr * p1y + rs * p2y,
+                                   cy->bcz() + hf * az2 + rr * p1z + rs * p2z,
+                                   sx1, sy1);
+                    double d;
+                    segDist(sx1, sy1, sx1, sy1, px, py, d);
+                    if (d < dmin) dmin = d;
+                }
+            }
+            consider(g.get(), dmin);
+            break;
+        }
+        case GeoType::Cone: {
+            GeoCone *cn = static_cast<GeoCone *>(g.get());
+            if (!(cn->radius > 1e-12)) break;
+            double dmin = 1e9;
+            for (int i = 0; i < 16; ++i) {
+                const double t0 = 2.0 * M_PI * i / 16.0;
+                double sx1, sy1;
+                view3d.project(cn->bcx() + cn->radius * std::cos(t0),
+                               cn->bcy() + cn->radius * std::sin(t0),
+                               cn->bcz(), sx1, sy1);
+                double d;
+                segDist(sx1, sy1, sx1, sy1, px, py, d);
+                if (d < dmin) dmin = d;
+            }
+            double sax, say;
+            view3d.project(cn->avx(), cn->avy(), cn->avz(), sax, say);
+            double d;
+            segDist(sax, say, sax, say, px, py, d);
+            if (d < dmin) dmin = d;
+            consider(g.get(), dmin);
+            break;
+        }
+        case GeoType::Surface: {
+            GeoSurface *sf = static_cast<GeoSurface *>(g.get());
+            if (!sf->definable()) break;
+            if (sf->parametric && (!(sf->u1 > sf->u0) || !(sf->v1 > sf->v0)
+                || !std::isfinite(sf->u0) || !std::isfinite(sf->u1)
+                || !std::isfinite(sf->v0) || !std::isfinite(sf->v1))) break;
+            double dmin = 1e9;
+            const int NS = 20;   // 对齐渲染网格密度：采样格对角 ≤ grab
+            for (int i = 0; i <= NS; ++i) {
+                for (int j = 0; j <= NS; ++j) {
+                    double wx, wy, wz;
+                    if (sf->parametric) {
+                        sf->evalUV(sf->u0 + (sf->u1 - sf->u0) * i / NS,
+                                   sf->v0 + (sf->v1 - sf->v0) * j / NS,
+                                   wx, wy, wz);
+                    } else {
+                        wx = -5.0 + 10.0 * i / NS;
+                        wy = -5.0 + 10.0 * j / NS;
+                        wz = sf->evalAt(wx, wy);
+                    }
+                    if (!std::isfinite(wx) || !std::isfinite(wy)
+                        || !std::isfinite(wz)) continue;
+                    double sx1, sy1;
+                    view3d.project(wx, wy, wz, sx1, sy1);
+                    double d;
+                    segDist(sx1, sy1, sx1, sy1, px, py, d);
+                    if (d < dmin) dmin = d;
+                }
+            }
+            consider(g.get(), dmin);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    // 盘内强命中优先（GGB 前表面语义：重叠面片取相机最近者）；无边距命中
+    // 时回退边距类最近
+    return bestStrong ? bestStrong : best;
+}
+
 // ---------- 1.1.3.2 三维工具状态机（3D 交互一期） ----------
 
 // 屏幕 (px,py) 反解视射线 ∩ z=0：project 口径 p = X·r̂ + Y·û + s·f̂（正交
@@ -10477,6 +10817,36 @@ std::string Kernel::toolTap3D(double px, double py)
                 + toolPts_[1]->label + ", " + toolPts_[2]->label + ")";
             toolPts_.clear();
             r = finishInput(expr);
+        } else if (tool_ == "intersect3D") {
+            // 1.1.3.4 交点工具（3D）：两对象拾取（pickObject3D 非点对象域：
+            // 线族/面/球柱锥/曲面），Intersect(a, b) 命令组装——面∩面→线、
+            // 面∩球→圆、面∩柱锥→圆锥曲线全族走既有命令面
+            GeoElement *o = pickObject3D(px, py);
+            if (!o) {
+                return "need|Intersect：请点选 3D 直线/面/球柱锥/曲面等对象";
+            }
+            if (!toolObj_) {
+                toolObj_ = o;
+                o->selected = true;
+                return "need|Intersect：再点选第二个对象";
+            }
+            if (o == toolObj_) {
+                return "need|Intersect：两对象相同，请重新点选";
+            }
+            o->selected = true;
+            std::string expr = "Intersect(" + toolObj_->label + ", "
+                + o->label + ")";
+            toolObj_ = nullptr;
+            const size_t before = geos_.size();
+            if (!input(expr)) {
+                r = "err|" + (lastError.empty() ? "未找到交点" : lastError);
+            } else {
+                r = "done|";
+                for (size_t i = before; i < geos_.size(); ++i) {
+                    if (i > before) r += ", ";
+                    r += geos_[i]->label;
+                }
+            }
         } else {
             return "err|该工具暂不支持三维视图";
         }
@@ -14183,6 +14553,85 @@ std::string ShadeRgba(int r, int g, int b, double shade, double alpha)
     return std::string(buf);
 }
 
+
+// 平面 ∩ 视图立方体 [-5,5]³ → 凸多边形顶点（质心角向排序）。1.0.8.4 由
+// render3D 内 lambda 提取共享（A4 遮挡体收集同源）；1.1.3.4 三维对象拾取
+// （Plane 盘内命中测试）一并复用
+void CubeClipPlane(double nx, double ny, double nz, double dd,
+                   std::vector<double> &vx, std::vector<double> &vy,
+                   std::vector<double> &vz)
+{
+    const double C = 5.0;
+    const double corners[8][3] = {
+        { -C, -C, -C }, { C, -C, -C }, { C, C, -C }, { -C, C, -C },
+        { -C, -C, C }, { C, -C, C }, { C, C, C }, { -C, C, C },
+    };
+    const int edges[12][2] = {
+        { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 },
+        { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 },
+        { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 },
+    };
+    std::vector<double> ix, iy, iz;
+    for (const auto &ed : edges) {
+        const double *P = corners[ed[0]];
+        const double *Q = corners[ed[1]];
+        const double s1 = nx * P[0] + ny * P[1] + nz * P[2] - dd;
+        const double s2 = nx * Q[0] + ny * Q[1] + nz * Q[2] - dd;
+        if ((s1 > 1e-12) == (s2 > 1e-12)) continue;
+        const double t = s1 / (s1 - s2);
+        const double px2 = P[0] + t * (Q[0] - P[0]);
+        const double py2 = P[1] + t * (Q[1] - P[1]);
+        const double pz2 = P[2] + t * (Q[2] - P[2]);
+        bool dup = false;
+        for (size_t q = 0; q < ix.size(); ++q) {
+            if (fabs(ix[q] - px2) < 1e-9 && fabs(iy[q] - py2) < 1e-9
+                && fabs(iz[q] - pz2) < 1e-9) { dup = true; break; }
+        }
+        if (!dup) {
+            ix.push_back(px2);
+            iy.push_back(py2);
+            iz.push_back(pz2);
+        }
+    }
+    if (ix.size() < 3) return;
+    // 平面内正交基（n 最小分量轴的叉积）→ 质心角向排序
+    double e1x, e1y, e1z;
+    if (fabs(nx) <= fabs(ny) && fabs(nx) <= fabs(nz)) {
+        e1x = 0; e1y = nz; e1z = -ny;          // n × x̂
+    } else if (fabs(ny) <= fabs(nz)) {
+        e1x = -nz; e1y = 0; e1z = nx;          // n × ŷ
+    } else {
+        e1x = ny; e1y = -nx; e1z = 0;          // n × ẑ
+    }
+    const double el = sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+    e1x /= el; e1y /= el; e1z /= el;
+    const double e2x = ny * e1z - nz * e1y;
+    const double e2y = nz * e1x - nx * e1z;
+    const double e2z = nx * e1y - ny * e1x;
+    double gx = 0, gy = 0, gz = 0;
+    for (size_t q = 0; q < ix.size(); ++q) {
+        gx += ix[q]; gy += iy[q]; gz += iz[q];
+    }
+    const double n3 = (double)ix.size();
+    gx /= n3; gy /= n3; gz /= n3;
+    std::vector<size_t> order(ix.size());
+    for (size_t q = 0; q < order.size(); ++q) order[q] = q;
+    std::sort(order.begin(), order.end(),
+              [&](size_t a, size_t b) {
+                  const double rx = ix[a] - gx, ry = iy[a] - gy, rz = iz[a] - gz;
+                  const double sx2 = ix[b] - gx, sy2 = iy[b] - gy, sz2 = iz[b] - gz;
+                  return atan2(rx * e2x + ry * e2y + rz * e2z,
+                               rx * e1x + ry * e1y + rz * e1z)
+                       < atan2(sx2 * e2x + sy2 * e2y + sz2 * e2z,
+                               sx2 * e1x + sy2 * e1y + sz2 * e1z);
+              });
+    for (size_t q : order) {
+        vx.push_back(ix[q]);
+        vy.push_back(iy[q]);
+        vz.push_back(iz[q]);
+    }
+}
+
 } // namespace
 
 void Kernel::render3D(std::vector<DrawCmd> &out)
@@ -14313,79 +14762,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
     // 到视图立方体作为遮挡体；其后线/线段/向量/点按平面穿越拆段，被遮挡段
     //（平面远侧 + 投影落填充多边形内）以剩余可见率 Π(1−fillAlpha) 透视绘制，
     // 与曲面四边形远→近深度口径一致（相机位于 −f 侧）
-    auto cubeClipPlane = [](double nx, double ny, double nz, double dd,
-                            std::vector<double> &vx, std::vector<double> &vy,
-                            std::vector<double> &vz) {
-        const double C = 5.0;
-        const double corners[8][3] = {
-            { -C, -C, -C }, { C, -C, -C }, { C, C, -C }, { -C, C, -C },
-            { -C, -C, C }, { C, -C, C }, { C, C, C }, { -C, C, C },
-        };
-        const int edges[12][2] = {
-            { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 },
-            { 4, 5 }, { 5, 6 }, { 6, 7 }, { 7, 4 },
-            { 0, 4 }, { 1, 5 }, { 2, 6 }, { 3, 7 },
-        };
-        std::vector<double> ix, iy, iz;
-        for (const auto &ed : edges) {
-            const double *P = corners[ed[0]];
-            const double *Q = corners[ed[1]];
-            const double s1 = nx * P[0] + ny * P[1] + nz * P[2] - dd;
-            const double s2 = nx * Q[0] + ny * Q[1] + nz * Q[2] - dd;
-            if ((s1 > 1e-12) == (s2 > 1e-12)) continue;
-            const double t = s1 / (s1 - s2);
-            const double px2 = P[0] + t * (Q[0] - P[0]);
-            const double py2 = P[1] + t * (Q[1] - P[1]);
-            const double pz2 = P[2] + t * (Q[2] - P[2]);
-            bool dup = false;
-            for (size_t q = 0; q < ix.size(); ++q) {
-                if (fabs(ix[q] - px2) < 1e-9 && fabs(iy[q] - py2) < 1e-9
-                    && fabs(iz[q] - pz2) < 1e-9) { dup = true; break; }
-            }
-            if (!dup) {
-                ix.push_back(px2);
-                iy.push_back(py2);
-                iz.push_back(pz2);
-            }
-        }
-        if (ix.size() < 3) return;
-        // 平面内正交基（n 最小分量轴的叉积）→ 质心角向排序
-        double e1x, e1y, e1z;
-        if (fabs(nx) <= fabs(ny) && fabs(nx) <= fabs(nz)) {
-            e1x = 0; e1y = nz; e1z = -ny;          // n × x̂
-        } else if (fabs(ny) <= fabs(nz)) {
-            e1x = -nz; e1y = 0; e1z = nx;          // n × ŷ
-        } else {
-            e1x = ny; e1y = -nx; e1z = 0;          // n × ẑ
-        }
-        const double el = sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
-        e1x /= el; e1y /= el; e1z /= el;
-        const double e2x = ny * e1z - nz * e1y;
-        const double e2y = nz * e1x - nx * e1z;
-        const double e2z = nx * e1y - ny * e1x;
-        double gx = 0, gy = 0, gz = 0;
-        for (size_t q = 0; q < ix.size(); ++q) {
-            gx += ix[q]; gy += iy[q]; gz += iz[q];
-        }
-        const double n3 = (double)ix.size();
-        gx /= n3; gy /= n3; gz /= n3;
-        std::vector<size_t> order(ix.size());
-        for (size_t q = 0; q < order.size(); ++q) order[q] = q;
-        std::sort(order.begin(), order.end(),
-                  [&](size_t a, size_t b) {
-                      const double rx = ix[a] - gx, ry = iy[a] - gy, rz = iz[a] - gz;
-                      const double sx2 = ix[b] - gx, sy2 = iy[b] - gy, sz2 = iz[b] - gz;
-                      return atan2(rx * e2x + ry * e2y + rz * e2z,
-                                   rx * e1x + ry * e1y + rz * e1z)
-                           < atan2(sx2 * e2x + sy2 * e2y + sz2 * e2z,
-                                   sx2 * e1x + sy2 * e1y + sz2 * e1z);
-                  });
-        for (size_t q : order) {
-            vx.push_back(ix[q]);
-            vy.push_back(iy[q]);
-            vz.push_back(iz[q]);
-        }
-    };
+    // 平面裁剪已提取为匿名命名空间静态 CubeClipPlane（1.1.3.4 拾取共用）
     struct Occ3 {
         int kind = 0;              // 0=平面（poly 网格 hit）1=球 2=圆柱
         double nx, ny, nz, dd, alpha;
@@ -14420,7 +14797,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         oc.alpha = pl->fillAlpha;
         if (fabs(oc.nx * fx + oc.ny * fy + oc.nz * fz) < 1e-9) continue;
         std::vector<double> cx3, cy3, cz3;
-        cubeClipPlane(oc.nx, oc.ny, oc.nz, oc.dd, cx3, cy3, cz3);
+        CubeClipPlane(oc.nx, oc.ny, oc.nz, oc.dd, cx3, cy3, cz3);
         if (cx3.size() < 3) continue;
         oc.poly.reserve(cx3.size() * 2);
         for (size_t q = 0; q < cx3.size(); ++q) {
@@ -15279,7 +15656,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             const double nx = pl->a / nl, ny = pl->b / nl, nz = pl->c / nl;
             const double dd = pl->d / nl;
             std::vector<double> ix, iy, iz;
-            cubeClipPlane(nx, ny, nz, dd, ix, iy, iz);
+            CubeClipPlane(nx, ny, nz, dd, ix, iy, iz);
             const int npts = (int)ix.size();
             if (npts < 3) break;
             const double shade = 0.55 + 0.45 * fabs(nx * fx + ny * fy + nz * fz);

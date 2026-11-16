@@ -100,6 +100,10 @@ public:
     void render3D(std::vector<DrawCmd> &out);
     // 3D 点拾取（投影距离最近；仅 is3D 点；outD 回写命中距离）
     GeoPoint *pickPoint3D(double px, double py, double *outD = nullptr);
+    // 1.1.3.4 三维非点对象拾取（交点工具等消费）：线族投影段距/Circle3 采样/
+    // Sphere 剪影盘/Plane 裁剪多边形点含/Cylinder·Cone 环采样/Surface 网格采样。
+    // 点对象不在本函数域（pickPoint3D 优先级更高由调用方裁决）
+    GeoElement *pickObject3D(double px, double py);
     // 3D 点拖动（屏幕位移 → 视平面内世界位移；仅自由三维点）
     void movePoint3D(GeoPoint *p, double dxPx, double dyPx);
     void resetView3D() { view3d.reset(); }
