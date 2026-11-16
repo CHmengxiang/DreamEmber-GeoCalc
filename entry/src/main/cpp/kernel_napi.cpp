@@ -335,6 +335,28 @@ napi_value Kernel3DPick(napi_env env, napi_callback_info info)
     return ToNapi(env, "-|");
 }
 
+// kernel3DPickSel(px, py): string — 1.1.3.5 选中拾取：点优先（不置拖点态），
+// 回退非点对象（pickObject3D）。View3D 点按选中路由用；拖点升级仍走
+// kernel3DPick（点专用，避免非点对象抢走拖点模式）
+napi_value Kernel3DPickSel(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 2) {
+        napi_throw_error(env, nullptr, "kernel3DPickSel requires (px, py)");
+        return nullptr;
+    }
+    double px = 0, py = 0;
+    napi_get_value_double(env, argv[0], &px);
+    napi_get_value_double(env, argv[1], &py);
+    dreamember::GeoPoint *p = g_kernel.pickPoint3D(px, py);
+    if (p) return ToNapi(env, "+|" + p->label);
+    dreamember::GeoElement *o = g_kernel.pickObject3D(px, py);
+    if (o) return ToNapi(env, "+|" + o->label);
+    return ToNapi(env, "-|");
+}
+
 // kernel3DDragPoint(dx, dy): string — 拖动已拾取三维点（视平面内位移），返回重绘帧
 napi_value Kernel3DDragPoint(napi_env env, napi_callback_info info)
 {
@@ -925,6 +947,7 @@ void DreamemberRegisterKernelApis(napi_env env, napi_value exports)
         { "kernel3DReset", nullptr, Kernel3DReset, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernel3DPan", nullptr, Kernel3DPan, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernel3DPick", nullptr, Kernel3DPick, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernel3DPickSel", nullptr, Kernel3DPickSel, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernel3DDragPoint", nullptr, Kernel3DDragPoint, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelPickPoint", nullptr, KernelPickPoint, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelDragPointTo", nullptr, KernelDragPointTo, nullptr, nullptr, nullptr, napi_default, nullptr },

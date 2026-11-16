@@ -360,7 +360,9 @@ export struct View3D {
           if (this.tool !== '') {
             this.onToolResult(dreamemberKernel.kernelToolTap3D(p[0], p[1]));
           } else {
-            const hit: string = dreamemberKernel.kernel3DPick(p[0], p[1]);
+            // 1.1.3.5 选中走 PickSel（点优先回退非点对象）；Down 的拖点
+            // 升级仍用 kernel3DPick 点专用口径，非点对象不再抢占拖点模式
+            const hit: string = dreamemberKernel.kernel3DPickSel(p[0], p[1]);
             if (hit.startsWith('+|')) {
               this.onSelectLabel(hit.substring(2));
             } else {
