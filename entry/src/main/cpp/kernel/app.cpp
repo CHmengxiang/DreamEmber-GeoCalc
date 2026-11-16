@@ -14048,12 +14048,16 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
     auto proj = [&V](double x, double y, double z, double &px, double &py) -> double {
         return V.project(x, y, z, px, py);
     };
-    // 相机前向（光照用）：f = (cosα·cosβ, sinα·cosβ, sinβ)
+    // 相机前向（1.1.3 起语义=远离相机方向，供光照/遮挡共用）：俯视布局下
+    // 相机在 +f 侧，远离相机 = −f，故此处取负——光照用 |n·f| 对称不变，
+    // 遮挡"背后"判据（球柱锥平面 d·f>0 类）与 project 深度（view.h 已取
+    // 负）随之同口径翻转。原实现整条景深轴方向用反（正交投影二义性：画
+    // 面不变、变淡半边落在相机同侧），真机 1.1.2.2 验收实证后统一校正
     const double sa = std::sin(V.yaw * M_PI / 180.0);
     const double ca = std::cos(V.yaw * M_PI / 180.0);
     const double sb = std::sin(V.pitch * M_PI / 180.0);
     const double cb = std::cos(V.pitch * M_PI / 180.0);
-    const double fx = ca * cb, fy = sa * cb, fz = sb;
+    const double fx = -ca * cb, fy = -sa * cb, fz = -sb;
 
     const std::string axisC = darkTheme ? "#C9CDD4" : "#000000";
     const std::string textC = darkTheme ? "#9AA0A8" : "#555555";
