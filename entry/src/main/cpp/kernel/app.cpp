@@ -2407,7 +2407,7 @@ bool Kernel::inputImpl(const std::string &srcRaw)
 // 方回落既有分支）；-1=识别为平面方程但非法（err 已填文案）
 int Kernel::tryPlaneLinear(const std::string &lhsS, const std::string &rhsS,
                            const std::string &src, std::unique_ptr<GeoElement> &out,
-                           std::string &err)
+                           std::string &err, bool allowXY)
 {
     Expr le, re;
     std::string perr;
@@ -2417,6 +2417,12 @@ int Kernel::tryPlaneLinear(const std::string &lhsS, const std::string &rhsS,
     }
     std::vector<std::pair<std::string, GeoNumeric *>> deps;
     bool hasZ = false;
+    // 1.1.3.1 命令分支放行 x/y 原生变量：x/y 是原生变量不进 refs（z 是
+    // "ref"），旧 hasZ 门把 Plane(x,1)/Plane(x+y,4) 竖直面整体误拒（探针
+    // 教训「竖直面第四次踩」的真根因）。裸方程路径不放宽——裸 x+y=4 的
+    // 2D 直线/3D 平面二义性维持既有拒绝口径
+    const bool hasXY = le.containsX() || le.containsY()
+        || re.containsX() || re.containsY();
     auto collect = [&](const Expr &e) -> bool {
         for (const std::string &rn : e.refs()) {
             if (rn == "z") { hasZ = true; continue; }
@@ -2430,7 +2436,7 @@ int Kernel::tryPlaneLinear(const std::string &lhsS, const std::string &rhsS,
         }
         return true;
     };
-    if (!collect(le) || !collect(re) || !hasZ) return 0;
+    if (!collect(le) || !collect(re) || !(hasZ || (allowXY && hasXY))) return 0;
     // g(x,y,z) = lhs − rhs（z 走 resolver 采样，x/y 原生变量；滑条现值）
     auto g = [&](double x, double y, double z, double &ov) -> bool {
         auto res = [&](const std::string &nm) -> double {
@@ -4522,6 +4528,34 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         made = std::move(ang);
         return true;
     }
+    // 1.1.3.1 Vector(P) 位置向量（GGB 官方命令形）：原点→P。引用点 image
+    // 闭包随动（拖点向量跟走）；字面量元组静态。2D 点→2D 向量、3D 点→
+    // 3D 向量（iz 缓存分量，ex*/ez* 感知渲染口径与两参形一致）
+    if (cmdLower == "vector" && a.size() == 1) {
+        CmdPt p0;
+        if (!cmdPointArg(a[0], p0)) {
+            lastError = "未找到点 " + a[0];
+            made = nullptr;
+            return true;
+        }
+        auto v = std::make_unique<GeoVector>();
+        v->image = true;
+        v->cmdName = "Vector";
+        v->cmdArgs = { a[0] };
+        const CmdPt P0 = p0;
+        v->calc = [P0](GeoVector *g) {
+            g->ix1 = 0;
+            g->iy1 = 0;
+            g->iz1 = 0;
+            g->ix2 = P0.ref ? P0.ref->x : P0.x;
+            g->iy2 = P0.ref ? P0.ref->y : P0.y;
+            g->iz2 = P0.ref ? P0.ref->z : P0.z;
+        };
+        if (p0.ref) v->inputs.push_back(p0.ref);
+        v->update();
+        made = std::move(v);
+        return true;
+    }
     if ((cmdLower == "ray" || cmdLower == "vector") && a.size() == 2) {
         // 1.0.8.3 端点收字面量元组（同 Line/Segment；向量 image 缓存含
         // iz1/iz2 三维分量，2D/3D 渲染 ex*/ez* 感知）
@@ -4733,7 +4767,10 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             }
         }
         std::string perr;
-        const int pr = tryPlaneLinear(a[0], a[1], a[0] + "=" + a[1], made, perr);
+        // 1.1.3.1 命令分支 allowXY=true：竖直面 Plane(x,1)/斜竖直面
+        // Plane(x+y,4) 接管（GGB 3D 口径；裸方程路径维持旧口径）
+        const int pr = tryPlaneLinear(a[0], a[1], a[0] + "=" + a[1], made,
+                                      perr, true);
         if (pr < 0) { lastError = perr; made = nullptr; return true; }
         if (pr == 0) {
             lastError = "Plane 需要（点, 点, 点）、（点, 向量）或线性方程两参形式";

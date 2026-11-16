@@ -296,10 +296,12 @@ private:
     // 共用）：lhs/rhs refs 模式解析，refs 须含 z 且除 z 外全为数值对象
     //（滑条随动），一次式系数采样提取并校验线性。返回 1=成功（out 已填，
     // src 为定义原文）；0=不是平面方程（err 未动，调用方回落既有分支）；
-    // -1=识别为平面方程但非法（err 已填文案）
+    // -1=识别为平面方程但非法（err 已填文案）。1.1.3.1 allowXY：命令分支
+    // 传 true 放行 x/y 原生变量（竖直面 Plane(x,1)——x/y 是原生变量不进
+    // refs，旧 hasZ 门误拒）；裸方程路径不传（维持旧拒绝口径）
     int tryPlaneLinear(const std::string &lhsS, const std::string &rhsS,
                        const std::string &src, std::unique_ptr<GeoElement> &out,
-                       std::string &err);
+                       std::string &err, bool allowXY = false);
 
     // N4 .ggb XML 重放辅助
     void xmlApplyStyle(GeoElement *e, const std::string &inner);
