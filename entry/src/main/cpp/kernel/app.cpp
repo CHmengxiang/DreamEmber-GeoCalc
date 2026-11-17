@@ -4510,6 +4510,130 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             return true;
         }
     }
+    if ((cmdLower == "tetrahedron" || cmdLower == "cube") && a.size() == 2) {
+        // 1.1.3.9 正多面体两点式（GGB 口径）：Tetrahedron(A,B)=AB 为一边的
+        // 正四面体、Cube(A,B)=AB 为一边的正方体。第三底顶 C=A+Rpθ(u)——
+        // u=B−A 绕**⊥u 轴** p 旋 θ（60°/90°，p=ẑ 在 ⊥u 平面的投影，u∥ẑ
+        // 退化取 x̂）：旋转保长且 |u−Rpθ(u)|=|u|，ABC 恒等边/正方形（斜 AB
+        // 也正则；水平 AB 时 p=ẑ 与 GGB z 轴构造一致）。拔高方向
+        // n̂=u×Rpθ(u) 归一，锥顶/顶面 = 沿 n̂ 偏 a·√6/3 / a。calc 闭包随
+        // A/B 现值刚体随动；零边长 → 未定义
+        const bool isCube = (cmdLower == "cube");
+        CmdPt c0, c1;
+        if (!cmdPointArg(a[0], c0) || (!c0.ref && !c0.lit)
+            || !cmdPointArg(a[1], c1) || (!c1.ref && !c1.lit)) {
+            lastError = std::string(isCube ? "Cube" : "Tetrahedron")
+                + " 需要（点, 点）且对象须已存在: " + a[0] + ", " + a[1];
+            made = nullptr;
+            return true;
+        }
+        auto sd = std::make_unique<GeoSolid>();
+        if (c0.ref) sd->inputs.push_back(c0.ref);
+        if (c1.ref) sd->inputs.push_back(c1.ref);
+        sd->cmdName = isCube ? "Cube" : "Tetrahedron";
+        sd->cmdArgs = a;
+        const CmdPt C0 = c0, C1 = c1;
+        sd->calc = [C0, C1, isCube](GeoSolid *S) {
+            S->vx.clear();
+            S->vy.clear();
+            S->vz.clear();
+            S->faces.clear();
+            auto cur = [](const CmdPt &c, double &ox, double &oy,
+                          double &oz) -> bool {
+                if (c.ref) {
+                    ox = c.ref->x;
+                    oy = c.ref->y;
+                    oz = c.ref->z;
+                } else {
+                    ox = c.x;
+                    oy = c.y;
+                    oz = c.z;
+                }
+                return std::isfinite(ox) && std::isfinite(oy)
+                    && std::isfinite(oz);
+            };
+            double ax, ay, az, bx, by, bz;
+            if (!cur(C0, ax, ay, az) || !cur(C1, bx, by, bz)) return;
+            const double ux = bx - ax, uy = by - ay, uz = bz - az;
+            const double el = sqrt(ux * ux + uy * uy + uz * uz);
+            if (!(el > 1e-12)) return;
+            // 旋转轴 p ⊥ u：ẑ 投影（p ∝ ẑ−(ẑ·û)û）；u∥ẑ 退化取 x̂
+            double pxv = -uz * ux, pyv = -uz * uy, pzv = ux * ux + uy * uy;
+            const double pl2 = sqrt(pxv * pxv + pyv * pyv + pzv * pzv);
+            if (!(pl2 > 1e-12)) {
+                pxv = 1;
+                pyv = 0;
+                pzv = 0;
+            } else {
+                pxv /= pl2;
+                pyv /= pl2;
+                pzv /= pl2;
+            }
+            // u 绕 p 旋 θ：u' = u·cosθ + (p×u)·sinθ（p⊥u 无平行分量）
+            const double th = isCube ? M_PI / 2.0 : M_PI / 3.0;
+            const double cs = cos(th), sn = sin(th);
+            const double wx2 = pyv * uz - pzv * uy;
+            const double wy2 = pzv * ux - pxv * uz;
+            const double wz2 = pxv * uy - pyv * ux;
+            const double rx = ux * cs + wx2 * sn;
+            const double ry = uy * cs + wy2 * sn;
+            const double rz = uz * cs + wz2 * sn;
+            double cx3 = ax + rx, cy3 = ay + ry, cz3 = az + rz;
+            // n̂ = u × r 归一（拔高方向）
+            double nx3 = uy * rz - uz * ry;
+            double ny3 = uz * rx - ux * rz;
+            double nz3 = ux * ry - uy * rx;
+            const double nl = sqrt(nx3 * nx3 + ny3 * ny3 + nz3 * nz3);
+            if (!(nl > 1e-12)) return;
+            nx3 /= nl;
+            ny3 /= nl;
+            nz3 /= nl;
+            if (!isCube) {
+                // 正四面体：4 顶 4 面，锥顶 = 底面质心 + n̂·a·√6/3
+                const double hx = (ax + bx + cx3) / 3.0;
+                const double hy = (ay + by + cy3) / 3.0;
+                const double hz = (az + bz + cz3) / 3.0;
+                const double hh = el * 0.816496580927726;   // √6/3
+                const double vtx[4] = { ax, bx, cx3, hx + nx3 * hh };
+                const double vty[4] = { ay, by, cy3, hy + ny3 * hh };
+                const double vtz[4] = { az, bz, cz3, hz + nz3 * hh };
+                for (int i = 0; i < 4; ++i) {
+                    S->vx.push_back(vtx[i]);
+                    S->vy.push_back(vty[i]);
+                    S->vz.push_back(vtz[i]);
+                }
+                S->faces.push_back({ 0, 1, 2 });
+                S->faces.push_back({ 0, 1, 3 });
+                S->faces.push_back({ 1, 2, 3 });
+                S->faces.push_back({ 2, 0, 3 });
+            } else {
+                // 正方体：8 顶 6 面（顶点序 [A,B,C=A+r,D=B+r, A',B',C',D']，
+                // 周界序 A→B→D→C——面环按此走，避免交叉四边形），顶面 = +n̂·a
+                const double px3[4] = { ax, bx, cx3, bx + rx };
+                const double py3[4] = { ay, by, cy3, by + ry };
+                const double pz3[4] = { az, bz, cz3, bz + rz };
+                for (int i = 0; i < 4; ++i) {
+                    S->vx.push_back(px3[i]);
+                    S->vy.push_back(py3[i]);
+                    S->vz.push_back(pz3[i]);
+                }
+                for (int i = 0; i < 4; ++i) {
+                    S->vx.push_back(px3[i] + nx3 * el);
+                    S->vy.push_back(py3[i] + ny3 * el);
+                    S->vz.push_back(pz3[i] + nz3 * el);
+                }
+                S->faces.push_back({ 0, 1, 3, 2 });
+                S->faces.push_back({ 4, 5, 7, 6 });
+                S->faces.push_back({ 0, 1, 5, 4 });
+                S->faces.push_back({ 1, 3, 7, 5 });
+                S->faces.push_back({ 3, 2, 6, 7 });
+                S->faces.push_back({ 2, 0, 4, 6 });
+            }
+        };
+        sd->update();
+        made = std::move(sd);
+        return true;
+    }
     if (cmdLower == "perpendicularline" && a.size() == 2) {
         // PerpendicularLine(点, 基准) — 上游 参数序：点在前，基准（直线/线段/
         // 一次函数图像）在后。先按点,基准解；若第一个参数不是点再试反序（容错）。
@@ -11418,6 +11542,9 @@ std::string Kernel::toolTap3D(double px, double py)
         // 既有命令面，工具零改动直接组装）
         else if (tool_ == "midpoint3D") twoCmd = "Midpoint";
         else if (tool_ == "sphere3D") twoCmd = "Sphere";
+        // 1.1.3.9 正多面体工具（两点式：AB 为一边，GGB 口径）
+        else if (tool_ == "tetrahedron3D") twoCmd = "Tetrahedron";
+        else if (tool_ == "cube3D") twoCmd = "Cube";
         if (twoCmd) {
             if (!hit) hit = make3D();
             if (!hit) return "err|无法在空白处建点";

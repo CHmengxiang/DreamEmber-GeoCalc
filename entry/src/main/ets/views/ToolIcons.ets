@@ -302,6 +302,23 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     seg(8, 29, 17, 20, 1.4);
     seg(30, 29, 39, 20, 1.4);
     seg(19, 19, 28, 10, 1.4);
+  } else if (id === 'tetrahedron3D') {
+    // 正四面体（1.1.3.9）：底面三角（soft）+ 顶点三棱实线，区别锥体虚感
+    shape([9, 27, 33, 27, 21, 19], soft, 1.6, true);
+    seg(21, 19, 21, 6, 2);
+    seg(21, 6, 33, 27, 2);
+    seg(21, 6, 9, 27, 2);
+    dot(21, 6, 3);
+    dot(9, 27, 2.6);
+    dot(33, 27, 2.6);
+  } else if (id === 'cube3D') {
+    // 正方体（1.1.3.9）：前方面（soft）+ 顶/侧透视棱
+    shape([10, 30, 28, 30, 28, 12, 10, 12], soft, 1.8, true);
+    seg(10, 12, 17, 5, 1.4);
+    seg(28, 12, 35, 5, 1.4);
+    seg(28, 30, 35, 23, 1.4);
+    seg(17, 5, 35, 5, 1.4);
+    seg(35, 5, 35, 23, 1.4);
   } else if (id === 'slider') {
     seg(8, 19, 34, 19, 2);
     seg(8, 15, 8, 23, 1.5);

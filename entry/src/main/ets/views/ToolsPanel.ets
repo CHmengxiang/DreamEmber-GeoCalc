@@ -970,6 +970,46 @@ export struct ToolsPanel {
             .borderRadius(10)
             .backgroundColor(this.tool === 'prism3D' ? Theme.keyBg(this.dark) : Color.Transparent)
             .onClick(() => this.onSetTool('prism3D'))
+            // 1.1.3.9 正多面体一期（两点式，GGB 口径）：三维组 15 枚，
+            // 第四行 3 格
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'tetrahedron3D', dark: this.dark, selected: this.tool === 'tetrahedron3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'tetrahedron3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('正四面体（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'tetrahedron3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'tetrahedron3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('tetrahedron3D'))
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'cube3D', dark: this.dark, selected: this.tool === 'cube3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'cube3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('正方体（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'cube3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'cube3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('cube3D'))
           }
           .width('100%')
         }
