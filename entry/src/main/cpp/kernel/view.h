@@ -91,17 +91,19 @@ public:
         return -D;   // 1.1.3 深度取负：越大越远（相机在 +f 侧，见类注）
     }
     // 视平面拖动 → 世界位移（屏幕 dx,dy 像素 → 世界 dx·r − dy·u 方向）：
-    // 拖 3D 点用（点在垂直视向、过点自身的平面内移动，深度不变）
+    // 拖 3D 点用（点在垂直视向、过点自身的平面内移动，深度不变）。
+    // 1.1.3.8 修 y 反向：py 向下（py = cy − Y·scale）故 u 项须取负——
+    // ΔY = −dy/scale ⇒ Δpy = +dy 跟手；旧实现 +dy·u 与注释相反，拖点/
+    // 拖对象屏幕 y 方向倒退（模拟器冒烟实证：手指下拖球心上移）
     void dragDelta(double dxPx, double dyPx, double &wx, double &wy, double &wz) const
     {
         const double sa = std::sin(yaw * M_PI / 180.0);
         const double ca = std::cos(yaw * M_PI / 180.0);
         const double sb = std::sin(pitch * M_PI / 180.0);
         const double cb = std::cos(pitch * M_PI / 180.0);
-        // world = (dx/scale)·r + (dy/scale)·u（py 向下，dy 已按屏幕增量传入）
-        wx = (-sa * dxPx + -ca * sb * dyPx) / scale;
-        wy = (ca * dxPx + -sa * sb * dyPx) / scale;
-        wz = (cb * dyPx) / scale;
+        wx = (-sa * dxPx + ca * sb * dyPx) / scale;
+        wy = (ca * dxPx + sa * sb * dyPx) / scale;
+        wz = (-cb * dyPx) / scale;
     }
     // 轨道旋转：拖像素增量（dx 转方位、dy 转仰角，仰角钳位防翻转）。
     // 1.1.0.6③（用户实测反馈）：拖右画面须跟手右移——固定点屏幕 X=p·r，
