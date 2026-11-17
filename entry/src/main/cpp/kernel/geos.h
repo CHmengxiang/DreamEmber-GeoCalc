@@ -56,6 +56,9 @@ public:
     std::string cmdName;               // 创建命令名（"Midpoint"/"Intersect"/...；自由对象为空）
     std::vector<std::string> cmdArgs;  // 命令参数（label 或字面量）
     int cmdIndex = 0;                  // 多输出命令中的序号（Intersect/Tangent 第 n 个，0 起）
+    // 1.1.3.11 三维变换像标记（image 线段/射线/向量端点为空，is3D 探测
+    // 失效——2D 渲染/拾取按此跳绘，避免 3D 像投影进 2D 视图）
+    bool lives3D = false;
 
     virtual void update() {}
     // 代数区"值"列：点坐标/线方程/长度/表达式等
@@ -698,6 +701,14 @@ public:
     // 1.0.8.2 三维多边形（Polygon 收到任一 is3D 顶点）：2D 视图跳绘，
     // render3D 按顶点现值投影填充（Newell 法向光照），面积走叉积和
     bool is3D = false;
+    // 1.1.3.10 三维 image 顶点缓存（实体∩平面截面等命令产物——截面顶点
+    // 不是独立点对象，verts 保持空）；读取一律走 n3()/v3x/v3y/v3z
+    bool image3D = false;
+    std::vector<double> ix3, iy3, iz3;
+    size_t n3() const { return image3D ? ix3.size() : verts.size(); }
+    double v3x(size_t i) const { return image3D ? ix3[i] : verts[i]->x; }
+    double v3y(size_t i) const { return image3D ? iy3[i] : verts[i]->y; }
+    double v3z(size_t i) const { return image3D ? iz3[i] : verts[i]->z; }
     // 区域填充不透明度 0-1（上游 多边形默认 ~15%）。代数区选中行滑杆以
     // "透明度 = 100×(1−fillAlpha)" 呈现：透明度 100 = 填充消失，0 = 最深
     double fillAlpha = 0.15;

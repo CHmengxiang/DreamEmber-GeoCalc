@@ -125,6 +125,46 @@ double PtSegDist(double px, double py, double x1, double y1, double x2, double y
 }
 
 // 任意对象 → 所在直线 ax+by=c（线段/射线取所在直线；直线类以外返回 false）
+// 1.1.3.11 对象是否活在 3D 视图（变换像通路选择用）：3D 专属类型恒真；
+// 点/线段/射线/向量按端点 is3D 或像 z 分量；多边形按 is3D 标记
+static bool ElementLives3D(GeoElement *g)
+{
+    if (!g) return false;
+    if (g->lives3D) return true;
+    switch (g->type()) {
+    case GeoType::Point:
+        return static_cast<GeoPoint *>(g)->is3D;
+    case GeoType::Segment: {
+        GeoSegment *sg = static_cast<GeoSegment *>(g);
+        return (sg->p1 && sg->p1->is3D) || (sg->p2 && sg->p2->is3D)
+            || (sg->image && (sg->iz1 != 0.0 || sg->iz2 != 0.0));
+    }
+    case GeoType::Ray: {
+        GeoRay *ry = static_cast<GeoRay *>(g);
+        return (ry->p1 && ry->p1->is3D) || (ry->p2 && ry->p2->is3D)
+            || (ry->image && (ry->iz1 != 0.0 || ry->iz2 != 0.0));
+    }
+    case GeoType::Vector: {
+        GeoVector *v = static_cast<GeoVector *>(g);
+        return (v->p1 && v->p1->is3D) || (v->p2 && v->p2->is3D)
+            || (v->image && (v->iz1 != 0.0 || v->iz2 != 0.0));
+    }
+    case GeoType::Polygon:
+        return static_cast<GeoPolygon *>(g)->is3D;
+    case GeoType::Line3:
+    case GeoType::Circle3:
+    case GeoType::Conic3:
+    case GeoType::Sphere:
+    case GeoType::Cylinder:
+    case GeoType::Cone:
+    case GeoType::Surface:
+    case GeoType::Solid:
+        return true;
+    default:
+        return false;
+    }
+}
+
 bool LineCoefsOf(GeoElement *e, double &a, double &b, double &c)
 {
     if (!e) return false;
@@ -5886,6 +5926,286 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             made = std::move(c3);
             return true;
         }
+        // 1.1.3.10 线∩球（GGB IntersectLineSphere 口径）：Intersect(空间直线/
+        // 线段/射线, 球) → 0/1/2 个交点（仅无名时多输出；0 实交/序号越界
+        // 报错）。线段钳 t∈[0,1]、射线钳 t≥0；交点为依随点（随线/球重算）
+        {
+            GeoSegment *sgA = dynamic_cast<GeoSegment *>(o1);
+            GeoSegment *sgB = dynamic_cast<GeoSegment *>(o2);
+            GeoRay *ryA = dynamic_cast<GeoRay *>(o1);
+            GeoRay *ryB = dynamic_cast<GeoRay *>(o2);
+            GeoElement *ln = nullptr;
+            GeoSphere *SPs = nullptr;
+            if ((l3a && sp2) || (l3b && sp1)) {
+                ln = l3a ? l3a : l3b;
+                SPs = sp1 ? sp1 : sp2;
+            } else if ((sgA && sp2) || (sgB && sp1)) {
+                ln = sgA ? sgA : sgB;
+                SPs = sp1 ? sp1 : sp2;
+            } else if ((ryA && sp2) || (ryB && sp1)) {
+                ln = ryA ? ryA : ryB;
+                SPs = sp1 ? sp1 : sp2;
+            }
+            if (ln && SPs) {
+                const GeoLine3 *L3P = dynamic_cast<GeoLine3 *>(ln);
+                const GeoSegment *SGP = dynamic_cast<GeoSegment *>(ln);
+                const GeoRay *RYP = dynamic_cast<GeoRay *>(ln);
+                GeoSphere *S2 = SPs;
+                int kOnly = nth;
+                if (!name.empty() && kOnly < 0) kOnly = 0;   // 命名单输出
+                // 构造期解当前根数（后续随动交点数变化 → 多余点 NaN 未定义）
+                double rox = S2->ccx(), roy = S2->ccy(), roz = S2->ccz();
+                double RR = S2->radius;
+                if (S2->radiusNum) RR = S2->radiusNum->value;
+                else if (S2->through) {
+                    RR = sqrt(pow(S2->through->x - rox, 2)
+                              + pow(S2->through->y - roy, 2)
+                              + pow(S2->through->z - roz, 2));
+                }
+                double e1x, e1y, e1z, dx, dy, dz;
+                if (L3P) {
+                    e1x = L3P->ex1(); e1y = L3P->ey1(); e1z = L3P->ez1();
+                    dx = L3P->ex2() - e1x; dy = L3P->ey2() - e1y;
+                    dz = L3P->ez2() - e1z;
+                } else if (SGP) {
+                    e1x = SGP->ex1(); e1y = SGP->ey1(); e1z = SGP->ez1();
+                    dx = SGP->ex2() - e1x; dy = SGP->ey2() - e1y;
+                    dz = SGP->ez2() - e1z;
+                } else {
+                    e1x = RYP->ex1(); e1y = RYP->ey1(); e1z = RYP->ez1();
+                    dx = RYP->ex2() - e1x; dy = RYP->ey2() - e1y;
+                    dz = RYP->ez2() - e1z;
+                }
+                auto validT = [&](double t) -> bool {
+                    if (SGP) return t >= 0.0 && t <= 1.0;
+                    if (RYP) return t >= 0.0;
+                    return true;
+                };
+                int nHits = 0;
+                {
+                    const double a2 = dx * dx + dy * dy + dz * dz;
+                    const double b2 = 2.0 * (dx * (e1x - rox) + dy * (e1y - roy)
+                                             + dz * (e1z - roz));
+                    const double c2 = (e1x - rox) * (e1x - rox)
+                                    + (e1y - roy) * (e1y - roy)
+                                    + (e1z - roz) * (e1z - roz) - RR * RR;
+                    if (a2 > 1e-18 && std::isfinite(RR) && RR > 0) {
+                        const double disc = b2 * b2 - 4.0 * a2 * c2;
+                        if (disc >= 0.0) {
+                            const double sq = sqrt(disc);
+                            const double t0 = (-b2 - sq) / (2.0 * a2);
+                            const double t1 = (-b2 + sq) / (2.0 * a2);
+                            if (validT(t0)) ++nHits;
+                            if (disc > 0.0 && validT(t1)
+                                && fabs(t1 - t0) > 1e-12) ++nHits;
+                        }
+                    }
+                }
+                if (kOnly >= nHits) {
+                    lastError = nHits == 0 ? "线与球无实交"
+                                           : "未找到交点（实交不足）";
+                    made = nullptr;
+                    return true;
+                }
+                auto mkHit = [&](int k) -> std::unique_ptr<GeoPoint> {
+                    auto p = std::make_unique<GeoPoint>();
+                    p->isFree = false;
+                    p->pointSize = 4;
+                    p->is3D = true;
+                    p->color = { 0x64, 0x64, 0x64 };
+                    p->inputs = { ln, S2 };
+                    p->cmdName = "Intersect";
+                    p->cmdArgs = { a[0], a[1] };
+                    p->cmdIndex = k;
+                    const GeoLine3 *L3C = L3P;
+                    const GeoSegment *SGC = SGP;
+                    const GeoRay *RYC = RYP;
+                    GeoSphere *SC = S2;
+                    p->calc = [L3C, SGC, RYC, SC, k](GeoPoint *P) {
+                        P->x = P->y = P->z = NAN;
+                        double rox = SC->ccx(), roy = SC->ccy(),
+                               roz = SC->ccz();
+                        double RR = SC->radius;
+                        if (SC->radiusNum) RR = SC->radiusNum->value;
+                        else if (SC->through) {
+                            RR = sqrt(pow(SC->through->x - rox, 2)
+                                      + pow(SC->through->y - roy, 2)
+                                      + pow(SC->through->z - roz, 2));
+                        }
+                        double e1x, e1y, e1z, dx, dy, dz;
+                        if (L3C) {
+                            e1x = L3C->ex1(); e1y = L3C->ey1();
+                            e1z = L3C->ez1();
+                            dx = L3C->ex2() - e1x; dy = L3C->ey2() - e1y;
+                            dz = L3C->ez2() - e1z;
+                        } else if (SGC) {
+                            e1x = SGC->ex1(); e1y = SGC->ey1();
+                            e1z = SGC->ez1();
+                            dx = SGC->ex2() - e1x; dy = SGC->ey2() - e1y;
+                            dz = SGC->ez2() - e1z;
+                        } else {
+                            e1x = RYC->ex1(); e1y = RYC->ey1();
+                            e1z = RYC->ez1();
+                            dx = RYC->ex2() - e1x; dy = RYC->ey2() - e1y;
+                            dz = RYC->ez2() - e1z;
+                        }
+                        auto validT = [&](double t) -> bool {
+                            if (SGC) return t >= 0.0 && t <= 1.0;
+                            if (RYC) return t >= 0.0;
+                            return true;
+                        };
+                        const double a2 = dx * dx + dy * dy + dz * dz;
+                        if (!(a2 > 1e-18) || !std::isfinite(RR) || RR < 0)
+                            return;
+                        const double b2 = 2.0 * (dx * (e1x - rox)
+                                                 + dy * (e1y - roy)
+                                                 + dz * (e1z - roz));
+                        const double c2 = (e1x - rox) * (e1x - rox)
+                                        + (e1y - roy) * (e1y - roy)
+                                        + (e1z - roz) * (e1z - roz)
+                                        - RR * RR;
+                        const double disc = b2 * b2 - 4.0 * a2 * c2;
+                        if (disc < 0.0) return;
+                        const double sq = sqrt(disc);
+                        double ts[2] = { (-b2 - sq) / (2.0 * a2),
+                                         (-b2 + sq) / (2.0 * a2) };
+                        if (ts[0] > ts[1]) std::swap(ts[0], ts[1]);
+                        int seen = 0;
+                        for (double t : ts) {
+                            if (!validT(t)) continue;
+                            if (seen == k) {
+                                P->x = e1x + t * dx;
+                                P->y = e1y + t * dy;
+                                P->z = e1z + t * dz;
+                                return;
+                            }
+                            ++seen;
+                        }
+                    };
+                    p->update();
+                    return p;
+                };
+                if (kOnly >= 0) {
+                    made = mkHit(kOnly);
+                    return true;
+                }
+                made = mkHit(0);
+                if (nHits > 1) extras_.push_back(mkHit(1));
+                return true;
+            }
+        }
+        // 1.1.3.10 实体∩平面截面（GGB Section 口径）：Intersect(多面体, 平面)
+        // → 截面多边形（凸体口径：棱-平面交点收集 + 平面内绕质心角排序；
+        // image3D 顶点缓存，verts 空——截面顶点非独立点对象）。无实截面 →
+        // 空顶点（面积 0、不绘制）
+        {
+            GeoSolid *sdA = dynamic_cast<GeoSolid *>(o1);
+            GeoSolid *sdB = dynamic_cast<GeoSolid *>(o2);
+            if ((pa1 && sdB) || (sdA && pa2)) {
+                GeoSolid *SD = sdA ? sdA : sdB;
+                GeoPlane *PP = pa1 ? pa1 : pa2;
+                auto pg = std::make_unique<GeoPolygon>();
+                pg->is3D = true;
+                pg->image3D = true;
+                pg->inputs = { SD, PP };
+                pg->cmdName = "Intersect";
+                pg->cmdArgs = { a[0], a[1] };
+                GeoSolid *S3 = SD;
+                GeoPlane *P3 = PP;
+                pg->calc = [S3, P3](GeoPolygon *G) {
+                    G->image3D = true;
+                    G->ix3.clear();
+                    G->iy3.clear();
+                    G->iz3.clear();
+                    const double nl = sqrt(P3->a * P3->a + P3->b * P3->b
+                                           + P3->c * P3->c);
+                    if (!(nl > 1e-12) || !S3->defined()) return;
+                    const double nx2 = P3->a / nl, ny2 = P3->b / nl,
+                                 nz2 = P3->c / nl;
+                    const double dd = P3->d / nl;
+                    auto dist = [&](int i) {
+                        return S3->vx[i] * nx2 + S3->vy[i] * ny2
+                             + S3->vz[i] * nz2 - dd;
+                    };
+                    // 棱-平面交点收集（边对去重：每条棱只走一次）；顶点
+                    // 恰在面上（|d|<1e-9）计入顶点本身，坐标去重兜底
+                    std::vector<std::array<double, 3>> pts;
+                    std::vector<long long> seen;
+                    auto pushPt = [&](double x, double y, double z) {
+                        for (const auto &q : pts) {
+                            const double dx = q[0] - x, dy = q[1] - y,
+                                         dz = q[2] - z;
+                            if (dx * dx + dy * dy + dz * dz < 1e-18) return;
+                        }
+                        pts.push_back({ x, y, z });
+                    };
+                    for (const auto &f : S3->faces) {
+                        const size_t m = f.size();
+                        for (size_t i = 0; i < m; ++i) {
+                            const int va = f[i];
+                            const int vb = f[(i + 1) % m];
+                            const long long key = va < vb
+                                ? ((long long)va << 32) | vb
+                                : ((long long)vb << 32) | va;
+                            if (std::find(seen.begin(), seen.end(), key)
+                                != seen.end()) continue;
+                            seen.push_back(key);
+                            if (!std::isfinite(S3->vx[va])
+                                || !std::isfinite(S3->vx[vb])) continue;
+                            const double d1 = dist(va), d2 = dist(vb);
+                            if (fabs(d1) < 1e-9) {
+                                pushPt(S3->vx[va], S3->vy[va], S3->vz[va]);
+                            } else if (d1 * d2 < 0.0 && fabs(d2) >= 1e-9) {
+                                const double t = d1 / (d1 - d2);
+                                pushPt(S3->vx[va] + t * (S3->vx[vb] - S3->vx[va]),
+                                       S3->vy[va] + t * (S3->vy[vb] - S3->vy[va]),
+                                       S3->vz[va] + t * (S3->vz[vb] - S3->vz[va]));
+                            }
+                        }
+                    }
+                    if (pts.size() < 3) return;   // 无实截面 → 空
+                    // 平面内绕质心角排序（凸体截面为凸多边形）
+                    const size_t np = pts.size();
+                    double gx = 0, gy = 0, gz = 0;
+                    for (const auto &q : pts) {
+                        gx += q[0]; gy += q[1]; gz += q[2];
+                    }
+                    gx /= np; gy /= np; gz /= np;
+                    double e1x, e1y, e1z;
+                    if (fabs(nx2) <= fabs(ny2) && fabs(nx2) <= fabs(nz2)) {
+                        e1x = 0; e1y = nz2; e1z = -ny2;
+                    } else if (fabs(ny2) <= fabs(nz2)) {
+                        e1x = -nz2; e1y = 0; e1z = nx2;
+                    } else {
+                        e1x = ny2; e1y = -nx2; e1z = 0;
+                    }
+                    const double el = sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+                    e1x /= el; e1y /= el; e1z /= el;
+                    const double e2x = ny2 * e1z - nz2 * e1y;
+                    const double e2y = nz2 * e1x - nx2 * e1z;
+                    const double e2z = nx2 * e1y - ny2 * e1x;
+                    auto angOf = [&](const std::array<double, 3> &q) {
+                        const double rx = q[0] - gx, ry = q[1] - gy,
+                                     rz = q[2] - gz;
+                        return atan2(ry * e2y + rz * e2z,
+                                     rx * e1x + ry * e1y + rz * e1z);
+                    };
+                    std::sort(pts.begin(), pts.end(),
+                              [&](const std::array<double, 3> &A,
+                                  const std::array<double, 3> &B) {
+                                  return angOf(A) < angOf(B);
+                              });
+                    for (const auto &q : pts) {
+                        G->ix3.push_back(q[0]);
+                        G->iy3.push_back(q[1]);
+                        G->iz3.push_back(q[2]);
+                    }
+                };
+                pg->update();
+                made = std::move(pg);
+                return true;
+            }
+        }
         // 1.1.0.1 交圆锥曲线（GGB 无限二次曲面口径——柱面代数上无限，截线
         // 不裁高度）：Intersect(平面, 圆柱)→面⊥轴出圆 / 斜交出椭圆 /
         // 面∥轴出两条平行直线（相切合一、相离未定义）；两参序容错
@@ -6273,6 +6593,20 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         GeoElement *obj = lookup(a[0]);
         GeoVector *vec = dynamic_cast<GeoVector *>(lookup(a[1]));
         if (!obj || !vec) { lastError = "Translate 需要（对象, 向量）"; made = nullptr; return true; }
+        // 1.1.3.11 三维向量（端点 is3D 或 z 分量非零）→ 3D 像通路
+        if ((vec->p1 && vec->p1->is3D) || (vec->p2 && vec->p2->is3D)
+            || vec->ez1() != 0.0 || vec->ez2() != 0.0) {
+            GeoVector *vv = vec;
+            made = makeImage3D(obj, "Translate", { a[0], a[1] },
+                               [vv](double x, double y, double z, double &ox,
+                                    double &oy, double &oz) {
+                                   ox = x + vv->ex2() - vv->ex1();
+                                   oy = y + vv->ey2() - vv->ey1();
+                                   oz = z + vv->ez2() - vv->ez1();
+                               }, vec);
+            if (!made) lastError = "Translate 暂不支持该对象类型";
+            return true;
+        }
         GeoVector *vv = vec;
         made = makeImage(obj, "Translate", { a[0], a[1] }, [vv](double x, double y) {
             return std::make_pair(x + vv->p2->x - vv->p1->x, y + vv->p2->y - vv->p1->y);
@@ -6305,17 +6639,91 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         return true;
     }
     if (cmdLower == "reflect" && a.size() == 2) {
-        // Reflect(对象, 直线) / Reflect(对象, 点)
+        // Reflect(对象, 直线) / Reflect(对象, 点) / 1.1.3.11 Reflect(对象,
+        // 平面) 面镜像与 3D 点镜像
         GeoElement *obj = lookup(a[0]);
         GeoElement *mirror = lookup(a[1]);
         GeoPoint *mp = lookupPoint(a[1]);
-        if (!obj || !mirror) { lastError = "Reflect 需要（对象, 直线/点）"; made = nullptr; return true; }
+        GeoPlane *mpl = dynamic_cast<GeoPlane *>(mirror);
+        if (!obj || !mirror) { lastError = "Reflect 需要（对象, 直线/点/平面）"; made = nullptr; return true; }
+        if (mpl) {
+            // 面镜像：p' = p − 2((p·n̂)−d̂)n̂（法向未归一先归一）
+            GeoPlane *MM = mpl;
+            made = makeImage3D(obj, "Reflect", { a[0], a[1] },
+                               [MM](double x, double y, double z, double &ox,
+                                    double &oy, double &oz) {
+                const double nl = sqrt(MM->a * MM->a + MM->b * MM->b
+                                       + MM->c * MM->c);
+                if (!(nl > 1e-12)) { ox = x; oy = y; oz = z; return; }
+                const double nx2 = MM->a / nl, ny2 = MM->b / nl,
+                             nz2 = MM->c / nl;
+                const double t = x * nx2 + y * ny2 + z * nz2 - MM->d / nl;
+                ox = x - 2.0 * t * nx2;
+                oy = y - 2.0 * t * ny2;
+                oz = z - 2.0 * t * nz2;
+            }, mpl);
+            if (!made) lastError = "Reflect 暂不支持该对象类型";
+            return true;
+        }
         if (mp) {
+            // 3D 点镜像：对象活在 3D 或中心 is3D → 3D 像通路（中心对称
+            // 三坐标全反）
+            if (ElementLives3D(obj) || mp->is3D) {
+                GeoPoint *mm = mp;
+                made = makeImage3D(obj, "Reflect", { a[0], a[1] },
+                                   [mm](double x, double y, double z,
+                                        double &ox, double &oy, double &oz) {
+                                       ox = 2.0 * mm->x - x;
+                                       oy = 2.0 * mm->y - y;
+                                       oz = 2.0 * mm->z - z;
+                                   }, mp);
+                if (!made) lastError = "Reflect 暂不支持该对象类型";
+                return true;
+            }
             GeoPoint *mm = mp;
             made = makeImage(obj, "Reflect", { a[0], a[1] }, [mm](double x, double y) {
                 return std::make_pair(2 * mm->x - x, 2 * mm->y - y);
             }, std::function<double(double)>(), mp);
         } else {
+            // 1.1.3.11 3D 直线镜像（Line3/3D 线段/射线：轴反射=绕轴 180°，
+            // p' = 2·foot − p，foot=轴向投影）
+            const bool line3D = ElementLives3D(mirror)
+                && (dynamic_cast<GeoLine3 *>(mirror) || dynamic_cast<GeoSegment *>(mirror)
+                    || dynamic_cast<GeoRay *>(mirror));
+            if (line3D || ElementLives3D(obj)) {
+                GeoElement *m = mirror;
+                made = makeImage3D(obj, "Reflect", { a[0], a[1] },
+                                   [m](double x, double y, double z, double &ox,
+                                       double &oy, double &oz) {
+                    double ax, ay, az, bx, by, bz;
+                    if (GeoLine3 *l3 = dynamic_cast<GeoLine3 *>(m)) {
+                        ax = l3->ex1(); ay = l3->ey1(); az = l3->ez1();
+                        bx = l3->ex2(); by = l3->ey2(); bz = l3->ez2();
+                    } else if (GeoSegment *sg = dynamic_cast<GeoSegment *>(m)) {
+                        ax = sg->ex1(); ay = sg->ey1(); az = sg->ez1();
+                        bx = sg->ex2(); by = sg->ey2(); bz = sg->ez2();
+                    } else if (GeoRay *ry = dynamic_cast<GeoRay *>(m)) {
+                        ax = ry->ex1(); ay = ry->ey1(); az = ry->ez1();
+                        bx = ry->ex2(); by = ry->ey2(); bz = ry->ez2();
+                    } else {
+                        ox = x; oy = y; oz = z;
+                        return;
+                    }
+                    const double dx = bx - ax, dy = by - ay, dz = bz - az;
+                    const double dl = sqrt(dx * dx + dy * dy + dz * dz);
+                    if (!(dl > 1e-12)) { ox = x; oy = y; oz = z; return; }
+                    const double ux = dx / dl, uy = dy / dl, uz = dz / dl;
+                    const double t = (x - ax) * ux + (y - ay) * uy
+                                   + (z - az) * uz;
+                    const double fx = ax + t * ux, fy = ay + t * uy,
+                                 fz = az + t * uz;
+                    ox = 2.0 * fx - x;
+                    oy = 2.0 * fy - y;
+                    oz = 2.0 * fz - z;
+                }, mirror);
+                if (!made) lastError = "Reflect 暂不支持该对象类型";
+                return true;
+            }
             GeoElement *m = mirror;
             MapFn map = [m](double x, double y) {
                 double la, lb, lc;
@@ -11364,6 +11772,53 @@ GeoElement *Kernel::pickObject3D(double px, double py)
             }
             break;
         }
+        case GeoType::Polygon: {
+            // 1.1.3.10 三维多边形拾取（截面等 image3D 产物同路径）：盘内=
+            // 强命中（质心深度比较，与平面/实体面同口径）+ 贴边=边距命中
+            GeoPolygon *pg = static_cast<GeoPolygon *>(g.get());
+            const size_t m = pg->n3();
+            if (!pg->is3D || m < 3) break;
+            std::vector<std::pair<double, double>> poly;
+            bool bad = false;
+            double cx3 = 0, cy3 = 0, cz3 = 0;
+            for (size_t i = 0; i < m; ++i) {
+                double ppx, ppy;
+                view3d.project(pg->v3x(i), pg->v3y(i), pg->v3z(i), ppx, ppy);
+                poly.emplace_back(ppx, ppy);
+                cx3 += pg->v3x(i);
+                cy3 += pg->v3y(i);
+                cz3 += pg->v3z(i);
+                if (!std::isfinite(pg->v3x(i)) || !std::isfinite(pg->v3y(i))
+                    || !std::isfinite(pg->v3z(i))) bad = true;
+            }
+            if (bad) break;
+            bool inside = false;
+            double dEdge = 1e9;
+            for (size_t i = 0; i < m; ++i) {
+                const auto &a2 = poly[i];
+                const auto &b2 = poly[(i + 1) % m];
+                double d;
+                segDist(a2.first, a2.second, b2.first, b2.second, px, py, d);
+                if (d < dEdge) dEdge = d;
+                if ((a2.second > py) != (b2.second > py)) {
+                    const double xint = a2.first + (py - a2.second)
+                        / (b2.second - a2.second) * (b2.first - a2.first);
+                    if (px < xint) inside = !inside;
+                }
+            }
+            if (inside) {
+                double scx, scy;
+                const double tdep = view3d.project(cx3 / m, cy3 / m, cz3 / m,
+                                                   scx, scy);
+                if (tdep < bestDep) {
+                    bestDep = tdep;
+                    bestStrong = g.get();
+                }
+            } else if (dEdge < grab) {
+                consider(g.get(), dEdge);
+            }
+            break;
+        }
         case GeoType::Cylinder: {
             GeoCylinder *cy = static_cast<GeoCylinder *>(g.get());
             const double ax2 = cy->tcx() - cy->bcx(), ay2 = cy->tcy() - cy->bcy(),
@@ -11679,6 +12134,79 @@ std::string Kernel::toolTap3D(double px, double py)
                     r += geos_[i]->label;
                 }
             }
+        } else if (tool_ == "translate3D") {
+            // 1.1.3.11 平移工具（3D）：对象 → 向量起点 → 向量终点（辅助
+            // 向量不显示，与 2D translate 同构）
+            if (!toolObj_) {
+                GeoElement *o = hit ? static_cast<GeoElement *>(hit)
+                                    : pickObject3D(px, py);
+                if (!o) return "need|平移：请点选要平移的对象";
+                toolObj_ = o;
+                o->selected = true;
+                return "need|平移：点选向量起点";
+            }
+            GeoElement *first = toolObj_;
+            if (toolPts_.empty()) {
+                GeoPoint *P1 = hit ? hit : make3D();
+                if (!P1) return "err|无法在空白处建点";
+                P1->selected = true;
+                toolPts_.push_back(P1);
+                return "need|平移：点选向量终点";
+            }
+            GeoPoint *A = toolPts_[0];
+            GeoPoint *B = hit ? hit : make3D();
+            if (!B) return "err|无法在空白处建点";
+            B->selected = true;
+            toolObj_ = nullptr;
+            toolPts_.clear();
+            const size_t before = geos_.size();
+            if (!input("Vector(" + A->label + ", " + B->label + ")")) {
+                return "err|" + (lastError.empty() ? "无法创建向量" : lastError);
+            }
+            geos_[before]->visible = false;
+            if (!input("Translate(" + first->label + ", "
+                       + geos_[before]->label + ")")) {
+                return "err|" + (lastError.empty() ? "无法平移该对象" : lastError);
+            }
+            r = "done|" + geos_[geos_.size() - 1]->label;
+        } else if (tool_ == "reflectPoint3D") {
+            // 中心对称工具（3D）：对象 → 对称中心（点或对象均可起手）
+            if (!toolObj_) {
+                GeoElement *o = hit ? static_cast<GeoElement *>(hit)
+                                    : pickObject3D(px, py);
+                if (!o) return "need|中心对称：请点选要对称的对象";
+                toolObj_ = o;
+                o->selected = true;
+                return "need|中心对称：点选对称中心";
+            }
+            GeoElement *first = toolObj_;
+            GeoPoint *C = hit ? hit : make3D();
+            if (!C) return "err|无法在空白处建点";
+            C->selected = true;
+            toolObj_ = nullptr;
+            r = finishInput("Reflect(" + first->label + ", " + C->label + ")");
+        } else if (tool_ == "reflect3D") {
+            // 面镜像工具（3D）：对象 → 镜像平面（Line3/线段/射线作轴镜像）
+            if (!toolObj_) {
+                GeoElement *o = hit ? static_cast<GeoElement *>(hit)
+                                    : pickObject3D(px, py);
+                if (!o) return "need|反射：请点选要反射的对象";
+                toolObj_ = o;
+                o->selected = true;
+                return "need|反射：点选镜像平面";
+            }
+            GeoElement *first = toolObj_;
+            GeoElement *mirror = pickObject3D(px, py);
+            if (!mirror) return "need|反射：请点选镜像平面";
+            const GeoType mt = mirror->type();
+            if (mt != GeoType::Plane && mt != GeoType::Line3
+                && mt != GeoType::Segment && mt != GeoType::Ray) {
+                return "need|反射：镜像须为平面（直线/线段作轴镜像）";
+            }
+            mirror->selected = true;
+            toolObj_ = nullptr;
+            r = finishInput("Reflect(" + first->label + ", "
+                            + mirror->label + ")");
         } else {
             return "err|该工具暂不支持三维视图";
         }
@@ -11927,6 +12455,7 @@ GeoElement *Kernel::pickObject(double px, double py)
     const double grab = 12.0 * view.uiScale;
     for (auto &g : geos_) {
         if (!g->visible) continue;
+        if (g->lives3D) continue;   // 1.1.3.11 三维变换像不进 2D 拾取
         GeoType t = g->type();
         double d = 1e18;
         if (t == GeoType::Segment) {
@@ -12595,6 +13124,10 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->image = s->image;
             d->ivx = s->ivx;
             d->ivy = s->ivy;
+            d->image3D = s->image3D;
+            d->ix3 = s->ix3;
+            d->iy3 = s->iy3;
+            d->iz3 = s->iz3;
             d->fillAlpha = s->fillAlpha;
             d->calc = s->calc;
             break;
@@ -13132,6 +13665,233 @@ std::unique_ptr<GeoElement> Kernel::makeImage(GeoElement *obj, const std::string
     made->inputs = { obj };
     if (extraDep) made->inputs.push_back(extraDep);
     if (extraDep2) made->inputs.push_back(extraDep2);
+    made->cmdName = cmd;
+    made->cmdArgs = args;
+    return made;
+}
+
+// 1.1.3.11 三维变换像：makeImage 的 3D 版。map3 为等距映射（平移/面镜像/
+// 中心对称——半正矢旋转 1.1.3.14 亦走此口径）。image 线段/射线/向量置
+// lives3D（2D 视图跳绘）；Solid 像走 calc 闭包随源顶点表现值重建；Sphere
+// 像走 cImage 缓存 + calc；Circle3 像法向按「映射圆心与圆心+n 两点差」
+// 通用变换（等距变换下保向长）
+std::unique_ptr<GeoElement> Kernel::makeImage3D(GeoElement *obj, const std::string &cmd,
+                                                const std::vector<std::string> &args,
+                                                const MapFn3 &map3,
+                                                GeoElement *extraDep)
+{
+    std::unique_ptr<GeoElement> made;
+    if (GeoPoint *p = dynamic_cast<GeoPoint *>(obj)) {
+        auto ip = std::make_unique<GeoPoint>();
+        ip->isFree = false;
+        ip->pointSize = 4;
+        ip->is3D = true;
+        ip->color = { 0x64, 0x64, 0x64 };
+        ip->calc = [p, map3](GeoPoint *q) {
+            double ox, oy, oz;
+            map3(p->x, p->y, p->z, ox, oy, oz);
+            q->x = ox;
+            q->y = oy;
+            q->z = oz;
+        };
+        double ox, oy, oz;
+        map3(p->x, p->y, p->z, ox, oy, oz);
+        ip->x = ox;
+        ip->y = oy;
+        ip->z = oz;
+        made = std::move(ip);
+    } else if (GeoSegment *s = dynamic_cast<GeoSegment *>(obj)) {
+        auto is = std::make_unique<GeoSegment>();
+        is->image = true;
+        is->lives3D = true;
+        is->calc = [s, map3](GeoSegment *q) {
+            double ox, oy, oz;
+            map3(s->ex1(), s->ey1(), s->ez1(), ox, oy, oz);
+            q->ix1 = ox;
+            q->iy1 = oy;
+            q->iz1 = oz;
+            map3(s->ex2(), s->ey2(), s->ez2(), ox, oy, oz);
+            q->ix2 = ox;
+            q->iy2 = oy;
+            q->iz2 = oz;
+        };
+        double ox, oy, oz;
+        map3(s->ex1(), s->ey1(), s->ez1(), ox, oy, oz);
+        is->ix1 = ox;
+        is->iy1 = oy;
+        is->iz1 = oz;
+        map3(s->ex2(), s->ey2(), s->ez2(), ox, oy, oz);
+        is->ix2 = ox;
+        is->iy2 = oy;
+        is->iz2 = oz;
+        made = std::move(is);
+    } else if (GeoRay *r = dynamic_cast<GeoRay *>(obj)) {
+        auto ir = std::make_unique<GeoRay>();
+        ir->image = true;
+        ir->lives3D = true;
+        ir->calc = [r, map3](GeoRay *q) {
+            double ox, oy, oz;
+            map3(r->ex1(), r->ey1(), r->ez1(), ox, oy, oz);
+            q->ix1 = ox;
+            q->iy1 = oy;
+            q->iz1 = oz;
+            map3(r->ex2(), r->ey2(), r->ez2(), ox, oy, oz);
+            q->ix2 = ox;
+            q->iy2 = oy;
+            q->iz2 = oz;
+        };
+        double ox, oy, oz;
+        map3(r->ex1(), r->ey1(), r->ez1(), ox, oy, oz);
+        ir->ix1 = ox;
+        ir->iy1 = oy;
+        ir->iz1 = oz;
+        map3(r->ex2(), r->ey2(), r->ez2(), ox, oy, oz);
+        ir->ix2 = ox;
+        ir->iy2 = oy;
+        ir->iz2 = oz;
+        made = std::move(ir);
+    } else if (GeoVector *v = dynamic_cast<GeoVector *>(obj)) {
+        auto iv = std::make_unique<GeoVector>();
+        iv->image = true;
+        iv->lives3D = true;
+        iv->calc = [v, map3](GeoVector *q) {
+            double ox, oy, oz;
+            map3(v->ex1(), v->ey1(), v->ez1(), ox, oy, oz);
+            q->ix1 = ox;
+            q->iy1 = oy;
+            q->iz1 = oz;
+            map3(v->ex2(), v->ey2(), v->ez2(), ox, oy, oz);
+            q->ix2 = ox;
+            q->iy2 = oy;
+            q->iz2 = oz;
+        };
+        double ox, oy, oz;
+        map3(v->ex1(), v->ey1(), v->ez1(), ox, oy, oz);
+        iv->ix1 = ox;
+        iv->iy1 = oy;
+        iv->iz1 = oz;
+        map3(v->ex2(), v->ey2(), v->ez2(), ox, oy, oz);
+        iv->ix2 = ox;
+        iv->iy2 = oy;
+        iv->iz2 = oz;
+        made = std::move(iv);
+    } else if (GeoLine3 *l3 = dynamic_cast<GeoLine3 *>(obj)) {
+        auto il = std::make_unique<GeoLine3>();
+        il->image = true;
+        il->calc = [l3, map3](GeoLine3 *q) {
+            double ox, oy, oz;
+            map3(l3->ex1(), l3->ey1(), l3->ez1(), ox, oy, oz);
+            q->ix1 = ox;
+            q->iy1 = oy;
+            q->iz1 = oz;
+            map3(l3->ex2(), l3->ey2(), l3->ez2(), ox, oy, oz);
+            q->ix2 = ox;
+            q->iy2 = oy;
+            q->iz2 = oz;
+        };
+        double ox, oy, oz;
+        map3(l3->ex1(), l3->ey1(), l3->ez1(), ox, oy, oz);
+        il->ix1 = ox;
+        il->iy1 = oy;
+        il->iz1 = oz;
+        map3(l3->ex2(), l3->ey2(), l3->ez2(), ox, oy, oz);
+        il->ix2 = ox;
+        il->iy2 = oy;
+        il->iz2 = oz;
+        made = std::move(il);
+    } else if (GeoPolygon *pg = dynamic_cast<GeoPolygon *>(obj)) {
+        auto ipg = std::make_unique<GeoPolygon>();
+        ipg->is3D = true;
+        ipg->image3D = true;
+        ipg->fillAlpha = pg->fillAlpha;
+        ipg->color = pg->color;
+        ipg->calc = [pg, map3](GeoPolygon *q) {
+            q->ix3.clear();
+            q->iy3.clear();
+            q->iz3.clear();
+            const size_t n = pg->n3();
+            for (size_t i = 0; i < n; ++i) {
+                double ox, oy, oz;
+                map3(pg->v3x(i), pg->v3y(i), pg->v3z(i), ox, oy, oz);
+                q->ix3.push_back(ox);
+                q->iy3.push_back(oy);
+                q->iz3.push_back(oz);
+            }
+        };
+        ipg->update();
+        made = std::move(ipg);
+    } else if (GeoSolid *sd = dynamic_cast<GeoSolid *>(obj)) {
+        auto isd = std::make_unique<GeoSolid>();
+        isd->color = sd->color;
+        isd->fillAlpha = sd->fillAlpha;
+        isd->calc = [sd, map3](GeoSolid *q) {
+            q->vx.clear();
+            q->vy.clear();
+            q->vz.clear();
+            for (size_t i = 0; i < sd->vx.size(); ++i) {
+                double ox, oy, oz;
+                map3(sd->vx[i], sd->vy[i], sd->vz[i], ox, oy, oz);
+                q->vx.push_back(ox);
+                q->vy.push_back(oy);
+                q->vz.push_back(oz);
+            }
+            q->faces = sd->faces;
+        };
+        isd->update();
+        made = std::move(isd);
+    } else if (GeoSphere *sp = dynamic_cast<GeoSphere *>(obj)) {
+        auto isp = std::make_unique<GeoSphere>();
+        isp->color = sp->color;
+        isp->fillAlpha = sp->fillAlpha;
+        isp->cImage = true;
+        isp->calc = [sp, map3](GeoSphere *q) {
+            double ox, oy, oz;
+            map3(sp->ccx(), sp->ccy(), sp->ccz(), ox, oy, oz);
+            q->icx = ox;
+            q->icy = oy;
+            q->icz = oz;
+            // 等距变换半径不变（平移/镜像/中心对称）
+            double RR = sp->radius;
+            if (sp->radiusNum) RR = sp->radiusNum->value;
+            else if (sp->through) {
+                RR = sqrt(pow(sp->through->x - sp->ccx(), 2)
+                          + pow(sp->through->y - sp->ccy(), 2)
+                          + pow(sp->through->z - sp->ccz(), 2));
+            }
+            q->radius = RR;
+        };
+        isp->update();
+        made = std::move(isp);
+    } else if (GeoCircle3 *c3 = dynamic_cast<GeoCircle3 *>(obj)) {
+        auto ic3 = std::make_unique<GeoCircle3>();
+        ic3->color = c3->color;
+        ic3->calc = [c3, map3](GeoCircle3 *q) {
+            double ox, oy, oz;
+            map3(c3->cx, c3->cy, c3->cz, ox, oy, oz);
+            q->cx = ox;
+            q->cy = oy;
+            q->cz = oz;
+            map3(c3->cx + c3->nx, c3->cy + c3->ny, c3->cz + c3->nz, ox, oy,
+                 oz);
+            q->nx = ox - q->cx;
+            q->ny = oy - q->cy;
+            q->nz = oz - q->cz;
+            const double nl = sqrt(q->nx * q->nx + q->ny * q->ny
+                                   + q->nz * q->nz);
+            if (nl > 1e-12) {
+                q->nx /= nl;
+                q->ny /= nl;
+                q->nz /= nl;
+            }
+            q->r = c3->r;
+        };
+        ic3->update();
+        made = std::move(ic3);
+    } else {
+        return nullptr;   // 平面/柱锥/曲面等暂不做像
+    }
+    made->inputs = { obj };
+    if (extraDep) made->inputs.push_back(extraDep);
     made->cmdName = cmd;
     made->cmdArgs = args;
     return made;
@@ -14866,7 +15626,8 @@ void Kernel::render(std::vector<DrawCmd> &out)
             GeoSegment *s = static_cast<GeoSegment *>(g.get());
             // 1.0.8.1 三维端点线段只在 3D 视图绘制；1.0.8.3 image 缓存含
             // 非零 z 或引用三维点（字面量三维线段）同理跳过
-            const bool seg3D2 = (!s->image && s->p1 && s->p2
+            const bool seg3D2 = g->lives3D
+                || (!s->image && s->p1 && s->p2
                                  && (s->p1->is3D || s->p2->is3D))
                 || (s->image && (s->ez1() != 0.0 || s->ez2() != 0.0
                     || (s->p1 && s->p1->is3D) || (s->p2 && s->p2->is3D)));
@@ -14989,7 +15750,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
             GeoRay *r = static_cast<GeoRay *>(g.get());
             // 1.0.8.1 三维端点射线 3D 一期不绘（2D/3D 视图都跳过）；
             // 1.0.8.3 字面量端点含非零 z 同口径跳过
-            if ((r->p1 && r->p1->is3D) || (r->p2 && r->p2->is3D)
+            if (g->lives3D || (r->p1 && r->p1->is3D) || (r->p2 && r->p2->is3D)
                 || r->ez1() != 0.0 || r->ez2() != 0.0) break;
             // 1.0.8.3 字面量/混合端点走 image 缓存（ex1/ex2 感知）
             double x1 = view.px(r->ex1()), y1 = view.py(r->ey1());
@@ -15025,7 +15786,8 @@ void Kernel::render(std::vector<DrawCmd> &out)
             GeoVector *v = static_cast<GeoVector *>(g.get());
             // 1.0.8.1 三维端点向量只在 3D 视图绘制；1.0.8.3 image 缓存含
             // 非零 z 或引用三维点（字面量三维向量/相等向量副本）同理跳过
-            const bool vec3D2 = (!v->image && v->p1 && v->p2
+            const bool vec3D2 = g->lives3D
+                || (!v->image && v->p1 && v->p2
                                  && (v->p1->is3D || v->p2->is3D))
                 || (v->image && (v->ez1() != 0.0 || v->ez2() != 0.0
                     || (v->p1 && v->p1->is3D) || (v->p2 && v->p2->is3D)));
@@ -16889,21 +17651,21 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             break;
         }
         case GeoType::Polygon: {
-            // 1.0.8.2 三维多边形：Newell 面积向量光照，单次 FillPoly + 描边
+            // 1.0.8.2 三维多边形：Newell 面积向量光照，单次 FillPoly + 描边。
+            // 1.1.3.10 顶点读取统一走 n3()/v3x/v3y/v3z（image3D 截面同路径）
             GeoPolygon *pg = static_cast<GeoPolygon *>(g.get());
-            const size_t n = pg->verts.size();
+            const size_t n = pg->n3();
             if (!pg->is3D || n < 3) break;
             double ax = 0, ay = 0, az = 0, gx = 0, gy = 0, gz = 0;
             bool bad = false;
             for (size_t i = 0; i < n; ++i) {
-                const GeoPoint *p = pg->verts[i];
-                const GeoPoint *q = pg->verts[(i + 1) % n];
-                ax += p->y * q->z - p->z * q->y;
-                ay += p->z * q->x - p->x * q->z;
-                az += p->x * q->y - p->y * q->x;
-                gx += p->x; gy += p->y; gz += p->z;
-                if (!std::isfinite(p->x) || !std::isfinite(p->y)
-                    || !std::isfinite(p->z)) bad = true;
+                const size_t j = (i + 1) % n;
+                ax += pg->v3y(i) * pg->v3z(j) - pg->v3z(i) * pg->v3y(j);
+                ay += pg->v3z(i) * pg->v3x(j) - pg->v3x(i) * pg->v3z(j);
+                az += pg->v3x(i) * pg->v3y(j) - pg->v3y(i) * pg->v3x(j);
+                gx += pg->v3x(i); gy += pg->v3y(i); gz += pg->v3z(i);
+                if (!std::isfinite(pg->v3x(i)) || !std::isfinite(pg->v3y(i))
+                    || !std::isfinite(pg->v3z(i))) bad = true;
             }
             if (bad) break;
             const double nl2 = sqrt(ax * ax + ay * ay + az * az);
@@ -16916,9 +17678,8 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             fp.color = ShadeRgba(pg->color.r, pg->color.g, pg->color.b,
                                  shade, pg->fillAlpha);
             for (size_t i = 0; i < n; ++i) {
-                const GeoPoint *p = pg->verts[i];
                 double ppx, ppy;
-                proj(p->x, p->y, p->z, ppx, ppy);
+                proj(pg->v3x(i), pg->v3y(i), pg->v3z(i), ppx, ppy);
                 fp.pts.push_back((float)ppx);
                 fp.pts.push_back((float)ppy);
             }
@@ -16933,9 +17694,8 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             pline.color = ObjectColor(pg->color, darkTheme);
             pline.lineWidth = pg->lineThickness / 3.0f;
             for (size_t i = 0; i <= n; ++i) {
-                const GeoPoint *p = pg->verts[i % n];
                 double ppx, ppy;
-                proj(p->x, p->y, p->z, ppx, ppy);
+                proj(pg->v3x(i % n), pg->v3y(i % n), pg->v3z(i % n), ppx, ppy);
                 pline.pts.push_back((float)ppx);
                 pline.pts.push_back((float)ppy);
             }

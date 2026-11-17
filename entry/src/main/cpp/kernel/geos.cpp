@@ -411,12 +411,13 @@ std::string GeoPolygon::valueText() const
     // 顶点全 z=0 时与鞋带公式同值
     if (is3D) {
         double ax = 0, ay = 0, az = 0;
-        for (size_t i = 0; i < verts.size(); ++i) {
-            const GeoPoint *p = verts[i];
-            const GeoPoint *q = verts[(i + 1) % verts.size()];
-            ax += p->y * q->z - p->z * q->y;
-            ay += p->z * q->x - p->x * q->z;
-            az += p->x * q->y - p->y * q->x;
+        const size_t n = n3();
+        for (size_t i = 0; i < n; ++i) {
+            const size_t j = (i + 1) % n;
+            const double pxv = v3x(i), pyv = v3y(i), pzv = v3z(i);
+            ax += pyv * v3z(j) - pzv * v3y(j);
+            ay += pzv * v3x(j) - pxv * v3z(j);
+            az += pxv * v3y(j) - pyv * v3x(j);
         }
         return FormatNum(sqrt(ax * ax + ay * ay + az * az) / 2.0);
     }
