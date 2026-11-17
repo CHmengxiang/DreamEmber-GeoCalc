@@ -66,6 +66,25 @@ public:
     double scale = 50.0;        // 每世界单位像素数（上游 SCALE_STANDARD 同值）
     double r0 = 0.0, u0 = 0.0;  // 1.0.8.3 平移：视图中心在 right/up 轴上的世界投影
 
+    // 1.1.3.12 视图预设（GGB 3D 视图标准方向同语汇）：0=标准（默认轨道位）
+    // 1=俯视 xy 面（x 右 y 上）2=正视 xz 面（x 右 z 上）3=侧视 yz 面（y 右
+    // z 上）。方向推导见 project：屏幕右 = r、屏幕上 = u、视线沿 −f
+    void preset(int kind)
+    {
+        if (kind == 1) {
+            yaw = -90.0;
+            pitch = 89.9;   // f≈+z：俯视，r=(1,0,0) u≈(0,1,0)
+        } else if (kind == 2) {
+            yaw = -90.0;
+            pitch = 0.0;    // f=(0,−1,0)：正视 xz，r=(1,0,0) u=(0,0,1)
+        } else if (kind == 3) {
+            yaw = 0.0;
+            pitch = 0.0;    // f=(1,0,0)：侧视 yz，r=(0,1,0) u=(0,0,1)
+        } else {
+            reset();
+        }
+    }
+
     void setCanvasSize(int w, int h, double uiScale2 = 1.0)
     {
         width = w;

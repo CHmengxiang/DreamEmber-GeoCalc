@@ -3699,7 +3699,9 @@ export struct CanvasView {
           onDismissKeyboard: (): void => this.dismissKeyboard(),
           onMenuAct: (): void => this.onMenuRequest(),
           onUndoAct: (): void => this.doUndo(),
-          onRedoAct: (): void => this.doRedo()
+          onRedoAct: (): void => this.doRedo(),
+          onDragMoveSync: (): void => this.onDragSync(false),
+          onDragEndSync: (): void => this.onDragSync(true)
         })
       } else {
         CanvasStage({

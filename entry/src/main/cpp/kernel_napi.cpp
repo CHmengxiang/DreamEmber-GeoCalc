@@ -393,6 +393,23 @@ napi_value Kernel3DDragPoint(napi_env env, napi_callback_info info)
     return ToNapi(env, "-|");
 }
 
+// kernel3DPreset(kind): string — 1.1.3.12 视图预设（0 标准/1 俯视/2 正视/
+// 3 侧视），返回重绘帧
+napi_value Kernel3DPreset(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 1) {
+        napi_throw_error(env, nullptr, "kernel3DPreset requires (kind)");
+        return nullptr;
+    }
+    int kind = 0;
+    napi_get_value_int32(env, argv[0], &kind);
+    g_kernel.view3d.preset(kind);
+    return ToNapi(env, RenderFrame3D());
+}
+
 // kernelGestureZoom(px, py, factor): string — 以锚点缩放后返回重绘帧
 napi_value KernelGestureZoom(napi_env env, napi_callback_info info)
 {
@@ -969,6 +986,7 @@ void DreamemberRegisterKernelApis(napi_env env, napi_value exports)
         { "kernelDragPointTo", nullptr, KernelDragPointTo, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelEndDrag", nullptr, KernelEndDrag, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelGestureZoom", nullptr, KernelGestureZoom, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernel3DPreset", nullptr, Kernel3DPreset, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelPan", nullptr, KernelPan, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelSetOptions", nullptr, KernelSetOptions, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelResetView", nullptr, KernelResetView, nullptr, nullptr, nullptr, napi_default, nullptr },

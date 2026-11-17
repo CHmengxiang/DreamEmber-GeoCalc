@@ -26,6 +26,8 @@ export struct View3D {
   // 1.1.0.6②：左上 ☰↶↷ 与右下 ＋/－ 按压回弹（与 CanvasStage 同款 120ms）
   @State private topPressed: string = '';
   @State private zoomPressed: string = '';
+  // 1.1.3.12 视图预设钮按压回弹（'std'|'top'|'front'|'side'）
+  @State private presetPressed: string = '';
   onCanvasReady: (w: number, h: number, s: number) => void = (_w: number, _h: number, _s: number) => {};
   // 点按/拖动命中三维点后上报宿主（代数区选中联动，'' 清除）
   onSelectLabel: (l: string) => void = (_l: string) => {};
@@ -44,6 +46,9 @@ export struct View3D {
   onMenuAct: () => void = () => {};
   onUndoAct: () => void = () => {};
   onRedoAct: () => void = () => {};
+  // 1.1.3.12 拖动级联同步（代数区现值列节流刷新，2D CanvasStage 同款）
+  onDragMoveSync: () => void = () => {};
+  onDragEndSync: () => void = () => {};
 
   private ctx: CanvasRenderingContext2D =
     new CanvasRenderingContext2D(new RenderingContextSettings(true));
@@ -351,6 +356,8 @@ export struct View3D {
           const frame = dreamemberKernel.kernel3DDragPoint(dpx[0], dpx[1]);
           if (frame !== '-|') {
             this.execFrame(frame);
+            // 1.1.3.12 拖动级联更新依随对象：节流同步代数区（现值列随动）
+            this.onDragMoveSync();
           }
         } else if (this.mode === 2) {
           const dpx = this.toPx(dx, dy);
@@ -362,6 +369,9 @@ export struct View3D {
       case TouchType.Cancel: {
         if (this.mode === 1 || this.mode === 2) {
           dreamemberKernel.kernelEndDrag();
+        }
+        if (this.mode === 1) {
+          this.onDragEndSync();
         }
         // 点按（未移动未捏合）：工具态走 kernelToolTap3D 状态机（1.1.3.2）；
         // 选择态拾取三维点选中，未命中清除选中
@@ -506,6 +516,101 @@ export struct View3D {
         .backgroundColor(this.dark ? 'rgba(42,45,49,0.92)' : 'rgba(255,255,255,0.92)')
         .constraintSize({ maxWidth: this.vpW > 16 ? this.vpW - 16 : 300 })
         .position({ x: 10, y: 58 })
+
+      // 1.1.3.12 视图预设钮（缩放钮左侧竖排四枚）：标准/俯视/正视/侧视
+      if (this.vpW > 200 && this.vpH > 260) {
+        Column({ space: 6 }) {
+          Text('标')
+            .fontSize(12)
+            .fontColor(Theme.text(this.dark))
+            .width(30)
+            .height(30)
+            .textAlign(TextAlign.Center)
+            .borderRadius(15)
+            .backgroundColor(this.dark ? 'rgba(42,45,49,0.9)' : 'rgba(255,255,255,0.9)')
+            .borderWidth(1)
+            .borderColor(Theme.border(this.dark))
+            .scale({
+              x: this.presetPressed === 'std' ? 0.86 : 1,
+              y: this.presetPressed === 'std' ? 0.86 : 1
+            })
+            .animation({ duration: 120, curve: Curve.EaseOut })
+            .onClick(() => {
+              this.presetPressed = 'std';
+              setTimeout(() => {
+                this.presetPressed = '';
+              }, 120);
+              this.execFrame(dreamemberKernel.kernel3DPreset(0));
+            })
+          Text('俯')
+            .fontSize(12)
+            .fontColor(Theme.text(this.dark))
+            .width(30)
+            .height(30)
+            .textAlign(TextAlign.Center)
+            .borderRadius(15)
+            .backgroundColor(this.dark ? 'rgba(42,45,49,0.9)' : 'rgba(255,255,255,0.9)')
+            .borderWidth(1)
+            .borderColor(Theme.border(this.dark))
+            .scale({
+              x: this.presetPressed === 'top' ? 0.86 : 1,
+              y: this.presetPressed === 'top' ? 0.86 : 1
+            })
+            .animation({ duration: 120, curve: Curve.EaseOut })
+            .onClick(() => {
+              this.presetPressed = 'top';
+              setTimeout(() => {
+                this.presetPressed = '';
+              }, 120);
+              this.execFrame(dreamemberKernel.kernel3DPreset(1));
+            })
+          Text('正')
+            .fontSize(12)
+            .fontColor(Theme.text(this.dark))
+            .width(30)
+            .height(30)
+            .textAlign(TextAlign.Center)
+            .borderRadius(15)
+            .backgroundColor(this.dark ? 'rgba(42,45,49,0.9)' : 'rgba(255,255,255,0.9)')
+            .borderWidth(1)
+            .borderColor(Theme.border(this.dark))
+            .scale({
+              x: this.presetPressed === 'front' ? 0.86 : 1,
+              y: this.presetPressed === 'front' ? 0.86 : 1
+            })
+            .animation({ duration: 120, curve: Curve.EaseOut })
+            .onClick(() => {
+              this.presetPressed = 'front';
+              setTimeout(() => {
+                this.presetPressed = '';
+              }, 120);
+              this.execFrame(dreamemberKernel.kernel3DPreset(2));
+            })
+          Text('侧')
+            .fontSize(12)
+            .fontColor(Theme.text(this.dark))
+            .width(30)
+            .height(30)
+            .textAlign(TextAlign.Center)
+            .borderRadius(15)
+            .backgroundColor(this.dark ? 'rgba(42,45,49,0.9)' : 'rgba(255,255,255,0.9)')
+            .borderWidth(1)
+            .borderColor(Theme.border(this.dark))
+            .scale({
+              x: this.presetPressed === 'side' ? 0.86 : 1,
+              y: this.presetPressed === 'side' ? 0.86 : 1
+            })
+            .animation({ duration: 120, curve: Curve.EaseOut })
+            .onClick(() => {
+              this.presetPressed = 'side';
+              setTimeout(() => {
+                this.presetPressed = '';
+              }, 120);
+              this.execFrame(dreamemberKernel.kernel3DPreset(3));
+            })
+        }
+        .position({ x: this.vpW - 48, y: this.vpH - 320 })
+      }
 
       // 右下角 ＋/－ 缩放按钮（1.1.0.6②：与 2D CanvasStage 同款圆形样式；
       // kernel3DZoom 缩 scale，屏幕中心即世界原点投影=锚点中心）
