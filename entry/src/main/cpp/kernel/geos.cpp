@@ -557,6 +557,63 @@ std::string GeoConic3::definitionText() const
     return d.empty() ? "Conic3" : d;
 }
 
+double GeoSolid::volume() const
+{
+    const size_t n = vx.size();
+    if (n == 0 || faces.empty() || !defined()) return NAN;
+    // 实体质心（外向定向参考）
+    double gx = 0, gy = 0, gz = 0;
+    for (size_t i = 0; i < n; ++i) {
+        gx += vx[i];
+        gy += vy[i];
+        gz += vz[i];
+    }
+    gx /= n;
+    gy /= n;
+    gz /= n;
+    // 散度定理：逐面扇形三角 (1/6)·v0·(v1×v2) 求和；Newell 法向与
+    // 「面质心−实体质心」反向时整面取负（凸体逐面外向定向，环绕自纠）
+    double vol = 0;
+    for (const auto &f : faces) {
+        const size_t m = f.size();
+        if (m < 3) return NAN;
+        double ax = 0, ay = 0, az = 0, cx = 0, cy = 0, cz = 0;
+        for (size_t i = 0; i < m; ++i) {
+            const int a = f[i], b = f[(i + 1) % m];
+            ax += vy[a] * vz[b] - vz[a] * vy[b];
+            ay += vz[a] * vx[b] - vx[a] * vz[b];
+            az += vx[a] * vy[b] - vy[a] * vx[b];
+            cx += vx[a];
+            cy += vy[a];
+            cz += vz[a];
+        }
+        cx /= m;
+        cy /= m;
+        cz /= m;
+        const double sgn = (ax * (cx - gx) + ay * (cy - gy)
+                            + az * (cz - gz)) >= 0.0 ? 1.0 : -1.0;
+        for (size_t i = 1; i + 1 < m; ++i) {
+            const int p = f[0], q = f[i], r = f[i + 1];
+            vol += sgn * (vx[p] * (vy[q] * vz[r] - vz[q] * vy[r])
+                          + vy[p] * (vz[q] * vx[r] - vx[q] * vz[r])
+                          + vz[p] * (vx[q] * vy[r] - vy[q] * vx[r]));
+        }
+    }
+    return fabs(vol) / 6.0;
+}
+
+std::string GeoSolid::valueText() const
+{
+    if (!defined()) return "未定义";
+    return "体积 " + FormatNum(volume());
+}
+
+std::string GeoSolid::definitionText() const
+{
+    std::string d = cmdDefText();
+    return d.empty() ? "Solid" : d;
+}
+
 std::string GeoCone::valueText() const
 {
     // 与圆柱同口径：r=底半径，h=顶点到底心现值

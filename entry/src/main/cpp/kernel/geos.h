@@ -12,7 +12,7 @@
 namespace dreamember {
 
 enum class GeoType { Point, Segment, Line, Ray, Vector, Circle, Polygon, Function, Numeric, Angle, List, Text,
-                     Surface, Sphere, Cylinder, Line3, Plane, Circle3, Conic3, Cone };
+                     Surface, Sphere, Cylinder, Line3, Plane, Circle3, Conic3, Cone, Solid };
 
 struct GeoColor {
     int r = 0, g = 0, b = 0;
@@ -595,6 +595,34 @@ public:
     std::string src;                     // 隐式/常数式定义原文（定义列回填用）
     GeoPoint *pa = nullptr, *pb = nullptr, *pc = nullptr;   // 三点式
     std::function<void(GeoPlane *)> calc;  // 依随重算（点/向量/滑条变动）
+    void update() override { if (calc) calc(this); }
+    std::string valueText() const override;
+    std::string definitionText() const override;
+};
+
+// 多面体实体（1.1.3.7 Pyramid/Prism）：顶点表 + 面索引环。calc 闭包随基准
+// 多边形顶点/点参数现值重建顶点与面（构造序即拓扑序，引用随动）。渲染逐面
+// FillPoly（画家算法质心深度 + Newell 法向光照）+ 面缘描边；遮挡收面片
+//（kind5 平面判据）。值列体积：散度定理逐面扇形三角 signed volume 和，
+// 逐面按「Newell 法向 vs 面质心−实体质心」同向定向（环绕自纠）
+class GeoSolid : public GeoElement {
+public:
+    GeoSolid() : GeoElement(GeoType::Solid) { color = {0x2C, 0x6B, 0xD4}; lineThickness = 3; }
+    std::vector<double> vx, vy, vz;       // 顶点现值表
+    std::vector<std::vector<int>> faces;  // 面索引环（凸多面体，无孔）
+    double fillAlpha = 0.25;              // 面填充不透明度（遮挡因子联动）
+    std::function<void(GeoSolid *)> calc;
+    bool defined() const
+    {
+        if (vx.empty() || faces.empty() || vx.size() != vy.size()
+            || vx.size() != vz.size()) return false;
+        for (size_t i = 0; i < vx.size(); ++i) {
+            if (!std::isfinite(vx[i]) || !std::isfinite(vy[i])
+                || !std::isfinite(vz[i])) return false;
+        }
+        return true;
+    }
+    double volume() const;
     void update() override { if (calc) calc(this); }
     std::string valueText() const override;
     std::string definitionText() const override;

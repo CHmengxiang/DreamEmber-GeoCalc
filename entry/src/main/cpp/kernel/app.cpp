@@ -4154,6 +4154,362 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         made = std::move(cn);
         return true;
     }
+    if (cmdLower == "pyramid" && (a.size() == 2 || a.size() == 4 || a.size() == 5)) {
+        // 1.1.3.7 Pyramid（GGB 口径）：(多边形, 点/高) /（点…点，末位=锥顶，
+        // 其余=底面）。GeoSolid image 闭包随基准顶点/点参数现值重建；高式
+        // 锥顶=底面质心沿 Newell 法向偏移 h（GGB centered pyramid）。退化
+        //（法向零/高 0）→ 全 NaN 值列「未定义」
+        if (a.size() == 2) {
+            GeoPolygon *pg = dynamic_cast<GeoPolygon *>(lookup(a[0]));
+            if (pg && pg->verts.size() >= 3) {
+                const size_t k = pg->verts.size();
+                CmdPt ap;
+                GeoNumeric *hn = dynamic_cast<GeoNumeric *>(lookup(a[1]));
+                double hLit = 0;
+                bool asPoint = cmdPointArg(a[1], ap) && (ap.ref || ap.lit);
+                if (!asPoint && !hn) {
+                    Expr re;
+                    std::string err;
+                    if (!re.parse(a[1], err) || re.containsX()) {
+                        lastError = "Pyramid 第二参数须为点或高: " + a[1];
+                        made = nullptr;
+                        return true;
+                    }
+                    hLit = re.eval(0.0);
+                }
+                auto sd = std::make_unique<GeoSolid>();
+                sd->inputs.push_back(pg);
+                if (asPoint && ap.ref) sd->inputs.push_back(ap.ref);
+                if (hn) sd->inputs.push_back(hn);
+                sd->cmdName = "Pyramid";
+                sd->cmdArgs = a;
+                if (asPoint) {
+                    const CmdPt AP = ap;
+                    GeoPolygon *PG = pg;
+                    sd->calc = [PG, AP](GeoSolid *S) {
+                        S->vx.clear();
+                        S->vy.clear();
+                        S->vz.clear();
+                        S->faces.clear();
+                        for (const GeoPoint *p : PG->verts) {
+                            if (!std::isfinite(p->x) || !std::isfinite(p->y)
+                                || !std::isfinite(p->z)) return;
+                            S->vx.push_back(p->x);
+                            S->vy.push_back(p->y);
+                            S->vz.push_back(p->z);
+                        }
+                        if (AP.ref) {
+                            if (!std::isfinite(AP.ref->x)) return;
+                            S->vx.push_back(AP.ref->x);
+                            S->vy.push_back(AP.ref->y);
+                            S->vz.push_back(AP.ref->z);
+                        } else {
+                            S->vx.push_back(AP.x);
+                            S->vy.push_back(AP.y);
+                            S->vz.push_back(AP.z);
+                        }
+                        const int kk = (int)PG->verts.size();
+                        std::vector<int> base;
+                        for (int i = 0; i < kk; ++i) base.push_back(i);
+                        S->faces.push_back(std::move(base));
+                        for (int i = 0; i < kk; ++i) {
+                            S->faces.push_back({ i, (i + 1) % kk, kk });
+                        }
+                    };
+                } else {
+                    GeoPolygon *PG = pg;
+                    GeoNumeric *HN = hn;
+                    const double HL = hLit;
+                    sd->calc = [PG, HN, HL](GeoSolid *S) {
+                        S->vx.clear();
+                        S->vy.clear();
+                        S->vz.clear();
+                        S->faces.clear();
+                        double gx = 0, gy = 0, gz = 0;
+                        for (const GeoPoint *p : PG->verts) {
+                            if (!std::isfinite(p->x) || !std::isfinite(p->y)
+                                || !std::isfinite(p->z)) return;
+                            S->vx.push_back(p->x);
+                            S->vy.push_back(p->y);
+                            S->vz.push_back(p->z);
+                            gx += p->x;
+                            gy += p->y;
+                            gz += p->z;
+                        }
+                        const size_t k = PG->verts.size();
+                        // Newell 法向（逐对积）
+                        double nx3 = 0, ny3 = 0, nz3 = 0;
+                        for (size_t i = 0; i < k; ++i) {
+                            const GeoPoint *p = PG->verts[i];
+                            const GeoPoint *q = PG->verts[(i + 1) % k];
+                            nx3 += p->y * q->z - p->z * q->y;
+                            ny3 += p->z * q->x - p->x * q->z;
+                            nz3 += p->x * q->y - p->y * q->x;
+                        }
+                        const double nl = sqrt(nx3 * nx3 + ny3 * ny3
+                                               + nz3 * nz3);
+                        const double h = HN ? HN->value : HL;
+                        if (!(nl > 1e-12) || !std::isfinite(h) || fabs(h) < 1e-15) {
+                            S->vx.clear();
+                            S->vy.clear();
+                            S->vz.clear();
+                            return;
+                        }
+                        gx /= k;
+                        gy /= k;
+                        gz /= k;
+                        S->vx.push_back(gx + nx3 / nl * h);
+                        S->vy.push_back(gy + ny3 / nl * h);
+                        S->vz.push_back(gz + nz3 / nl * h);
+                        const int kk = (int)k;
+                        std::vector<int> base;
+                        for (int i = 0; i < kk; ++i) base.push_back(i);
+                        S->faces.push_back(std::move(base));
+                        for (int i = 0; i < kk; ++i) {
+                            S->faces.push_back({ i, (i + 1) % kk, kk });
+                        }
+                    };
+                }
+                sd->update();
+                made = std::move(sd);
+                return true;
+            }
+        }
+        // 点列形式：末位=锥顶，其余=底面（4 参数=三角形底，5=四边形底）
+        if (a.size() == 4 || a.size() == 5) {
+            std::vector<CmdPt> cps;
+            bool ok = true;
+            for (size_t i = 0; i + 1 < a.size(); ++i) {
+                CmdPt c;
+                if (!cmdPointArg(a[i], c) || (!c.ref && !c.lit)) {
+                    ok = false;
+                    break;
+                }
+                cps.push_back(c);
+            }
+            CmdPt apex;
+            if (ok && cmdPointArg(a.back(), apex) && (apex.ref || apex.lit)) {
+                auto sd = std::make_unique<GeoSolid>();
+                for (const CmdPt &c : cps) if (c.ref) sd->inputs.push_back(c.ref);
+                if (apex.ref) sd->inputs.push_back(apex.ref);
+                sd->cmdName = "Pyramid";
+                sd->cmdArgs = a;
+                const std::vector<CmdPt> CP = cps;
+                const CmdPt APX = apex;
+                sd->calc = [CP, APX](GeoSolid *S) {
+                    S->vx.clear();
+                    S->vy.clear();
+                    S->vz.clear();
+                    S->faces.clear();
+                    auto put = [&S](const CmdPt &c) {
+                        if (c.ref) {
+                            if (!std::isfinite(c.ref->x)) return false;
+                            S->vx.push_back(c.ref->x);
+                            S->vy.push_back(c.ref->y);
+                            S->vz.push_back(c.ref->z);
+                        } else {
+                            S->vx.push_back(c.x);
+                            S->vy.push_back(c.y);
+                            S->vz.push_back(c.z);
+                        }
+                        return true;
+                    };
+                    for (const CmdPt &c : CP) {
+                        if (!put(c)) return;
+                    }
+                    if (!put(APX)) return;
+                    const int kk = (int)CP.size();
+                    std::vector<int> base;
+                    for (int i = 0; i < kk; ++i) base.push_back(i);
+                    S->faces.push_back(std::move(base));
+                    for (int i = 0; i < kk; ++i) {
+                        S->faces.push_back({ i, (i + 1) % kk, kk });
+                    }
+                };
+                sd->update();
+                made = std::move(sd);
+                return true;
+            }
+            lastError = "Pyramid 需要（多边形, 点/高）或（点, 点, 点, 点[, 点]）且对象须已存在";
+            made = nullptr;
+            return true;
+        }
+    }
+    if (cmdLower == "prism" && (a.size() == 2 || a.size() == 4)) {
+        // 1.1.3.7 Prism（GGB 口径）：(多边形, 点/高) /（点, 点, 点, 点——
+        // 底 ABC 平移向量 = D−A）。多边形点式平移 = 点−底面首顶点（GGB
+        // first top point），高式=直棱柱沿 Newell 法向 h。退化 → 未定义
+        if (a.size() == 2) {
+            GeoPolygon *pg = dynamic_cast<GeoPolygon *>(lookup(a[0]));
+            if (pg && pg->verts.size() >= 3) {
+                CmdPt tp;
+                GeoNumeric *hn = dynamic_cast<GeoNumeric *>(lookup(a[1]));
+                double hLit = 0;
+                bool asPoint = cmdPointArg(a[1], tp) && (tp.ref || tp.lit);
+                if (!asPoint && !hn) {
+                    Expr re;
+                    std::string err;
+                    if (!re.parse(a[1], err) || re.containsX()) {
+                        lastError = "Prism 第二参数须为点或高: " + a[1];
+                        made = nullptr;
+                        return true;
+                    }
+                    hLit = re.eval(0.0);
+                }
+                auto sd = std::make_unique<GeoSolid>();
+                sd->inputs.push_back(pg);
+                if (asPoint && tp.ref) sd->inputs.push_back(tp.ref);
+                if (hn) sd->inputs.push_back(hn);
+                sd->cmdName = "Prism";
+                sd->cmdArgs = a;
+                const bool isPt = asPoint;
+                const CmdPt TP = tp;
+                GeoPolygon *PG = pg;
+                GeoNumeric *HN = hn;
+                const double HL = hLit;
+                sd->calc = [PG, isPt, TP, HN, HL](GeoSolid *S) {
+                    S->vx.clear();
+                    S->vy.clear();
+                    S->vz.clear();
+                    S->faces.clear();
+                    double dx3 = 0, dy3 = 0, dz3 = 0;
+                    if (isPt) {
+                        // 平移向量 = 目标点 − 底面首顶点（GGB first top point）
+                        const GeoPoint *p0 = PG->verts[0];
+                        const double tx = TP.ref ? TP.ref->x : TP.x;
+                        const double ty = TP.ref ? TP.ref->y : TP.y;
+                        const double tz = TP.ref ? TP.ref->z : TP.z;
+                        if (!std::isfinite(tx) || !std::isfinite(p0->x)) return;
+                        dx3 = tx - p0->x;
+                        dy3 = ty - p0->y;
+                        dz3 = tz - p0->z;
+                    } else {
+                        // 直棱柱：Newell 法向 × h
+                        double nx3 = 0, ny3 = 0, nz3 = 0;
+                        const size_t k = PG->verts.size();
+                        for (size_t i = 0; i < k; ++i) {
+                            const GeoPoint *p = PG->verts[i];
+                            const GeoPoint *q = PG->verts[(i + 1) % k];
+                            nx3 += p->y * q->z - p->z * q->y;
+                            ny3 += p->z * q->x - p->x * q->z;
+                            nz3 += p->x * q->y - p->y * q->x;
+                        }
+                        const double nl = sqrt(nx3 * nx3 + ny3 * ny3
+                                               + nz3 * nz3);
+                        const double h = HN ? HN->value : HL;
+                        if (!(nl > 1e-12) || !std::isfinite(h)
+                            || fabs(h) < 1e-15) return;
+                        dx3 = nx3 / nl * h;
+                        dy3 = ny3 / nl * h;
+                        dz3 = nz3 / nl * h;
+                    }
+                    if (!std::isfinite(dx3)) return;
+                    for (const GeoPoint *p : PG->verts) {
+                        if (!std::isfinite(p->x) || !std::isfinite(p->y)
+                            || !std::isfinite(p->z)) return;
+                        S->vx.push_back(p->x);
+                        S->vy.push_back(p->y);
+                        S->vz.push_back(p->z);
+                    }
+                    for (const GeoPoint *p : PG->verts) {
+                        S->vx.push_back(p->x + dx3);
+                        S->vy.push_back(p->y + dy3);
+                        S->vz.push_back(p->z + dz3);
+                    }
+                    const int kk = (int)PG->verts.size();
+                    std::vector<int> b;
+                    for (int i = 0; i < kk; ++i) b.push_back(i);
+                    S->faces.push_back(std::move(b));
+                    std::vector<int> t;
+                    for (int i = 0; i < kk; ++i) t.push_back(kk + i);
+                    S->faces.push_back(std::move(t));
+                    for (int i = 0; i < kk; ++i) {
+                        S->faces.push_back({ i, (i + 1) % kk, kk + (i + 1) % kk,
+                                             kk + i });
+                    }
+                };
+                sd->update();
+                made = std::move(sd);
+                return true;
+            }
+        }
+        // 点列形式：底 ABC，平移向量 = D − A（GGB Prism(A,B,C,D)）
+        if (a.size() == 4) {
+            CmdPt cp[4];
+            bool ok = true;
+            for (int i = 0; i < 4; ++i) {
+                if (!cmdPointArg(a[i], cp[i]) || (!cp[i].ref && !cp[i].lit)) {
+                    ok = false;
+                    break;
+                }
+            }
+            if (ok) {
+                auto sd = std::make_unique<GeoSolid>();
+                for (int i = 0; i < 4; ++i) {
+                    if (cp[i].ref) sd->inputs.push_back(cp[i].ref);
+                }
+                sd->cmdName = "Prism";
+                sd->cmdArgs = a;
+                const CmdPt C0 = cp[0], C1 = cp[1], C2 = cp[2], C3 = cp[3];
+                sd->calc = [C0, C1, C2, C3](GeoSolid *S) {
+                    S->vx.clear();
+                    S->vy.clear();
+                    S->vz.clear();
+                    S->faces.clear();
+                    auto cur = [](const CmdPt &c, double &ox, double &oy,
+                                  double &oz) -> bool {
+                        if (c.ref) {
+                            ox = c.ref->x;
+                            oy = c.ref->y;
+                            oz = c.ref->z;
+                        } else {
+                            ox = c.x;
+                            oy = c.y;
+                            oz = c.z;
+                        }
+                        return std::isfinite(ox) && std::isfinite(oy)
+                            && std::isfinite(oz);
+                    };
+                    double ax, ay, az, bx, by, bz, cx2, cy2, cz2, dx2, dy2,
+                           dz2;
+                    if (!cur(C0, ax, ay, az) || !cur(C1, bx, by, bz)
+                        || !cur(C2, cx2, cy2, cz2)
+                        || !cur(C3, dx2, dy2, dz2)) return;
+                    const double vx3 = dx2 - ax, vy3 = dy2 - ay,
+                                 vz3 = dz2 - az;
+                    const double px[3] = { ax, bx, cx2 };
+                    const double py[3] = { ay, by, cy2 };
+                    const double pz[3] = { az, bz, cz2 };
+                    for (int i = 0; i < 3; ++i) {
+                        S->vx.push_back(px[i]);
+                        S->vy.push_back(py[i]);
+                        S->vz.push_back(pz[i]);
+                    }
+                    for (int i = 0; i < 3; ++i) {
+                        S->vx.push_back(px[i] + vx3);
+                        S->vy.push_back(py[i] + vy3);
+                        S->vz.push_back(pz[i] + vz3);
+                    }
+                    std::vector<int> b;
+                    for (int i = 0; i < 3; ++i) b.push_back(i);
+                    S->faces.push_back(std::move(b));
+                    std::vector<int> t;
+                    for (int i = 0; i < 3; ++i) t.push_back(3 + i);
+                    S->faces.push_back(std::move(t));
+                    for (int i = 0; i < 3; ++i) {
+                        S->faces.push_back({ i, (i + 1) % 3, 3 + (i + 1) % 3,
+                                             3 + i });
+                    }
+                };
+                sd->update();
+                made = std::move(sd);
+                return true;
+            }
+            lastError = "Prism 需要（多边形, 点/高）或（点, 点, 点, 点）且对象须已存在";
+            made = nullptr;
+            return true;
+        }
+    }
     if (cmdLower == "perpendicularline" && a.size() == 2) {
         // PerpendicularLine(点, 基准) — 上游 参数序：点在前，基准（直线/线段/
         // 一次函数图像）在后。先按点,基准解；若第一个参数不是点再试反序（容错）。
@@ -10327,6 +10683,7 @@ void Kernel::algebraRows(std::vector<AlgebraRow> &out) const
         // 1.1.0.1 圆锥曲线独立行类型（入「圆锥曲线」分组）
         case GeoType::Conic3: r.type = "conic"; break;
         case GeoType::Cone: r.type = "cone"; break;
+        case GeoType::Solid: r.type = "solid"; break;
         case GeoType::Numeric: {
             GeoNumeric *n = static_cast<GeoNumeric *>(g.get());
             r.type = n->isSlider ? "slider" : "numeric";
@@ -10358,14 +10715,17 @@ void Kernel::algebraRows(std::vector<AlgebraRow> &out) const
                 (int)std::lround(static_cast<GeoAngle *>(g.get())->fillAlpha * 100.0);
         } else if (g->type() == GeoType::Sphere
                    || g->type() == GeoType::Cylinder
-                   || g->type() == GeoType::Cone) {
+                   || g->type() == GeoType::Cone
+                   || g->type() == GeoType::Solid) {
             // 1.1.0.8③ 实心体行滑杆贯通（球/柱 1.1.0.3 只通了 propsOf，
-            // 行协议列当时未接；锥同口径补齐）
+            // 行协议列当时未接；锥同口径补齐）；1.1.3.7 多面体同口径
             double fa = 0;
             if (g->type() == GeoType::Sphere) {
                 fa = static_cast<GeoSphere *>(g.get())->fillAlpha;
             } else if (g->type() == GeoType::Cylinder) {
                 fa = static_cast<GeoCylinder *>(g.get())->fillAlpha;
+            } else if (g->type() == GeoType::Solid) {
+                fa = static_cast<GeoSolid *>(g.get())->fillAlpha;
             } else {
                 fa = static_cast<GeoCone *>(g.get())->fillAlpha;
             }
@@ -10730,6 +11090,58 @@ GeoElement *Kernel::pickObject3D(double px, double py)
             }
             break;
         }
+        case GeoType::Solid: {
+            // 1.1.3.7 多面体拾取：逐面盘内=强命中（面质心深度比较，与平面
+            // 同口径）+ 贴边=边距命中（四棱/面缘）
+            GeoSolid *sd = static_cast<GeoSolid *>(g.get());
+            if (!sd->defined()) break;
+            for (const auto &f : sd->faces) {
+                const size_t m = f.size();
+                if (m < 3) continue;
+                std::vector<std::pair<double, double>> poly;
+                bool bad = false;
+                double cx3 = 0, cy3 = 0, cz3 = 0;
+                for (size_t i = 0; i < m; ++i) {
+                    const int a = f[i];
+                    double ppx, ppy;
+                    view3d.project(sd->vx[a], sd->vy[a], sd->vz[a], ppx, ppy);
+                    poly.emplace_back(ppx, ppy);
+                    cx3 += sd->vx[a];
+                    cy3 += sd->vy[a];
+                    cz3 += sd->vz[a];
+                    if (!std::isfinite(sd->vx[a]) || !std::isfinite(sd->vy[a])
+                        || !std::isfinite(sd->vz[a])) bad = true;
+                }
+                if (bad) continue;
+                bool inside = false;
+                double dEdge = 1e9;
+                for (size_t i = 0; i < m; ++i) {
+                    const auto &a2 = poly[i];
+                    const auto &b2 = poly[(i + 1) % m];
+                    double d;
+                    segDist(a2.first, a2.second, b2.first, b2.second, px, py,
+                            d);
+                    if (d < dEdge) dEdge = d;
+                    if ((a2.second > py) != (b2.second > py)) {
+                        const double xint = a2.first + (py - a2.second)
+                            / (b2.second - a2.second) * (b2.first - a2.first);
+                        if (px < xint) inside = !inside;
+                    }
+                }
+                if (inside) {
+                    double scx, scy;
+                    const double tdep = view3d.project(cx3 / m, cy3 / m,
+                                                       cz3 / m, scx, scy);
+                    if (tdep < bestDep) {
+                        bestDep = tdep;
+                        bestStrong = g.get();
+                    }
+                } else if (dEdge < grab) {
+                    consider(g.get(), dEdge);
+                }
+            }
+            break;
+        }
         case GeoType::Cylinder: {
             GeoCylinder *cy = static_cast<GeoCylinder *>(g.get());
             const double ax2 = cy->tcx() - cy->bcx(), ay2 = cy->tcy() - cy->bcy(),
@@ -10933,6 +11345,27 @@ std::string Kernel::toolTap3D(double px, double py)
             }
             std::string expr = "Plane(" + toolPts_[0]->label + ", "
                 + toolPts_[1]->label + ", " + toolPts_[2]->label + ")";
+            toolPts_.clear();
+            r = finishInput(expr);
+        } else if (tool_ == "pyramid3D" || tool_ == "prism3D") {
+            // 1.1.3.7 锥体/棱柱工具：四步点按（前三点=底面三角形，第四点=
+            // 锥顶/平移目标点；空白先建三维点）。棱柱平移向量 = 第四点−
+            // 第一点（GGB Prism(A,B,C,D) AD 向量口径），锥体第四点=锥顶
+            //（GGB Pyramid(A,B,C,D) ABC 底 D 顶口径）
+            const char *name = tool_ == "pyramid3D" ? "Pyramid" : "Prism";
+            if (!hit) hit = make3D();
+            if (!hit) return "err|无法在空白处建点";
+            hit->selected = true;
+            toolPts_.push_back(hit);
+            if (toolPts_.size() < 4) {
+                return "need|" + std::string(name) + "：还差 "
+                    + std::to_string(4 - (int)toolPts_.size()) + " 个点"
+                    + std::string(toolPts_.size() == 3 ? "（第四点=锥顶/平移目标）"
+                                                       : "");
+            }
+            std::string expr = std::string(name) + "(" + toolPts_[0]->label
+                + ", " + toolPts_[1]->label + ", " + toolPts_[2]->label + ", "
+                + toolPts_[3]->label + ")";
             toolPts_.clear();
             r = finishInput(expr);
         } else if (tool_ == "perpLine3D" || tool_ == "parLine3D") {
@@ -11498,6 +11931,7 @@ std::string Kernel::propsOf(const std::string &label) const
     case GeoType::Circle3: ty = "circle"; break;
     case GeoType::Conic3: ty = "circle"; break;
     case GeoType::Cone: ty = "cone"; break;   // 1.1.0.8③ 归一（原误借 cylinder）
+    case GeoType::Solid: ty = "solid"; break;   // 1.1.3.7 多面体属性快照
     }
     add("type", ty);
     add("vis", g->visible ? "1" : "0");
@@ -11523,13 +11957,17 @@ std::string Kernel::propsOf(const std::string &label) const
             (int)std::lround(static_cast<GeoAngle *>(g)->fillAlpha * 100.0)));
     } else if (g->type() == GeoType::Sphere
                || g->type() == GeoType::Cylinder
-               || g->type() == GeoType::Cone) {
-        // 1.1.0.3 实心体填充透明度样式（遮挡因子联动）；1.1.0.8③ 补 Cone
+               || g->type() == GeoType::Cone
+               || g->type() == GeoType::Solid) {
+        // 1.1.0.3 实心体填充透明度样式（遮挡因子联动）；1.1.0.8③ 补 Cone；
+        // 1.1.3.7 多面体同口径
         const double fa = g->type() == GeoType::Sphere
             ? static_cast<const GeoSphere *>(g)->fillAlpha
             : (g->type() == GeoType::Cylinder
                    ? static_cast<const GeoCylinder *>(g)->fillAlpha
-                   : static_cast<const GeoCone *>(g)->fillAlpha);
+                   : (g->type() == GeoType::Solid
+                          ? static_cast<const GeoSolid *>(g)->fillAlpha
+                          : static_cast<const GeoCone *>(g)->fillAlpha));
         add("fill", std::to_string((int)std::lround(fa * 100.0)));
     }
     if (g->type() == GeoType::Numeric) {
@@ -11648,6 +12086,11 @@ bool Kernel::setProp(const std::string &label, const std::string &key,
         if (g->type() == GeoType::Cone) {
             // 1.1.0.8③ 圆锥实心填充透明度（遮挡因子联动，球/柱同口径）
             static_cast<GeoCone *>(g)->fillAlpha = a;
+            return true;
+        }
+        if (g->type() == GeoType::Solid) {
+            // 1.1.3.7 多面体面填充透明度（遮挡因子联动，实心体同口径）
+            static_cast<GeoSolid *>(g)->fillAlpha = a;
             return true;
         }
         lastError = "该对象没有区域填充";
@@ -12079,6 +12522,18 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->ibz = s->ibz;
             d->radiusNum = s->radiusNum;
             d->radius = s->radius;
+            d->fillAlpha = s->fillAlpha;
+            d->calc = s->calc;
+            break;
+        }
+        case GeoType::Solid: {
+            // 1.1.3.7 多面体重定义搬运（顶点/面缓存 + 闭包）
+            GeoSolid *d = static_cast<GeoSolid *>(dst);
+            GeoSolid *s = static_cast<GeoSolid *>(src);
+            d->vx = s->vx;
+            d->vy = s->vy;
+            d->vz = s->vz;
+            d->faces = s->faces;
             d->fillAlpha = s->fillAlpha;
             d->calc = s->calc;
             break;
@@ -14702,6 +15157,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
         case GeoType::Circle3:
         case GeoType::Conic3:
         case GeoType::Cone:
+        case GeoType::Solid:
             break;
         }
     }
@@ -15152,6 +15608,48 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         oc.cgam = wl / sqrt(wl * wl + r * r);
         oc.csig = r / sqrt(wl * wl + r * r);
         occs.push_back(std::move(oc));
+    }
+    // 1.1.3.7 多面体面片遮挡体（kind5=平面判据：面法向 + 面片像素多边形，
+    // 凸面精确；不落 CubeClipPlane——面片本就有限）。veilAt / veilAtEx /
+    // drawSplitSeg 的平面 fall-through 分支（kind≠1/2/3/4）自动接管
+    for (auto &g : geos_) {
+        if (!g->visible || g->type() != GeoType::Solid) continue;
+        GeoSolid *sd = static_cast<GeoSolid *>(g.get());
+        if (sd->fillAlpha < 0.02 || !sd->defined()) continue;
+        for (const auto &f : sd->faces) {
+            const size_t m = f.size();
+            if (m < 3) continue;
+            double ax = 0, ay = 0, az = 0;
+            bool bad = false;
+            for (size_t i = 0; i < m; ++i) {
+                const int a = f[i], b = f[(i + 1) % m];
+                ax += sd->vy[a] * sd->vz[b] - sd->vz[a] * sd->vy[b];
+                ay += sd->vz[a] * sd->vx[b] - sd->vx[a] * sd->vz[b];
+                az += sd->vx[a] * sd->vy[b] - sd->vy[a] * sd->vx[b];
+                if (!std::isfinite(sd->vx[f[i]]) || !std::isfinite(sd->vy[f[i]])
+                    || !std::isfinite(sd->vz[f[i]])) bad = true;
+            }
+            if (bad) continue;
+            const double nl = sqrt(ax * ax + ay * ay + az * az);
+            if (!(nl > 1e-12)) continue;
+            Occ3 oc;
+            oc.kind = 5;
+            oc.owner = sd;
+            oc.nx = ax / nl;
+            oc.ny = ay / nl;
+            oc.nz = az / nl;
+            oc.dd = oc.nx * sd->vx[f[0]] + oc.ny * sd->vy[f[0]]
+                    + oc.nz * sd->vz[f[0]];
+            oc.alpha = sd->fillAlpha;
+            for (size_t i = 0; i < m; ++i) {
+                const int a = f[i];
+                double ppx, ppy;
+                proj(sd->vx[a], sd->vy[a], sd->vz[a], ppx, ppy);
+                oc.poly.push_back((float)ppx);
+                oc.poly.push_back((float)ppy);
+            }
+            if (oc.poly.size() >= 6) occs.push_back(std::move(oc));
+        }
     }
     // 投影像素点是否落在多边形内（射线交叉法）
     auto polyHit = [](const std::vector<float> &poly, double px, double py) -> bool {
@@ -16224,6 +16722,87 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             proj(gx / n, gy / n, gz / n, lpx3, lpy3);
             lb.pts = { (float)(lpx3 + 6 * us), (float)lpy3 };
             lb.text = pg->label;
+            labelList.push_back(lb);
+            break;
+        }
+        case GeoType::Solid: {
+            // 1.1.3.7 多面体：逐面 FillPoly（质心深度画家算法 + Newell 法向
+            // 光照，前后向面全画=半透明透视 GGB 实心观感）+ 面缘描边（同
+            // 深度随面发射，stable_sort 保面先缘后；共享棱两次描边——背面
+            // 一次被近面填充压淡、近面一次压顶，正是透视语义）；标签=实体质心
+            GeoSolid *sd = static_cast<GeoSolid *>(g.get());
+            if (!sd->defined()) break;
+            const std::string col = ObjectColor(sd->color, darkTheme);
+            const size_t nv = sd->vx.size();
+            double gx = 0, gy = 0, gz = 0;
+            for (size_t i = 0; i < nv; ++i) {
+                gx += sd->vx[i];
+                gy += sd->vy[i];
+                gz += sd->vz[i];
+            }
+            gx /= nv;
+            gy /= nv;
+            gz /= nv;
+            for (const auto &f : sd->faces) {
+                const size_t m = f.size();
+                if (m < 3) continue;
+                double ax = 0, ay = 0, az = 0, cx3 = 0, cy3 = 0, cz3 = 0;
+                bool bad = false;
+                for (size_t i = 0; i < m; ++i) {
+                    const int a = f[i], b = f[(i + 1) % m];
+                    ax += sd->vy[a] * sd->vz[b] - sd->vz[a] * sd->vy[b];
+                    ay += sd->vz[a] * sd->vx[b] - sd->vx[a] * sd->vz[b];
+                    az += sd->vx[a] * sd->vy[b] - sd->vy[a] * sd->vx[b];
+                    cx3 += sd->vx[a];
+                    cy3 += sd->vy[a];
+                    cz3 += sd->vz[a];
+                    if (!std::isfinite(sd->vx[a]) || !std::isfinite(sd->vy[a])
+                        || !std::isfinite(sd->vz[a])) bad = true;
+                }
+                if (bad) continue;
+                const double nl2 = sqrt(ax * ax + ay * ay + az * az);
+                double shade = 0.85;
+                if (nl2 > 1e-12) {
+                    shade = 0.55 + 0.45
+                            * fabs((ax * fx + ay * fy + az * fz) / nl2);
+                }
+                DrawCmd fp;
+                fp.op = DrawOp::FillPoly;
+                fp.color = ShadeRgba(sd->color.r, sd->color.g, sd->color.b,
+                                     shade, sd->fillAlpha);
+                for (size_t i = 0; i < m; ++i) {
+                    const int a = f[i];
+                    double ppx, ppy;
+                    proj(sd->vx[a], sd->vy[a], sd->vz[a], ppx, ppy);
+                    fp.pts.push_back((float)ppx);
+                    fp.pts.push_back((float)ppy);
+                }
+                double fdep = 0;
+                {
+                    double tx, ty;
+                    fdep = proj(cx3 / m, cy3 / m, cz3 / m, tx, ty);
+                }
+                fillList.push_back({ fdep, fp });
+                DrawCmd pline;
+                pline.op = DrawOp::Polyline;
+                pline.color = col;
+                pline.lineWidth = sd->lineThickness / 3.0f;
+                for (size_t i = 0; i <= m; ++i) {
+                    const int a = f[i % m];
+                    double ppx, ppy;
+                    proj(sd->vx[a], sd->vy[a], sd->vz[a], ppx, ppy);
+                    pline.pts.push_back((float)ppx);
+                    pline.pts.push_back((float)ppy);
+                }
+                fillList.push_back({ fdep, pline });
+            }
+            DrawCmd lb;
+            lb.op = DrawOp::Text;
+            lb.color = col;
+            double lpx, lpy;
+            proj(gx, gy, gz, lpx, lpy);
+            lb.pts = { (float)(lpx + 6 * us), (float)lpy };
+            lb.text = sd->label;
             labelList.push_back(lb);
             break;
         }
@@ -17390,6 +17969,14 @@ std::string Kernel::getXml() const
             AppendLineStyle(o, cn->lineThickness);
             break;
         }
+        case GeoType::Solid: {
+            // 1.1.3.7 多面体：命令产物走通用重放（Pyramid/Prism 重放即重建）
+            GeoSolid *sd = static_cast<GeoSolid *>(g);
+            AppendCommandXml(o, *sd);
+            AppendElementHead(o, *sd, "solid", sd->fillAlpha);
+            AppendLineStyle(o, sd->lineThickness);
+            break;
+        }
         case GeoType::Line3: {
             GeoLine3 *l3 = static_cast<GeoLine3 *>(g);
             AppendCommandXml(o, *l3);
@@ -17529,6 +18116,12 @@ void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
         if (cnc) {
             double a = AttrNum(t, "alpha", cnc->fillAlpha);
             cnc->fillAlpha = a > 0.0 ? (a > 1.0 ? 1.0 : a) : 1.0;
+        }
+        // 1.1.3.7 多面体同口径（默认 0.25 半透明透视）
+        GeoSolid *sdc = dynamic_cast<GeoSolid *>(e);
+        if (sdc) {
+            double a = AttrNum(t, "alpha", sdc->fillAlpha);
+            sdc->fillAlpha = a > 0.0 ? (a > 1.0 ? 1.0 : a) : 0.25;
         }
     }
     size_t ls = inner.find("<lineStyle");

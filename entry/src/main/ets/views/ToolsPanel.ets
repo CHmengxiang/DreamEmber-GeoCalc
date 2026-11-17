@@ -927,6 +927,49 @@ export struct ToolsPanel {
             .borderRadius(10)
             .backgroundColor(this.tool === 'parLine3D' ? Theme.keyBg(this.dark) : Color.Transparent)
             .onClick(() => this.onSetTool('parLine3D'))
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'pyramid3D', dark: this.dark, selected: this.tool === 'pyramid3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'pyramid3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('锥体（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'pyramid3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'pyramid3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('pyramid3D'))
+          }
+          .width('100%')
+          // 1.1.3.7 棱柱：每行至多 4 格（Row 不换行，5×25% 溢出裁切——
+          // 1.1.3.6 排版教训），第 13 枚工具独占第四行
+          Row() {
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'prism3D', dark: this.dark, selected: this.tool === 'prism3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'prism3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('棱柱（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'prism3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'prism3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('prism3D'))
           }
           .width('100%')
         }

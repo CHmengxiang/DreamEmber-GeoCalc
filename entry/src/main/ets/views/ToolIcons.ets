@@ -288,6 +288,20 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     dot(14, 24, 3);
     dot(30, 24, 3);
     dot(26, 12, 3);
+  } else if (id === 'pyramid3D') {
+    // 锥体：三角形底 + 锥顶三条棱（GGB 金字塔语汇）
+    shape([10, 28, 32, 28, 21, 18], soft, 1.8, false);
+    seg(21, 18, 21, 7, 2);
+    seg(21, 7, 32, 28, 1.8);
+    seg(21, 7, 10, 28, 1.8);
+    dot(21, 7, 3);
+  } else if (id === 'prism3D') {
+    // 棱柱：底三角 + 平移顶三角 + 三条侧棱
+    shape([8, 29, 30, 29, 19, 19], soft, 1.8, false);
+    shape([17, 20, 39, 20, 28, 10], '', 1.4, false);
+    seg(8, 29, 17, 20, 1.4);
+    seg(30, 29, 39, 20, 1.4);
+    seg(19, 19, 28, 10, 1.4);
   } else if (id === 'slider') {
     seg(8, 19, 34, 19, 2);
     seg(8, 15, 8, 23, 1.5);
