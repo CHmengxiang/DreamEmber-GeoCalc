@@ -4050,6 +4050,20 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             if (!(sp->radius > 0)) { lastError = "半径必须为正数"; made = nullptr; return true; }
             if (c0.ref) sp->inputs.push_back(c0.ref);
         }
+        // 1.1.3.13 过点形式 calc 补口（拖心/拖过点半径随动——此前半径为
+        // 构造期快照，拖基准不更新）。仅过点形式挂 calc（半径/半径引用
+        // 形式渲染端本就现读 radiusNum，无需闭包）
+        if (sp->through) {
+            sp->calc = [](GeoSphere *S) {
+                if (!S->through) return;
+                const double dx = S->through->x - S->ccx();
+                const double dy = S->through->y - S->ccy();
+                const double dz = S->through->z - S->ccz();
+                const double rr = sqrt(dx * dx + dy * dy + dz * dz);
+                if (std::isfinite(rr) && rr > 0) S->radius = rr;
+            };
+            sp->update();
+        }
         sp->cmdName = "Sphere";
         sp->cmdArgs = { a[0], a[1] };
         made = std::move(sp);
@@ -12207,6 +12221,41 @@ std::string Kernel::toolTap3D(double px, double py)
             toolObj_ = nullptr;
             r = finishInput("Reflect(" + first->label + ", "
                             + mirror->label + ")");
+        } else if (tool_ == "dist3D" || tool_ == "angle3D") {
+            // 1.1.3.13 测量工具（3D）：两次拾取（点优先）产数值——Distance
+            // (点点/点线/点面/线面/异面线) 与 Angle (线线/线面/面面) 走既有
+            // 命令面；angle3D 两对象须线族/平面
+            const char *name = tool_ == "dist3D" ? "距离" : "角度";
+            GeoElement *o = hit ? static_cast<GeoElement *>(hit)
+                                : pickObject3D(px, py);
+            if (!o) {
+                return "need|" + std::string(name) + "：请点选第一个对象（点/线/面）";
+            }
+            if (!toolObj_) {
+                toolObj_ = o;
+                o->selected = true;
+                return "need|" + std::string(name) + "：再点选第二个对象";
+            }
+            if (o == toolObj_) {
+                return "need|" + std::string(name) + "：两对象相同，请重新点选";
+            }
+            if (tool_ == "angle3D") {
+                const GeoType t1 = toolObj_->type(), t2 = o->type();
+                auto angleOk = [](GeoType t) {
+                    return t == GeoType::Line3 || t == GeoType::Segment
+                        || t == GeoType::Ray || t == GeoType::Plane
+                        || t == GeoType::Line;
+                };
+                if (!angleOk(t1) || !angleOk(t2)) {
+                    return "need|角度：两对象须为直线/线段/射线/平面";
+                }
+            }
+            o->selected = true;
+            const std::string cmdName2 = tool_ == "dist3D" ? "Distance" : "Angle";
+            const std::string la = toolObj_->label;
+            const std::string lb2 = o->label;
+            toolObj_ = nullptr;
+            r = finishInput(cmdName2 + "(" + la + ", " + lb2 + ")");
         } else {
             return "err|该工具暂不支持三维视图";
         }

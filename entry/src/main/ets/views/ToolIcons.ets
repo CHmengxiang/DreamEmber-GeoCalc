@@ -340,6 +340,21 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     dot(6, 29, 3.2);
     dot(36, 8, 3.2);
     shape([17, 15, 25, 15, 25, 23, 17, 23], soft, 1.5, true);
+  } else if (id === 'dist3D') {
+    // 距离（3D）：斜线段 + 端尺寸线（2D dist 语汇加透视双斜标）
+    seg(9, 26, 33, 10, 2);
+    seg(6.8, 27.3, 11.2, 24.7, 1.5);
+    seg(30.8, 11.3, 35.2, 8.7, 1.5);
+    dot(9, 26, 3.2);
+    dot(33, 10, 3.2);
+    seg(19, 16, 24, 21, 1.4);
+  } else if (id === 'angle3D') {
+    // 角度（3D）：两线夹角 + 弧 + 平面软底（面面角语汇）
+    shape([6, 30, 38, 30, 38, 22, 6, 22], soft, 1.2, true);
+    seg(10, 26, 36, 26, 2);
+    seg(10, 26, 28, 8, 2);
+    arcStroke(10, 26, 10, -0.79, 0, 1.8);
+    dot(10, 26, 3);
   } else if (id === 'slider') {
     seg(8, 19, 34, 19, 2);
     seg(8, 15, 8, 23, 1.5);
