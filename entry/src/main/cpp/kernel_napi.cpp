@@ -17,6 +17,7 @@ dreamember::Kernel g_kernel;
 dreamember::GeoPoint *g_dragPoint = nullptr;    // 当前被单指拖动的自由点（NAPI 侧持有，跨调用有效）
 dreamember::GeoNumeric *g_dragSlider = nullptr; // N5 当前被拖动的滑动条
 dreamember::GeoPoint *g_dragPoint3D = nullptr;  // 1.0.8.1 当前被拖动的三维自由点
+dreamember::GeoElement *g_dragObj3D = nullptr;  // 1.1.3.8 当前被拖动的三维非点对象（球/面/实体）
 
 std::string NapiToString(napi_env env, napi_value v)
 {
@@ -227,6 +228,7 @@ napi_value KernelEndDrag(napi_env env, napi_callback_info)
     g_dragPoint = nullptr;
     g_dragSlider = nullptr;
     g_dragPoint3D = nullptr;
+    g_dragObj3D = nullptr;
     napi_value undef;
     napi_get_undefined(env, &undef);
     return undef;
@@ -317,7 +319,9 @@ napi_value Kernel3DPan(napi_env env, napi_callback_info info)
     return ToNapi(env, RenderFrame3D());
 }
 
-// kernel3DPick(px, py): string — 命中三维自由点则记住并返回 "+|label"，否则 "-|"
+// kernel3DPick(px, py): string — 命中三维自由点则记住并返回 "+|label"；
+// 1.1.3.8 起点未命中回退可拖非点对象（pickDrag3D：球/面/实体，点优先），
+// 否则 "-|"
 napi_value Kernel3DPick(napi_env env, napi_callback_info info)
 {
     size_t argc = 2;
@@ -330,8 +334,15 @@ napi_value Kernel3DPick(napi_env env, napi_callback_info info)
     double px = 0, py = 0;
     napi_get_value_double(env, argv[0], &px);
     napi_get_value_double(env, argv[1], &py);
+    g_dragPoint3D = nullptr;
+    g_dragObj3D = nullptr;
     g_dragPoint3D = g_kernel.pickPoint3D(px, py);
     if (g_dragPoint3D) return ToNapi(env, "+|" + g_dragPoint3D->label);
+    dreamember::GeoElement *o = g_kernel.pickDrag3D(px, py);
+    if (o) {
+        g_dragObj3D = o;
+        return ToNapi(env, "+|" + o->label);
+    }
     return ToNapi(env, "-|");
 }
 
@@ -357,7 +368,8 @@ napi_value Kernel3DPickSel(napi_env env, napi_callback_info info)
     return ToNapi(env, "-|");
 }
 
-// kernel3DDragPoint(dx, dy): string — 拖动已拾取三维点（视平面内位移），返回重绘帧
+// kernel3DDragPoint(dx, dy): string — 拖动已拾取目标（1.1.3.8 起点优先、
+// 非点对象球/面/实体回退；视平面内位移），返回重绘帧
 napi_value Kernel3DDragPoint(napi_env env, napi_callback_info info)
 {
     size_t argc = 2;
@@ -372,6 +384,10 @@ napi_value Kernel3DDragPoint(napi_env env, napi_callback_info info)
     napi_get_value_double(env, argv[1], &dy);
     if (g_dragPoint3D) {
         g_kernel.movePoint3D(g_dragPoint3D, dx, dy);
+        return ToNapi(env, RenderFrame3D());
+    }
+    if (g_dragObj3D) {
+        g_kernel.moveObject3D(g_dragObj3D, dx, dy);
         return ToNapi(env, RenderFrame3D());
     }
     return ToNapi(env, "-|");

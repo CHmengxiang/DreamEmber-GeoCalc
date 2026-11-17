@@ -106,6 +106,17 @@ public:
     GeoElement *pickObject3D(double px, double py);
     // 3D 点拖动（屏幕位移 → 视平面内世界位移；仅自由三维点）
     void movePoint3D(GeoPoint *p, double dxPx, double dyPx);
+    // 1.1.3.8 非点对象可拖判定：球=自由心或字面量心；面/实体=inputs 存在
+    // 自由三维点（隐式方程平面/字面量实体 calc 闭包静态 → 不可拖，GGB
+    // 依赖对象口径）。其他类型一律 false
+    bool canDragObject3D(GeoElement *g);
+    // 1.1.3.8 非点对象拖动拾取：pickObject3D 命中且实际可拖（球/面/实体），
+    // 否则 nullptr（Down 探测回落旋转态）
+    GeoElement *pickDrag3D(double px, double py);
+    // 1.1.3.8 拖动非点对象（视平面内位移）：球拖心（字面量心平移 image
+    // 缓存）/面与实体平移其 inputs 中的自由三维点（多边形输入下钻顶点，
+    // GGB 拖多边形语义：只挪自由点，形状随闭包重算跟随）
+    void moveObject3D(GeoElement *g, double dxPx, double dyPx);
     void resetView3D() { view3d.reset(); }
 
     // 命中测试：找像素 (px,py) 附近的可拖动自由点；返回 nullptr 表示无。

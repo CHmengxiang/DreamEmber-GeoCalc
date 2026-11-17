@@ -10855,6 +10855,104 @@ void Kernel::movePoint3D(GeoPoint *p, double dxPx, double dyPx)
 }
 
 namespace {
+// 1.1.3.8 非点对象拖动：收集 inputs 中的自由三维点（多边形输入下钻一层
+// 顶点——GGB 拖多边形语义：依附其上的自由点整体平移）；去重保持出现序
+void CollectFreeInputPoints(GeoElement *g, std::vector<GeoPoint *> &out)
+{
+    auto push = [&out](GeoPoint *p) {
+        if (!p || !p->isFree || !p->is3D || p->path) return;
+        for (GeoPoint *q : out) {
+            if (q == p) return;
+        }
+        out.push_back(p);
+    };
+    for (GeoElement *in : g->inputs) {
+        if (!in) continue;
+        if (in->type() == GeoType::Point) {
+            push(static_cast<GeoPoint *>(in));
+        } else if (in->type() == GeoType::Polygon) {
+            for (GeoPoint *p : static_cast<GeoPolygon *>(in)->verts) push(p);
+        }
+    }
+}
+}
+
+// 1.1.3.8 非点对象可拖判定：球=自由心或字面量心；面/实体=inputs 存在自由
+// 三维点。隐式方程平面（z=k、x+y+z=d 等闭包重解式）与全字面量实体 calc
+// 静态，拖了会被重算冲回 → 一律不可拖（GGB 依赖对象口径）
+bool Kernel::canDragObject3D(GeoElement *g)
+{
+    if (!g) return false;
+    switch (g->type()) {
+    case GeoType::Sphere: {
+        GeoSphere *sp = static_cast<GeoSphere *>(g);
+        if (sp->cImage) return true;
+        return sp->center && sp->center->isFree && sp->center->is3D
+               && !sp->center->path;
+    }
+    case GeoType::Plane:
+    case GeoType::Solid: {
+        std::vector<GeoPoint *> pts;
+        CollectFreeInputPoints(g, pts);
+        return !pts.empty();
+    }
+    default:
+        return false;
+    }
+}
+
+// 1.1.3.8 非点对象拖动拾取：复用 pickObject3D 命中（球剪影盘/面裁剪盘/
+// 实体面强命中语义一致），过滤出实际可拖者。不可拖命中返回 nullptr——
+// Down 探测回落旋转态（GGB：拖不动对象空白处=转视角）
+GeoElement *Kernel::pickDrag3D(double px, double py)
+{
+    GeoElement *o = pickObject3D(px, py);
+    return canDragObject3D(o) ? o : nullptr;
+}
+
+// 1.1.3.8 拖动非点对象：球拖心/面与实体平移自由基准点。位移统一走
+// dragDelta（视平面内，与拖点同口径——拖的就是对象自身，深度不变）
+void Kernel::moveObject3D(GeoElement *g, double dxPx, double dyPx)
+{
+    if (!canDragObject3D(g)) return;
+    double wx, wy, wz;
+    view3d.dragDelta(dxPx, dyPx, wx, wy, wz);
+    if (!std::isfinite(wx) || !std::isfinite(wy) || !std::isfinite(wz)) return;
+    switch (g->type()) {
+    case GeoType::Sphere: {
+        GeoSphere *sp = static_cast<GeoSphere *>(g);
+        if (sp->cImage) {
+            // 字面量心 Sphere((x,y,z), …)：无 calc（静态球），平移 image
+            // 缓存即持久（过点/半径引读 ccx()/radius 不受影响）
+            sp->icx += wx;
+            sp->icy += wy;
+            sp->icz += wz;
+        } else {
+            sp->center->x += wx;
+            sp->center->y += wy;
+            sp->center->z += wz;
+        }
+        recomputeAll();
+        return;
+    }
+    case GeoType::Plane:
+    case GeoType::Solid: {
+        std::vector<GeoPoint *> pts;
+        CollectFreeInputPoints(g, pts);
+        for (GeoPoint *p : pts) {
+            p->x += wx;
+            p->y += wy;
+            p->z += wz;
+        }
+        recomputeAll();
+        return;
+    }
+    default:
+        return;
+    }
+}
+
+namespace {
 // 前置声明：CubeClipPlane 定义在 render3D 前（匿名命名空间同 TU 共享）
 void CubeClipPlane(double nx, double ny, double nz, double dd,
                    std::vector<double> &vx, std::vector<double> &vy,

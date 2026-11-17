@@ -61,6 +61,9 @@ export struct View3D {
   private tapMoved: boolean = false;
   private downX: number = 0;
   private downY: number = 0;
+  // 1.1.3.8 拖动撤销打点（CanvasStage 同款）：首次实际移动前压快照，
+  // 整段拖动一步（按下未动不留步）；点与非点对象拖动共用
+  private dragUndoMarked: boolean = false;
   // 鼠标滚轮（onAxisEvent）：UPDATE 事件间的垂直轴值差
   private axisLastY: number = 0;
 
@@ -278,17 +281,19 @@ export struct View3D {
         this.onCommitPending();
         this.onDismissKeyboard();
         if (ev.touches.length === 1) {
-          this.mode = 2;   // 待旋转（Down 先探点：命中三维点则升级拖点）
+          this.mode = 2;   // 待旋转（Down 先探点：命中三维点/可拖非点对象则升级拖动）
           this.lastX = ev.touches[0].x;
           this.lastY = ev.touches[0].y;
           this.downX = ev.touches[0].x;
           this.downY = ev.touches[0].y;
           this.tapMoved = false;
+          this.dragUndoMarked = false;
           const p = this.toPx(ev.touches[0].x, ev.touches[0].y);
           const hit: string = dreamemberKernel.kernel3DPick(p[0], p[1]);
           if (hit.startsWith('+|') && this.tool === '') {
-            this.mode = 1;   // 拖三维点（kernel 内已记住命中点）；工具态不
-                             // 升级——点按须交给 kernelToolTap3D 拾取
+            this.mode = 1;   // 拖动（点或球/面/实体，1.1.3.8）：kernel 内已
+                             // 记住命中目标；工具态不升级——点按须交给
+                             // kernelToolTap3D 拾取
           }
         } else if (ev.touches.length >= 2) {
           this.mode = 3;   // 双指：捏合缩放 + 质心拖动平移（GGB 3D 口径）
@@ -337,6 +342,11 @@ export struct View3D {
         this.lastX = ev.touches[0].x;
         this.lastY = ev.touches[0].y;
         if (this.mode === 1) {
+          if (!this.dragUndoMarked) {
+            // 首次实际移动前压撤销快照（整段拖动一步；按下未动不留步）
+            this.dragUndoMarked = true;
+            dreamemberKernel.kernelPushUndo();
+          }
           const dpx = this.toPx(dx, dy);
           const frame = dreamemberKernel.kernel3DDragPoint(dpx[0], dpx[1]);
           if (frame !== '-|') {
@@ -360,8 +370,8 @@ export struct View3D {
           if (this.tool !== '') {
             this.onToolResult(dreamemberKernel.kernelToolTap3D(p[0], p[1]));
           } else {
-            // 1.1.3.5 选中走 PickSel（点优先回退非点对象）；Down 的拖点
-            // 升级仍用 kernel3DPick 点专用口径，非点对象不再抢占拖点模式
+            // 1.1.3.5 选中走 PickSel（点优先回退非点对象）；Down 的拖动升级
+            // 仍用 kernel3DPick（点优先回退可拖非点对象，1.1.3.8）
             const hit: string = dreamemberKernel.kernel3DPickSel(p[0], p[1]);
             if (hit.startsWith('+|')) {
               this.onSelectLabel(hit.substring(2));
