@@ -1110,6 +1110,44 @@ export struct ToolsPanel {
             .borderRadius(10)
             .backgroundColor(this.tool === 'angle3D' ? Theme.keyBg(this.dark) : Color.Transparent)
             .onClick(() => this.onSetTool('angle3D'))
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'octahedron3D', dark: this.dark, selected: this.tool === 'octahedron3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'octahedron3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('正八面体（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'octahedron3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'octahedron3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('octahedron3D'))
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'icosahedron3D', dark: this.dark, selected: this.tool === 'icosahedron3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'icosahedron3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('正二十面体（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'icosahedron3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'icosahedron3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('icosahedron3D'))
           }
           .width('100%')
         }

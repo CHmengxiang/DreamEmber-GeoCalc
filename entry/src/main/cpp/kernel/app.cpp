@@ -4564,9 +4564,10 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             return true;
         }
     }
-    if ((cmdLower == "tetrahedron" || cmdLower == "cube") && a.size() == 2) {
-        // 1.1.3.9 正多面体两点式（GGB 口径）：Tetrahedron(A,B)=AB 为一边的
-        // 正四面体、Cube(A,B)=AB 为一边的正方体。第三底顶 C=A+Rpθ(u)——
+    if ((cmdLower == "tetrahedron" || cmdLower == "cube"
+         || cmdLower == "octahedron" || cmdLower == "icosahedron") && a.size() == 2) {
+        // 1.1.3.9/1.1.3.14 正多面体两点式（GGB 口径）：Tetrahedron/Cube/
+        // Octahedron/Icosahedron——AB 为一边。第三底顶 C=A+Rpθ(u)——
         // u=B−A 绕**⊥u 轴** p 旋 θ（60°/90°，p=ẑ 在 ⊥u 平面的投影，u∥ẑ
         // 退化取 x̂）：旋转保长且 |u−Rpθ(u)|=|u|，ABC 恒等边/正方形（斜 AB
         // 也正则；水平 AB 时 p=ẑ 与 GGB z 轴构造一致）。拔高方向
@@ -4586,8 +4587,10 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         if (c1.ref) sd->inputs.push_back(c1.ref);
         sd->cmdName = isCube ? "Cube" : "Tetrahedron";
         sd->cmdArgs = a;
+        const bool isOcta = (cmdLower == "octahedron");
+        const bool isIco = (cmdLower == "icosahedron");
         const CmdPt C0 = c0, C1 = c1;
-        sd->calc = [C0, C1, isCube](GeoSolid *S) {
+        sd->calc = [C0, C1, isCube, isOcta, isIco](GeoSolid *S) {
             S->vx.clear();
             S->vy.clear();
             S->vz.clear();
@@ -4642,7 +4645,87 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             nx3 /= nl;
             ny3 /= nl;
             nz3 /= nl;
-            if (!isCube) {
+            if (isOcta || isIco) {
+                // 1.1.3.14 正八面体/正二十面体：以面 ABC（⊥u 构造的等边三
+                // 角形，n̂=p̂ 拔高方向）为基准面。八面体：对面顶点 = 2O−V
+                //（O=面质心+n̂·内射径 a√6/6），三分部邻接 8 面；二十面体：
+                // 12 顶点规范表（金比 φ，边 2 的标准坐标经固定正交架映射到
+                // 局部 (û, p̂×û, p̂)，面 ABC 顶点 (0,0,0)/(a,0,0)/(a/2,√3a/2,0)），
+                // 20 面经典面表。体积公式：√2a³/3、(5/12)(3+√5)a³
+                double vxL[12], vyL[12], vzL[12];
+                int nv = 0;
+                if (isOcta) {
+                    const double hh = el * 0.408248290463863;   // √6/6
+                    const double ox3 = (ax + bx + cx3) / 3.0 + nx3 * hh;
+                    const double oy3 = (ay + by + cy3) / 3.0 + ny3 * hh;
+                    const double oz3 = (az + bz + cz3) / 3.0 + nz3 * hh;
+                    const double vvx[6] = { ax, bx, cx3, 2.0 * ox3 - ax,
+                                            2.0 * ox3 - bx, 2.0 * ox3 - cx3 };
+                    const double vvy[6] = { ay, by, cy3, 2.0 * oy3 - ay,
+                                            2.0 * oy3 - by, 2.0 * oy3 - cy3 };
+                    const double vvz[6] = { az, bz, cz3, 2.0 * oz3 - az,
+                                            2.0 * oz3 - bz, 2.0 * oz3 - cz3 };
+                    for (int i = 0; i < 6; ++i) {
+                        vxL[i] = vvx[i];
+                        vyL[i] = vvy[i];
+                        vzL[i] = vvz[i];
+                    }
+                    nv = 6;
+                    // 三分部面表：(A,A')(B,B')(C,C') 各取一（0/3、1/4、
+                    // 2/5 为对径对——同对面绝不共面）
+                    const int fs[8][3] = { {0,1,2}, {0,1,5}, {0,4,2}, {0,4,5},
+                                           {3,1,2}, {3,1,5}, {3,4,2}, {3,4,5} };
+                    for (const auto &f : fs) {
+                        S->faces.push_back({ f[0], f[1], f[2] });
+                    }
+                } else {
+                    // 二十面体：规范 12 顶点（边 2，φ=(1+√5)/2）→ 局部架
+                    const double ph = 1.618033988749895;
+                    const double ph1 = ph - 1.0;
+                    const double sq3 = sqrt(3.0);
+                    const double CANS[12][3] = {
+                        { 0, 1, ph }, { 0, -1, ph }, { 0, 1, -ph },
+                        { 0, -1, -ph }, { 1, ph, 0 }, { -1, ph, 0 },
+                        { 1, -ph, 0 }, { -1, -ph, 0 }, { ph, 0, 1 },
+                        { ph, 0, -1 }, { -ph, 0, 1 }, { -ph, 0, -1 }
+                    };
+                    const double sc = el / 2.0;
+                    for (int i = 0; i < 12; ++i) {
+                        const double dxv = CANS[i][0];
+                        const double dyv = CANS[i][1] - 1.0;
+                        const double dzv = CANS[i][2] - ph;
+                        vxL[i] = sc * (-dyv);
+                        vyL[i] = sc * (ph * dxv - ph1 * dzv) / sq3;
+                        vzL[i] = sc * (ph1 * dxv + ph * dzv) / sq3;
+                    }
+                    nv = 12;
+                    const int fs[20][3] = {
+                        { 5, 10, 0 }, { 5, 0, 4 }, { 5, 4, 2 }, { 5, 2, 11 },
+                        { 5, 11, 10 }, { 4, 0, 8 }, { 0, 10, 1 }, { 10, 11, 7 },
+                        { 11, 2, 3 }, { 2, 4, 9 }, { 6, 8, 1 }, { 6, 1, 7 },
+                        { 6, 7, 3 }, { 6, 3, 9 }, { 6, 9, 8 }, { 1, 8, 0 },
+                        { 7, 1, 10 }, { 3, 7, 11 }, { 9, 3, 2 }, { 8, 9, 4 }
+                    };
+                    for (const auto &f : fs) {
+                        S->faces.push_back({ f[0], f[1], f[2] });
+                    }
+                }
+                // 局部架映射：x̂=û、ŷ=p̂×û、ẑ=p̂（面 ABC 局部 (0,0,0)/
+                // (a,0,0)/(a/2,√3a/2,0) 恒成立）
+                const double ux2 = ux / el, uy2 = uy / el, uz2 = uz / el;
+                const double zx2 = nx3, zy2 = ny3, zz2 = nz3;   // p̂
+                const double yx2 = uy2 * zz2 - uz2 * zy2;
+                const double yy2 = uz2 * zx2 - ux2 * zz2;
+                const double yz2 = ux2 * zy2 - uy2 * zx2;
+                for (int i = 0; i < nv; ++i) {
+                    S->vx.push_back(ax + ux2 * vxL[i] + yx2 * vyL[i]
+                                    + zx2 * vzL[i]);
+                    S->vy.push_back(ay + uy2 * vxL[i] + yy2 * vyL[i]
+                                    + zy2 * vzL[i]);
+                    S->vz.push_back(az + uz2 * vxL[i] + yz2 * vyL[i]
+                                    + zz2 * vzL[i]);
+                }
+            } else if (!isCube) {
                 // 正四面体：4 顶 4 面，锥顶 = 底面质心 + n̂·a·√6/3
                 const double hx = (ax + bx + cx3) / 3.0;
                 const double hy = (ay + by + cy3) / 3.0;
@@ -6629,6 +6712,59 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         return true;
     }
     if (cmdLower == "rotate" && a.size() == 3) {
+        // 1.1.3.14 Rotate(对象, 角度, 轴线)——轴线为 Line3/线段/射线（3D）
+        // 时绕轴 Rodrigues 旋转（GGB Rotate(obj, angle, line) 口径）
+        GeoElement *obj = lookup(a[0]);
+        GeoElement *axis = lookup(a[2]);
+        GeoNumeric *angObj = dynamic_cast<GeoNumeric *>(lookup(a[1]));
+        double theta = 0;
+        const bool hasTheta = angObj != nullptr || numArg(a[1], theta);
+        const bool axLine = obj && axis && hasTheta && ElementLives3D(axis)
+            && (dynamic_cast<GeoLine3 *>(axis) || dynamic_cast<GeoSegment *>(axis)
+                || dynamic_cast<GeoRay *>(axis));
+        if (axLine) {
+            GeoElement *axE = axis;
+            GeoNumeric *an = angObj;
+            const double th0 = theta;
+            made = makeImage3D(obj, "Rotate", a,
+                               [axE, an, th0](double x, double y, double z,
+                                              double &ox, double &oy,
+                                              double &oz) {
+                double axx, axy, axz, bxx, bxy, bxz;
+                if (GeoLine3 *l3 = dynamic_cast<GeoLine3 *>(axE)) {
+                    axx = l3->ex1(); axy = l3->ey1(); axz = l3->ez1();
+                    bxx = l3->ex2(); bxy = l3->ey2(); bxz = l3->ez2();
+                } else if (GeoSegment *sg = dynamic_cast<GeoSegment *>(axE)) {
+                    axx = sg->ex1(); axy = sg->ey1(); axz = sg->ez1();
+                    bxx = sg->ex2(); bxy = sg->ey2(); bxz = sg->ez2();
+                } else {
+                    GeoRay *ry = dynamic_cast<GeoRay *>(axE);
+                    axx = ry->ex1(); axy = ry->ey1(); axz = ry->ez1();
+                    bxx = ry->ex2(); bxy = ry->ey2(); bxz = ry->ez2();
+                }
+                const double dx = bxx - axx, dy = bxy - axy, dz = bxz - axz;
+                const double dl = sqrt(dx * dx + dy * dy + dz * dz);
+                if (!(dl > 1e-12)) { ox = x; oy = y; oz = z; return; }
+                const double ux = dx / dl, uy = dy / dl, uz = dz / dl;
+                const double th = (an ? an->value : th0) * M_PI / 180.0;
+                const double cs = cos(th), sn = sin(th);
+                const double px = x - axx, py = y - axy, pz = z - axz;
+                const double crx = uy * pz - uz * py;
+                const double cry = uz * px - ux * pz;
+                const double crz = ux * py - uy * px;
+                const double dot = px * ux + py * uy + pz * uz;
+                ox = axx + px * cs + crx * sn + ux * dot * (1.0 - cs);
+                oy = axy + py * cs + cry * sn + uy * dot * (1.0 - cs);
+                oz = axz + pz * cs + crz * sn + uz * dot * (1.0 - cs);
+            }, axis);
+            if (made && angObj && angObj != axis) {
+                made->inputs.push_back(angObj);
+            }
+            if (!made) lastError = "Rotate 暂不支持该对象类型";
+            return true;
+        }
+    }
+    if (cmdLower == "rotate" && a.size() == 3) {
         // Rotate(对象, 角度°, 中心点)；角度可为数值对象（slider 驱动旋转）
         GeoElement *obj = lookup(a[0]);
         GeoPoint *center = lookupPoint(a[2]);
@@ -6652,6 +6788,70 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         if (!made) lastError = "Rotate 暂不支持该对象类型";
         return true;
     }
+    if (cmdLower == "rotate" && a.size() == 4) {
+        // 1.1.3.14 Rotate(对象, 角度°, 轴点, 轴向点)——绕空间直线 Rodrigues
+        // 旋转：p' = A + (p−A)cosθ + (û×(p−A))sinθ + û((p−A)·û)(1−cosθ)。
+        // 角度可为数值对象（slider 驱动）；轴两端 3D 点（标签或字面量）
+        GeoElement *obj = lookup(a[0]);
+        CmdPt ax0, ax1;
+        GeoNumeric *angObj = dynamic_cast<GeoNumeric *>(lookup(a[1]));
+        double theta = 0;
+        bool hasTheta = angObj != nullptr || numArg(a[1], theta);
+        bool axisOk = cmdPointArg(a[2], ax0) && (ax0.ref || ax0.lit)
+            && cmdPointArg(a[3], ax1) && (ax1.ref || ax1.lit);
+        if (!obj || !hasTheta || !axisOk) {
+            lastError = "Rotate 需要（对象, 角度, 轴点, 轴向点）且轴点须已存在";
+            made = nullptr;
+            return true;
+        }
+        const bool ax3D = (ax0.ref && ax0.ref->is3D) || ax0.lit
+            || (ax1.ref && ax1.ref->is3D) || ax1.lit;
+        if (!ax3D) {
+            lastError = "Rotate 3D 轴点须为三维点";
+            made = nullptr;
+            return true;
+        }
+        const CmdPt A0 = ax0, A1 = ax1;
+        GeoNumeric *an = angObj;
+        const double th0 = theta;
+        made = makeImage3D(obj, "Rotate", a,
+                           [A0, A1, an, th0](double x, double y, double z,
+                                             double &ox, double &oy, double &oz) {
+            double axx, axy, axz, bxx, bxy, bxz;
+            if (A0.ref) {
+                axx = A0.ref->x; axy = A0.ref->y; axz = A0.ref->z;
+            } else {
+                axx = A0.x; axy = A0.y; axz = A0.z;
+            }
+            if (A1.ref) {
+                bxx = A1.ref->x; bxy = A1.ref->y; bxz = A1.ref->z;
+            } else {
+                bxx = A1.x; bxy = A1.y; bxz = A1.z;
+            }
+            const double dx = bxx - axx, dy = bxy - axy, dz = bxz - axz;
+            const double dl = sqrt(dx * dx + dy * dy + dz * dz);
+            if (!(dl > 1e-12)) { ox = x; oy = y; oz = z; return; }
+            const double ux = dx / dl, uy = dy / dl, uz = dz / dl;
+            const double th = (an ? an->value : th0) * M_PI / 180.0;
+            const double cs = cos(th), sn = sin(th);
+            const double px = x - axx, py = y - axy, pz = z - axz;
+            const double crx = uy * pz - uz * py;
+            const double cry = uz * px - ux * pz;
+            const double crz = ux * py - uy * px;
+            const double dot = px * ux + py * uy + pz * uz;
+            ox = axx + px * cs + crx * sn + ux * dot * (1.0 - cs);
+            oy = axy + py * cs + cry * sn + uy * dot * (1.0 - cs);
+            oz = axz + pz * cs + crz * sn + uz * dot * (1.0 - cs);
+        }, angObj ? static_cast<GeoElement *>(angObj) : nullptr);
+        if (made) {
+            // 轴点入 inputs（级联删除/重算；angObj 已走 extraDep）
+            if (ax0.ref) made->inputs.push_back(ax0.ref);
+            if (ax1.ref) made->inputs.push_back(ax1.ref);
+        }
+        if (!made) lastError = "Rotate 暂不支持该对象类型";
+        return true;
+    }
+
     if (cmdLower == "reflect" && a.size() == 2) {
         // Reflect(对象, 直线) / Reflect(对象, 点) / 1.1.3.11 Reflect(对象,
         // 平面) 面镜像与 3D 点镜像
@@ -12011,9 +12211,11 @@ std::string Kernel::toolTap3D(double px, double py)
         // 既有命令面，工具零改动直接组装）
         else if (tool_ == "midpoint3D") twoCmd = "Midpoint";
         else if (tool_ == "sphere3D") twoCmd = "Sphere";
-        // 1.1.3.9 正多面体工具（两点式：AB 为一边，GGB 口径）
+        // 1.1.3.9/1.1.3.14 正多面体工具（两点式：AB 为一边，GGB 口径）
         else if (tool_ == "tetrahedron3D") twoCmd = "Tetrahedron";
         else if (tool_ == "cube3D") twoCmd = "Cube";
+        else if (tool_ == "octahedron3D") twoCmd = "Octahedron";
+        else if (tool_ == "icosahedron3D") twoCmd = "Icosahedron";
         if (twoCmd) {
             if (!hit) hit = make3D();
             if (!hit) return "err|无法在空白处建点";

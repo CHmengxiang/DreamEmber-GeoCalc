@@ -355,6 +355,22 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     seg(10, 26, 28, 8, 2);
     arcStroke(10, 26, 10, -0.79, 0, 1.8);
     dot(10, 26, 3);
+  } else if (id === 'octahedron3D') {
+    // 正八面体：菱形双锥剪影 + 中带
+    shape([21, 4, 33, 20, 21, 36, 9, 20], soft, 1.8, true);
+    seg(9, 20, 33, 20, 1.4);
+    dot(21, 4, 2.6);
+    dot(21, 36, 2.6);
+  } else if (id === 'icosahedron3D') {
+    // 正二十面体：上三角 + 中带交叉棱 + 下三角
+    shape([21, 4, 32, 12, 10, 12], soft, 1.5, true);
+    shape([21, 32, 32, 24, 10, 24], soft, 1.5, true);
+    seg(10, 12, 10, 24, 1.4);
+    seg(32, 12, 32, 24, 1.4);
+    seg(21, 4, 10, 24, 1.2);
+    seg(21, 4, 32, 24, 1.2);
+    seg(21, 32, 10, 12, 1.2);
+    seg(21, 32, 32, 12, 1.2);
   } else if (id === 'slider') {
     seg(8, 19, 34, 19, 2);
     seg(8, 15, 8, 23, 1.5);
