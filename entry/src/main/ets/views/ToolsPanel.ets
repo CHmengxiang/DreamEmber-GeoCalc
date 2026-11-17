@@ -1010,6 +1010,68 @@ export struct ToolsPanel {
             .borderRadius(10)
             .backgroundColor(this.tool === 'cube3D' ? Theme.keyBg(this.dark) : Color.Transparent)
             .onClick(() => this.onSetTool('cube3D'))
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'translate3D', dark: this.dark, selected: this.tool === 'translate3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'translate3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('平移（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'translate3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'translate3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('translate3D'))
+          }
+          .width('100%')
+          // 1.1.3.11 3D 变换一期：第五行 反射（3D）/中心对称（3D），三维组
+          // 合计 18 枚（4+4+4+4+2）
+          Row() {
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'reflect3D', dark: this.dark, selected: this.tool === 'reflect3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'reflect3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('反射（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'reflect3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'reflect3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('reflect3D'))
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'reflectPoint3D', dark: this.dark, selected: this.tool === 'reflectPoint3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'reflectPoint3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('中心对称（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'reflectPoint3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'reflectPoint3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('reflectPoint3D'))
           }
           .width('100%')
         }

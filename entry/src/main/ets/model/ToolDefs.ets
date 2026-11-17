@@ -65,7 +65,11 @@ export const TOOLS: ToolDef[] = [
   { id: 'prism3D', icon: '▱', name: '棱柱（3D）' },
   // 1.1.3.9 正多面体工具（两点式：AB 为一边，GGB 口径）
   { id: 'tetrahedron3D', icon: '◮', name: '正四面体（3D）' },
-  { id: 'cube3D', icon: '▤', name: '正方体（3D）' }
+  { id: 'cube3D', icon: '▤', name: '正方体（3D）' },
+  // 1.1.3.11 3D 变换工具（对象+基准多步拾取，makeImage3D 命令面）
+  { id: 'translate3D', icon: '»', name: '平移（3D）' },
+  { id: 'reflect3D', icon: '⇋', name: '反射（3D）' },
+  { id: 'reflectPoint3D', icon: '⇄', name: '中心对称（3D）' }
 ];
 
 // 轮 C 工具分组（上游 工具页样式）：分组头 + 每行 4 个按钮的网格。
@@ -88,7 +92,8 @@ export const TOOL_GROUPS: ToolGroup[] = [
   { name: '特殊', ids: ['tangent', 'slider'] },
   { name: '三维', ids: ['point3D', 'segment3D', 'line3D', 'ray3D', 'vector3D',
     'midpoint3D', 'sphere3D', 'plane3D', 'intersect3D', 'perpLine3D',
-    'parLine3D', 'pyramid3D', 'prism3D', 'tetrahedron3D', 'cube3D'] }
+    'parLine3D', 'pyramid3D', 'prism3D', 'tetrahedron3D', 'cube3D',
+    'translate3D', 'reflect3D', 'reflectPoint3D'] }
 ];
 
 // 按 id 查工具（选择工具的用法提示等场景）
@@ -210,6 +215,15 @@ export function toolUsage(id: string): string {
   }
   if (id === 'tetrahedron3D' || id === 'cube3D') {
     return '点选两个三维点：两点连线为一边，立体向拔高方向展开（点空白处会先建三维点）';
+  }
+  if (id === 'translate3D') {
+    return '先点选对象，再点选两点作三维向量';
+  }
+  if (id === 'reflect3D') {
+    return '先点选对象，再点选镜像平面（直线/线段作轴镜像）';
+  }
+  if (id === 'reflectPoint3D') {
+    return '先点选对象，再点选对称中心';
   }
   if (id === 'slider') {
     return '点按画布创建滑动条（−5~5），在代数区拖动驱动参数';

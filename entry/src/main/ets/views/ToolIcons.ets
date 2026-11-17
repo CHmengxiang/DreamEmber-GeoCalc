@@ -319,6 +319,27 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     seg(28, 30, 35, 23, 1.4);
     seg(17, 5, 35, 5, 1.4);
     seg(35, 5, 35, 23, 1.4);
+  } else if (id === 'translate3D') {
+    // 平移（3D）：虚线基线 + 实线位移箭头 + 立体方块终点（2D translate 语汇
+    // 加 3D 体块）
+    dash(7, 27, 30, 11, 1.4);
+    seg(10.5, 25, 22, 17.5, 2.2);
+    arrow(10.5, 25, 25.5, 15.2);
+    dot(7, 27, 3.2);
+    shape([26, 10, 34, 10, 34, 18, 26, 18], soft, 1.5, true);
+  } else if (id === 'reflect3D') {
+    // 反射（3D）：斜置镜像平面 + 两翼对称点（soft 面表平面）
+    shape([16, 6, 25, 30, 18, 32, 9, 8], soft, 1.4, true);
+    dot(4.5, 20, 3);
+    dot(37, 15, 3);
+    seg(4.5, 20, 14, 19, 1.4);
+    seg(27, 14.5, 37, 15, 1.4);
+  } else if (id === 'reflectPoint3D') {
+    // 中心对称（3D）：虚线对角 + 两端点 + 立体中心块
+    dash(6, 29, 36, 8, 1.5);
+    dot(6, 29, 3.2);
+    dot(36, 8, 3.2);
+    shape([17, 15, 25, 15, 25, 23, 17, 23], soft, 1.5, true);
   } else if (id === 'slider') {
     seg(8, 19, 34, 19, 2);
     seg(8, 15, 8, 23, 1.5);
