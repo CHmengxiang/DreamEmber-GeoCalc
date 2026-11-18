@@ -4565,19 +4565,24 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         }
     }
     if ((cmdLower == "tetrahedron" || cmdLower == "cube"
-         || cmdLower == "octahedron" || cmdLower == "icosahedron") && a.size() == 2) {
-        // 1.1.3.9/1.1.3.14 正多面体两点式（GGB 口径）：Tetrahedron/Cube/
-        // Octahedron/Icosahedron——AB 为一边。第三底顶 C=A+Rpθ(u)——
-        // u=B−A 绕**⊥u 轴** p 旋 θ（60°/90°，p=ẑ 在 ⊥u 平面的投影，u∥ẑ
-        // 退化取 x̂）：旋转保长且 |u−Rpθ(u)|=|u|，ABC 恒等边/正方形（斜 AB
-        // 也正则；水平 AB 时 p=ẑ 与 GGB z 轴构造一致）。拔高方向
-        // n̂=u×Rpθ(u) 归一，锥顶/顶面 = 沿 n̂ 偏 a·√6/3 / a。calc 闭包随
-        // A/B 现值刚体随动；零边长 → 未定义
+         || cmdLower == "octahedron" || cmdLower == "icosahedron"
+         || cmdLower == "dodecahedron") && a.size() == 2) {
+        // 1.1.3.9/1.1.3.14/1.1.3.15 正多面体两点式（GGB 口径）：Tetrahedron/
+        // Cube/Octahedron/Icosahedron/Dodecahedron——AB 为一边。第三底顶
+        // C=A+Rpθ(u)——u=B−A 绕**⊥u 轴** p 旋 θ（60°/90°，p=ẑ 在 ⊥u 平面
+        // 的投影，u∥ẑ 退化取 x̂）：旋转保长且 |u−Rpθ(u)|=|u|，ABC 恒等边/
+        // 正方形（斜 AB 也正则；水平 AB 时 p=ẑ 与 GGB z 轴构造一致）。拔高
+        // 方向 n̂=u×Rpθ(u) 归一，锥顶/顶面 = 沿 n̂ 偏 a·√6/3 / a。calc 闭包
+        // 随 A/B 现值刚体随动；零边长 → 未定义
         const bool isCube = (cmdLower == "cube");
         CmdPt c0, c1;
+        const char *polyName = isCube ? "Cube"
+            : cmdLower == "octahedron" ? "Octahedron"
+            : cmdLower == "icosahedron" ? "Icosahedron"
+            : cmdLower == "dodecahedron" ? "Dodecahedron" : "Tetrahedron";
         if (!cmdPointArg(a[0], c0) || (!c0.ref && !c0.lit)
             || !cmdPointArg(a[1], c1) || (!c1.ref && !c1.lit)) {
-            lastError = std::string(isCube ? "Cube" : "Tetrahedron")
+            lastError = std::string(polyName)
                 + " 需要（点, 点）且对象须已存在: " + a[0] + ", " + a[1];
             made = nullptr;
             return true;
@@ -4585,12 +4590,15 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         auto sd = std::make_unique<GeoSolid>();
         if (c0.ref) sd->inputs.push_back(c0.ref);
         if (c1.ref) sd->inputs.push_back(c1.ref);
-        sd->cmdName = isCube ? "Cube" : "Tetrahedron";
+        // 1.1.3.15 修复：cmdName 按类型回填（此前 octa/ico 落 "Tetrahedron"，
+        // getXml 重放会重建成四面体——XML 往返类型保持缺陷）
+        sd->cmdName = polyName;
         sd->cmdArgs = a;
         const bool isOcta = (cmdLower == "octahedron");
         const bool isIco = (cmdLower == "icosahedron");
+        const bool isDod = (cmdLower == "dodecahedron");
         const CmdPt C0 = c0, C1 = c1;
-        sd->calc = [C0, C1, isCube, isOcta, isIco](GeoSolid *S) {
+        sd->calc = [C0, C1, isCube, isOcta, isIco, isDod](GeoSolid *S) {
             S->vx.clear();
             S->vy.clear();
             S->vz.clear();
@@ -4645,14 +4653,31 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             nx3 /= nl;
             ny3 /= nl;
             nz3 /= nl;
-            if (isOcta || isIco) {
+            if (isOcta || isIco || isDod) {
                 // 1.1.3.14 正八面体/正二十面体：以面 ABC（⊥u 构造的等边三
                 // 角形，n̂=p̂ 拔高方向）为基准面。八面体：对面顶点 = 2O−V
                 //（O=面质心+n̂·内射径 a√6/6），三分部邻接 8 面；二十面体：
                 // 12 顶点规范表（金比 φ，边 2 的标准坐标经固定正交架映射到
                 // 局部 (û, p̂×û, p̂)，面 ABC 顶点 (0,0,0)/(a,0,0)/(a/2,√3a/2,0)），
-                // 20 面经典面表。体积公式：√2a³/3、(5/12)(3+√5)a³
-                double vxL[12], vyL[12], vzL[12];
+                // 20 面经典面表。体积公式：√2a³/3、(5/12)(3+√5)a³。
+                // 1.1.3.15 正十二面体走对偶构造（见下），共用本规范表
+                const double ph = 1.618033988749895;
+                static const double CANS[12][3] = {
+                    { 0, 1, 1.618033988749895 }, { 0, -1, 1.618033988749895 },
+                    { 0, 1, -1.618033988749895 }, { 0, -1, -1.618033988749895 },
+                    { 1, 1.618033988749895, 0 }, { -1, 1.618033988749895, 0 },
+                    { 1, -1.618033988749895, 0 }, { -1, -1.618033988749895, 0 },
+                    { 1.618033988749895, 0, 1 }, { 1.618033988749895, 0, -1 },
+                    { -1.618033988749895, 0, 1 }, { -1.618033988749895, 0, -1 }
+                };
+                static const int IFS20[20][3] = {
+                    { 5, 10, 0 }, { 5, 0, 4 }, { 5, 4, 2 }, { 5, 2, 11 },
+                    { 5, 11, 10 }, { 4, 0, 8 }, { 0, 10, 1 }, { 10, 11, 7 },
+                    { 11, 2, 3 }, { 2, 4, 9 }, { 6, 8, 1 }, { 6, 1, 7 },
+                    { 6, 7, 3 }, { 6, 3, 9 }, { 6, 9, 8 }, { 1, 8, 0 },
+                    { 7, 1, 10 }, { 3, 7, 11 }, { 9, 3, 2 }, { 8, 9, 4 }
+                };
+                double vxL[20], vyL[20], vzL[20];
                 int nv = 0;
                 if (isOcta) {
                     const double hh = el * 0.408248290463863;   // √6/6
@@ -4678,17 +4703,10 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                     for (const auto &f : fs) {
                         S->faces.push_back({ f[0], f[1], f[2] });
                     }
-                } else {
+                } else if (isIco) {
                     // 二十面体：规范 12 顶点（边 2，φ=(1+√5)/2）→ 局部架
-                    const double ph = 1.618033988749895;
                     const double ph1 = ph - 1.0;
                     const double sq3 = sqrt(3.0);
-                    const double CANS[12][3] = {
-                        { 0, 1, ph }, { 0, -1, ph }, { 0, 1, -ph },
-                        { 0, -1, -ph }, { 1, ph, 0 }, { -1, ph, 0 },
-                        { 1, -ph, 0 }, { -1, -ph, 0 }, { ph, 0, 1 },
-                        { ph, 0, -1 }, { -ph, 0, 1 }, { -ph, 0, -1 }
-                    };
                     const double sc = el / 2.0;
                     for (int i = 0; i < 12; ++i) {
                         const double dxv = CANS[i][0];
@@ -4699,15 +4717,111 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                         vzL[i] = sc * (ph1 * dxv + ph * dzv) / sq3;
                     }
                     nv = 12;
-                    const int fs[20][3] = {
-                        { 5, 10, 0 }, { 5, 0, 4 }, { 5, 4, 2 }, { 5, 2, 11 },
-                        { 5, 11, 10 }, { 4, 0, 8 }, { 0, 10, 1 }, { 10, 11, 7 },
-                        { 11, 2, 3 }, { 2, 4, 9 }, { 6, 8, 1 }, { 6, 1, 7 },
-                        { 6, 7, 3 }, { 6, 3, 9 }, { 6, 9, 8 }, { 1, 8, 0 },
-                        { 7, 1, 10 }, { 3, 7, 11 }, { 9, 3, 2 }, { 8, 9, 4 }
-                    };
-                    for (const auto &f : fs) {
+                    for (const auto &f : IFS20) {
                         S->faces.push_back({ f[0], f[1], f[2] });
+                    }
+                } else {
+                    // 1.1.3.15 正十二面体：对偶构造——顶点 = 二十面体 20 面
+                    // 质心（复用探针验证的 CANS/IFS20，零手抄面表），s=2/
+                    // |质心{0,10,1}−质心{1,8,0}|（相邻质心距 2φ/3 → s=3/φ）
+                    // 归一边长 2；规范棱 (−1,0,φ²)→(+1,0,φ²) 沿规范 x̂，平移
+                    // (+1,0,−φ²) 后 x̂ 即映 A→B（面 ABC 局部口径同 icosa）。
+                    // 面 = icosa 12 顶各自邻接的 5 质心按 +v̂ 环绕序（CCW=
+                    // 外法向，散度体积口径）。12 五边形 30 棱，V−E+F=2，
+                    // 体积 (15+7√5)a³/4
+                    double cxx[20], cyy[20], czz[20];
+                    for (int f = 0; f < 20; ++f) {
+                        cxx[f] = (CANS[IFS20[f][0]][0] + CANS[IFS20[f][1]][0]
+                                  + CANS[IFS20[f][2]][0]) / 3.0;
+                        cyy[f] = (CANS[IFS20[f][0]][1] + CANS[IFS20[f][1]][1]
+                                  + CANS[IFS20[f][2]][1]) / 3.0;
+                        czz[f] = (CANS[IFS20[f][0]][2] + CANS[IFS20[f][1]][2]
+                                  + CANS[IFS20[f][2]][2]) / 3.0;
+                    }
+                    const double dd01 = sqrt(
+                        (cxx[6] - cxx[15]) * (cxx[6] - cxx[15])
+                        + (cyy[6] - cyy[15]) * (cyy[6] - cyy[15])
+                        + (czz[6] - czz[15]) * (czz[6] - czz[15]));
+                    (void)dd01;   // 相邻质心距 2φ/3（校验锚定，构造用解析 s）
+                    // sc2 = 3el/(2φ)：规范棱 2φ/3 归一为 el（el 相关——拖 B
+                    // 随动全靠它；平移 el/2、el·φ/2 使 A→(0,0,0)、B→(el,0,0)）
+                    const double sc2 = 1.5 * el / ph;
+                    for (int i = 0; i < 20; ++i) {
+                        vxL[i] = sc2 * cxx[i] + el / 2.0;
+                        vyL[i] = sc2 * cyy[i];
+                        vzL[i] = sc2 * czz[i] - (ph / 2.0) * el;
+                    }
+                    nv = 20;
+                    for (int k = 0; k < 12; ++k) {
+                        int fid[5];
+                        int nf = 0;
+                        for (int f = 0; f < 20; ++f) {
+                            if (IFS20[f][0] == k || IFS20[f][1] == k
+                                || IFS20[f][2] == k) {
+                                fid[nf++] = f;
+                            }
+                        }
+                        // 5 质心按绕 +v̂_k 的 atan2 升序（CCW=外法向）
+                        const double nvx = CANS[k][0], nvy = CANS[k][1],
+                                     nvz = CANS[k][2];
+                        const double nl2 = sqrt(nvx * nvx + nvy * nvy
+                            + nvz * nvz);
+                        const double ax1 = nvx / nl2, ay1 = nvy / nl2,
+                                     az1 = nvz / nl2;
+                        double t1x, t1y, t1z;
+                        if (fabs(ax1) < 0.9) {
+                            // e1 = n̂ × x̂ = (0, az1, −ay1)
+                            t1x = 0.0;
+                            t1y = az1;
+                            t1z = -ay1;
+                        } else {
+                            // e1 = n̂ × ŷ = (−az1, 0, ax1)
+                            t1x = -az1;
+                            t1y = 0.0;
+                            t1z = ax1;
+                        }
+                        const double t1l = sqrt(t1x * t1x + t1y * t1y
+                            + t1z * t1z);
+                        t1x /= t1l;
+                        t1y /= t1l;
+                        t1z /= t1l;
+                        const double e1x = t1x, e1y = t1y, e1z = t1z;
+                        const double e2x = ay1 * t1z - az1 * t1y;
+                        const double e2y = az1 * t1x - ax1 * t1z;
+                        const double e2z = ax1 * t1y - ay1 * t1x;
+                        double mx = 0, my = 0, mz = 0;
+                        for (int j = 0; j < 5; ++j) {
+                            mx += vxL[fid[j]];
+                            my += vyL[fid[j]];
+                            mz += vzL[fid[j]];
+                        }
+                        mx /= 5.0;
+                        my /= 5.0;
+                        mz /= 5.0;
+                        double ang[5];
+                        for (int j = 0; j < 5; ++j) {
+                            const double dxp = vxL[fid[j]] - mx;
+                            const double dyp = vyL[fid[j]] - my;
+                            const double dzp = vzL[fid[j]] - mz;
+                            ang[j] = atan2(dxp * e2x + dyp * e2y + dzp * e2z,
+                                           dxp * e1x + dyp * e1y
+                                               + dzp * e1z);
+                        }
+                        // 插入排序（5 元素，按角升序）
+                        for (int j = 1; j < 5; ++j) {
+                            const double aj = ang[j];
+                            const int fj = fid[j];
+                            int i2 = j - 1;
+                            while (i2 >= 0 && ang[i2] > aj) {
+                                ang[i2 + 1] = ang[i2];
+                                fid[i2 + 1] = fid[i2];
+                                --i2;
+                            }
+                            ang[i2 + 1] = aj;
+                            fid[i2 + 1] = fj;
+                        }
+                        S->faces.push_back({ fid[0], fid[1], fid[2],
+                                             fid[3], fid[4] });
                     }
                 }
                 // 局部架映射：x̂=û、ŷ=p̂×û、ẑ=p̂（面 ABC 局部 (0,0,0)/
@@ -12216,6 +12330,7 @@ std::string Kernel::toolTap3D(double px, double py)
         else if (tool_ == "cube3D") twoCmd = "Cube";
         else if (tool_ == "octahedron3D") twoCmd = "Octahedron";
         else if (tool_ == "icosahedron3D") twoCmd = "Icosahedron";
+        else if (tool_ == "dodecahedron3D") twoCmd = "Dodecahedron";
         if (twoCmd) {
             if (!hit) hit = make3D();
             if (!hit) return "err|无法在空白处建点";

@@ -1150,6 +1150,29 @@ export struct ToolsPanel {
             .onClick(() => this.onSetTool('icosahedron3D'))
           }
           .width('100%')
+          // 1.1.3.15 正多面体三期收官：正十二面体（3D），三维组合计 23 枚
+          Row() {
+            Column({ space: 3 }) {
+              Column() {
+                ToolIcon({ tid: 'dodecahedron3D', dark: this.dark, selected: this.tool === 'dodecahedron3D' })
+              }
+              .width(42)
+              .height(36)
+              .borderRadius(8)
+              .backgroundColor(this.tool === 'dodecahedron3D'
+                ? Theme.accent(this.dark) : (this.dark ? '#2C2F34' : '#FFFFFF'))
+              Text('正十二面体（3D）')
+                .fontSize(10)
+                .fontColor(this.tool === 'dodecahedron3D' ? Theme.text(this.dark) : Theme.sub(this.dark))
+                .maxLines(1)
+            }
+            .width('25%')
+            .padding({ top: 6, bottom: 6, left: 3, right: 3 })
+            .borderRadius(10)
+            .backgroundColor(this.tool === 'dodecahedron3D' ? Theme.keyBg(this.dark) : Color.Transparent)
+            .onClick(() => this.onSetTool('dodecahedron3D'))
+          }
+          .width('100%')
         }
         .width('100%')
         .padding({ left: 8, right: 8, bottom: 8 })

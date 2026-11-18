@@ -75,7 +75,9 @@ export const TOOLS: ToolDef[] = [
   { id: 'angle3D', icon: '∡', name: '角度（3D）' },
   // 1.1.3.14 正多面体二期（两点式，GGB 口径）
   { id: 'octahedron3D', icon: '◇', name: '正八面体（3D）' },
-  { id: 'icosahedron3D', icon: '⬢', name: '正二十面体（3D）' }
+  { id: 'icosahedron3D', icon: '⬢', name: '正二十面体（3D）' },
+  // 1.1.3.15 正多面体三期收官（两点式）
+  { id: 'dodecahedron3D', icon: '⬣', name: '正十二面体（3D）' }
 ];
 
 // 轮 C 工具分组（上游 工具页样式）：分组头 + 每行 4 个按钮的网格。
@@ -100,7 +102,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
     'midpoint3D', 'sphere3D', 'plane3D', 'intersect3D', 'perpLine3D',
     'parLine3D', 'pyramid3D', 'prism3D', 'tetrahedron3D', 'cube3D',
     'translate3D', 'reflect3D', 'reflectPoint3D', 'dist3D', 'angle3D',
-    'octahedron3D', 'icosahedron3D'] }
+    'octahedron3D', 'icosahedron3D', 'dodecahedron3D'] }
 ];
 
 // 按 id 查工具（选择工具的用法提示等场景）
@@ -221,7 +223,7 @@ export function toolUsage(id: string): string {
     return '依次点选四个三维点：前三点作底面三角形，第四点定平移（向量=第四点−第一点）';
   }
   if (id === 'tetrahedron3D' || id === 'cube3D' || id === 'octahedron3D'
-    || id === 'icosahedron3D') {
+    || id === 'icosahedron3D' || id === 'dodecahedron3D') {
     return '点选两个三维点：两点连线为一边，立体向拔高方向展开（点空白处会先建三维点）';
   }
   if (id === 'translate3D') {

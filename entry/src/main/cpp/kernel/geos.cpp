@@ -323,6 +323,11 @@ std::string GeoRay::definitionText() const
 std::string GeoVector::valueText() const
 {
     if (!image && (!p1 || !p2)) return "Vector";
+    // 1.1.3.15：3D 向量值列补 z 分量（此前只显示 (x,y)）
+    if ((p1 && p1->is3D) || (p2 && p2->is3D)) {
+        return "(" + FormatNum(ex2() - ex1()) + ", " + FormatNum(ey2() - ey1())
+            + ", " + FormatNum(ez2() - ez1()) + ")";
+    }
     return "(" + FormatNum(ex2() - ex1()) + ", " + FormatNum(ey2() - ey1()) + ")";
 }
 

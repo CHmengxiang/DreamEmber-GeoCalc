@@ -371,6 +371,15 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     seg(21, 4, 32, 24, 1.2);
     seg(21, 32, 10, 12, 1.2);
     seg(21, 32, 32, 12, 1.2);
+  } else if (id === 'dodecahedron3D') {
+    // 正十二面体：五边形顶面 + 侧棱 + 底面五边形透视（1.1.3.15）
+    shape([21, 5, 33, 13, 28, 24, 14, 24, 9, 13], soft, 1.5, true);
+    seg(9, 13, 5, 26, 1.3);
+    seg(14, 24, 12, 36, 1.3);
+    seg(28, 24, 30, 36, 1.3);
+    seg(33, 13, 37, 26, 1.3);
+    seg(21, 5, 21, 29, 1.3);
+    shape([5, 26, 12, 36, 30, 36, 37, 26, 21, 29], '', 1.3, true);
   } else if (id === 'slider') {
     seg(8, 19, 34, 19, 2);
     seg(8, 15, 8, 23, 1.5);
