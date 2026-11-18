@@ -11261,6 +11261,185 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         made = std::move(n);
         return true;
     }
+    // 1.1.3.18 Volume(obj) → 数值（实体散度体积 / 球 4πr³/3 / 柱 πr²h /
+    // 锥 πr²h/3）；SurfaceArea(obj) → 数值（实体逐面 Newell 面积和 / 球
+    // 4πr² / 柱 2πr²+2πrh / 锥 πr²+πrL）；SphericalDistance(S,P,Q) →
+    // 数值（球面大圆弧长 R·2asin(d/2R)，弦长超直径钳为半大圆）
+    if (cmdLower == "volume" && a.size() == 1) {
+        GeoElement *o = lookup(a[0]);
+        if (!o) { lastError = "Volume 需要（实体/球/柱/锥）"; made = nullptr; return true; }
+        auto n = std::make_unique<GeoNumeric>();
+        n->isFree = false;
+        GeoSolid *sd = dynamic_cast<GeoSolid *>(o);
+        GeoSphere *sp = dynamic_cast<GeoSphere *>(o);
+        GeoCylinder *cy = dynamic_cast<GeoCylinder *>(o);
+        GeoCone *co = dynamic_cast<GeoCone *>(o);
+        if (sd) {
+            GeoSolid *src = sd;
+            n->calc = [src]() { return src->volume(); };
+        } else if (sp) {
+            GeoSphere *src = sp;
+            n->calc = [src]() {
+                double r = src->radius;
+                if (src->radiusNum) r = src->radiusNum->value;
+                else if (src->through) {
+                    r = sqrt(pow(src->through->x - src->ccx(), 2)
+                             + pow(src->through->y - src->ccy(), 2)
+                             + pow(src->through->z - src->ccz(), 2));
+                }
+                return 4.0 * M_PI * r * r * r / 3.0;
+            };
+        } else if (cy) {
+            GeoCylinder *src = cy;
+            n->calc = [src]() {
+                double r = src->radius;
+                if (src->radiusNum) r = src->radiusNum->value;
+                const double dx = src->tcx() - src->bcx();
+                const double dy = src->tcy() - src->bcy();
+                const double dz = src->tcz() - src->bcz();
+                const double h = sqrt(dx * dx + dy * dy + dz * dz);
+                return M_PI * r * r * h;
+            };
+        } else if (co) {
+            GeoCone *src = co;
+            n->calc = [src]() {
+                double r = src->radius;
+                if (src->radiusNum) r = src->radiusNum->value;
+                const double dx = src->avx() - src->bcx();
+                const double dy = src->avy() - src->bcy();
+                const double dz = src->avz() - src->bcz();
+                const double h = sqrt(dx * dx + dy * dy + dz * dz);
+                return M_PI * r * r * h / 3.0;
+            };
+        } else {
+            lastError = "Volume 需要（实体/球/柱/锥）";
+            made = nullptr;
+            return true;
+        }
+        n->cmd = "Volume(" + o->label + ")";
+        n->cmdName = "Volume";
+        n->cmdArgs = { a[0] };
+        n->inputs = { o };
+        n->update();
+        made = std::move(n);
+        return true;
+    }
+    if (cmdLower == "surfacearea" && a.size() == 1) {
+        GeoElement *o = lookup(a[0]);
+        if (!o) { lastError = "SurfaceArea 需要（实体/球/柱/锥）"; made = nullptr; return true; }
+        auto n = std::make_unique<GeoNumeric>();
+        n->isFree = false;
+        GeoSolid *sd = dynamic_cast<GeoSolid *>(o);
+        GeoSphere *sp = dynamic_cast<GeoSphere *>(o);
+        GeoCylinder *cy = dynamic_cast<GeoCylinder *>(o);
+        GeoCone *co = dynamic_cast<GeoCone *>(o);
+        if (sd) {
+            GeoSolid *src = sd;
+            n->calc = [src]() {
+                double tot = 0;
+                for (const auto &f : src->faces) {
+                    const size_t m = f.size();
+                    if (m < 3) continue;
+                    double ax = 0, ay = 0, az = 0;
+                    for (size_t i = 0; i < m; ++i) {
+                        const int p1 = f[i], p2 = f[(i + 1) % m];
+                        ax += src->vy[p1] * src->vz[p2]
+                            - src->vz[p1] * src->vy[p2];
+                        ay += src->vz[p1] * src->vx[p2]
+                            - src->vx[p1] * src->vz[p2];
+                        az += src->vx[p1] * src->vy[p2]
+                            - src->vy[p1] * src->vx[p2];
+                    }
+                    tot += sqrt(ax * ax + ay * ay + az * az) / 2.0;
+                }
+                return tot;
+            };
+        } else if (sp) {
+            GeoSphere *src = sp;
+            n->calc = [src]() {
+                double r = src->radius;
+                if (src->radiusNum) r = src->radiusNum->value;
+                else if (src->through) {
+                    r = sqrt(pow(src->through->x - src->ccx(), 2)
+                             + pow(src->through->y - src->ccy(), 2)
+                             + pow(src->through->z - src->ccz(), 2));
+                }
+                return 4.0 * M_PI * r * r;
+            };
+        } else if (cy) {
+            GeoCylinder *src = cy;
+            n->calc = [src]() {
+                double r = src->radius;
+                if (src->radiusNum) r = src->radiusNum->value;
+                const double dx = src->tcx() - src->bcx();
+                const double dy = src->tcy() - src->bcy();
+                const double dz = src->tcz() - src->bcz();
+                const double h = sqrt(dx * dx + dy * dy + dz * dz);
+                return 2.0 * M_PI * r * (r + h);
+            };
+        } else if (co) {
+            GeoCone *src = co;
+            n->calc = [src]() {
+                double r = src->radius;
+                if (src->radiusNum) r = src->radiusNum->value;
+                const double dx = src->avx() - src->bcx();
+                const double dy = src->avy() - src->bcy();
+                const double dz = src->avz() - src->bcz();
+                const double h = sqrt(dx * dx + dy * dy + dz * dz);
+                const double L = sqrt(r * r + h * h);
+                return M_PI * r * (r + L);
+            };
+        } else {
+            lastError = "SurfaceArea 需要（实体/球/柱/锥）";
+            made = nullptr;
+            return true;
+        }
+        n->cmd = "SurfaceArea(" + o->label + ")";
+        n->cmdName = "SurfaceArea";
+        n->cmdArgs = { a[0] };
+        n->inputs = { o };
+        n->update();
+        made = std::move(n);
+        return true;
+    }
+    if (cmdLower == "sphericaldistance" && a.size() == 3) {
+        GeoSphere *sp = dynamic_cast<GeoSphere *>(lookup(a[0]));
+        GeoPoint *p1 = lookupPoint(a[1]);
+        GeoPoint *p2 = lookupPoint(a[2]);
+        if (!sp || !p1 || !p2) {
+            lastError = "SphericalDistance 需要（球, 点, 点）";
+            made = nullptr;
+            return true;
+        }
+        GeoSphere *src = sp;
+        GeoPoint *q1 = p1, *q2 = p2;
+        auto n = std::make_unique<GeoNumeric>();
+        n->isFree = false;
+        n->calc = [src, q1, q2]() {
+            double r = src->radius;
+            if (src->radiusNum) r = src->radiusNum->value;
+            else if (src->through) {
+                r = sqrt(pow(src->through->x - src->ccx(), 2)
+                         + pow(src->through->y - src->ccy(), 2)
+                         + pow(src->through->z - src->ccz(), 2));
+            }
+            const double dx = q2->x - q1->x, dy = q2->y - q1->y,
+                         dz = q2->z - q1->z;
+            const double d = sqrt(dx * dx + dy * dy + dz * dz);
+            double arg = d / (2.0 * r);
+            if (arg > 1.0) arg = 1.0;
+            if (arg < -1.0) arg = -1.0;
+            return r * 2.0 * asin(arg);
+        };
+        n->cmd = "SphericalDistance(" + sp->label + ", " + a[1] + ", "
+            + a[2] + ")";
+        n->cmdName = "SphericalDistance";
+        n->cmdArgs = { a[0], a[1], a[2] };
+        n->inputs = { sp, q1, q2 };
+        n->update();
+        made = std::move(n);
+        return true;
+    }
     // Radius(圆) → 数值
     if (cmdLower == "radius" && a.size() == 1) {
         GeoCircle *c = dynamic_cast<GeoCircle *>(lookup(a[0]));
