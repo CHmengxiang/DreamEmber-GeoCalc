@@ -11150,9 +11150,28 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         GeoElement *o = lookup(a[0]);
         if (GeoPolygon *pg = dynamic_cast<GeoPolygon *>(o)) {
             GeoPolygon *src = pg;
+            // 1.1.3.17：三维多边形（截面 image3D 等）走 Newell 空间面积
+            //（|Σ p_i×p_{i+1}|/2，与 valueText 3D 分支同式），依随截面实时
+            // 随实体/平面变化
+            const bool poly3D = src->is3D || src->image3D;
             auto n = std::make_unique<GeoNumeric>();
             n->isFree = false;
-            n->calc = [src]() {
+            n->calc = [src, poly3D]() {
+                if (poly3D) {
+                    const size_t c = src->n3();
+                    double ax = 0, ay = 0, az = 0;
+                    for (size_t i = 0; i < c; ++i) {
+                        const size_t j = (i + 1) % c;
+                        const double px1 = src->v3x(i), py1 = src->v3y(i),
+                                     pz1 = src->v3z(i);
+                        const double qx1 = src->v3x(j), qy1 = src->v3y(j),
+                                     qz1 = src->v3z(j);
+                        ax += py1 * qz1 - pz1 * qy1;
+                        ay += pz1 * qx1 - px1 * qz1;
+                        az += px1 * qy1 - py1 * qx1;
+                    }
+                    return sqrt(ax * ax + ay * ay + az * az) / 2.0;
+                }
                 double s2 = 0;   // 鞋带公式 2 倍有向面积
                 if (src->image) {
                     size_t c = src->ivx.size();
