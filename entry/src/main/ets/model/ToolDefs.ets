@@ -77,7 +77,9 @@ export const TOOLS: ToolDef[] = [
   { id: 'octahedron3D', icon: '◇', name: '正八面体（3D）' },
   { id: 'icosahedron3D', icon: '⬢', name: '正二十面体（3D）' },
   // 1.1.3.15 正多面体三期收官（两点式）
-  { id: 'dodecahedron3D', icon: '⬣', name: '正十二面体（3D）' }
+  { id: 'dodecahedron3D', icon: '⬣', name: '正十二面体（3D）' },
+  // 1.1.3.16 旋转工具（3D）：对象→轴两点→角度弹窗（Rotate 4 参命令面）
+  { id: 'rotate3D', icon: '⟳', name: '旋转（3D）' }
 ];
 
 // 轮 C 工具分组（上游 工具页样式）：分组头 + 每行 4 个按钮的网格。
@@ -102,7 +104,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
     'midpoint3D', 'sphere3D', 'plane3D', 'intersect3D', 'perpLine3D',
     'parLine3D', 'pyramid3D', 'prism3D', 'tetrahedron3D', 'cube3D',
     'translate3D', 'reflect3D', 'reflectPoint3D', 'dist3D', 'angle3D',
-    'octahedron3D', 'icosahedron3D', 'dodecahedron3D'] }
+    'octahedron3D', 'icosahedron3D', 'dodecahedron3D', 'rotate3D'] }
 ];
 
 // 按 id 查工具（选择工具的用法提示等场景）
@@ -225,6 +227,9 @@ export function toolUsage(id: string): string {
   if (id === 'tetrahedron3D' || id === 'cube3D' || id === 'octahedron3D'
     || id === 'icosahedron3D' || id === 'dodecahedron3D') {
     return '点选两个三维点：两点连线为一边，立体向拔高方向展开（点空白处会先建三维点）';
+  }
+  if (id === 'rotate3D') {
+    return '点选对象 → 轴两点 → 输入角度（度，绕轴右手）';
   }
   if (id === 'translate3D') {
     return '先点选对象，再点选两点作三维向量';

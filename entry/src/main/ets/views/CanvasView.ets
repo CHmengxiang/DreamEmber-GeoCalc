@@ -798,7 +798,7 @@ export struct CanvasView {
   }
 
   private toolAskDefault(kind: string): string {
-    if (kind === 'rotate') {
+    if (kind === 'rotate' || kind === 'rotate3D') {
       return '45';
     }
     if (kind === 'dilate') {

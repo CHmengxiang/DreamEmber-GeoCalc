@@ -380,6 +380,14 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     seg(33, 13, 37, 26, 1.3);
     seg(21, 5, 21, 29, 1.3);
     shape([5, 26, 12, 36, 30, 36, 37, 26, 21, 29], '', 1.3, true);
+  } else if (id === 'rotate3D') {
+    // 旋转（3D）：绕轴弧+箭头（2D rotate 同语汇+轴线）
+    seg(10, 8, 10, 32, 1.4);
+    dot(10, 8, 2.6);
+    dot(10, 32, 2.6);
+    shape([16, 14, 30, 14, 33, 22, 26, 29, 14, 27], '', 1.6, false);
+    seg(33, 22, 37, 18, 1.4);
+    seg(33, 22, 29, 17, 1.4);
   } else if (id === 'slider') {
     seg(8, 19, 34, 19, 2);
     seg(8, 15, 8, 23, 1.5);

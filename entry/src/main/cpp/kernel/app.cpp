@@ -7079,6 +7079,23 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         }
         GeoPoint *cc = center;
         GeoNumeric *kn = kObj;
+        // 1.1.3.16 Dilate 3D：三维对象走 makeImage3D（C+k·(p−C)，球半径
+        // ×|k|，k 为数值对象时滑条随动）
+        if (ElementLives3D(obj)) {
+            MapFn3 map3 = [cc, kn, k](double x, double y, double z,
+                                      double &ox, double &oy, double &oz) {
+                const double f = kn ? kn->value : k;
+                ox = cc->x + f * (x - cc->x);
+                oy = cc->y + f * (y - cc->y);
+                oz = cc->z + f * (z - cc->z);
+            };
+            const RmulFn3 rm3 = [kn, k](double len) {
+                return fabs(kn ? kn->value : k) * len;
+            };
+            made = makeImage3D(obj, "Dilate", a, map3, center, kObj, rm3);
+            if (!made) lastError = "Dilate 3D 暂不支持该对象类型";
+            return true;
+        }
         MapFn map = [cc, kn, k](double x, double y) {
             double f = kn ? kn->value : k;
             return std::make_pair(cc->x + f * (x - cc->x), cc->y + f * (y - cc->y));
@@ -12500,6 +12517,35 @@ std::string Kernel::toolTap3D(double px, double py)
                 return "err|" + (lastError.empty() ? "无法平移该对象" : lastError);
             }
             r = "done|" + geos_[geos_.size() - 1]->label;
+        } else if (tool_ == "rotate3D") {
+            // 1.1.3.16 旋转工具（3D）：对象 → 轴点1 → 轴点2 → 角度弹窗 →
+            // Rotate(对象, 角度, 轴点1, 轴点2)（4 参绕轴 Rodrigues 命令面，
+            // 1.1.3.14）。轴点空白先建三维点（与 translate3D 同口径）
+            if (!toolObj_) {
+                GeoElement *o = hit ? static_cast<GeoElement *>(hit)
+                                    : pickObject3D(px, py);
+                if (!o) return "need|旋转：请点选要旋转的对象";
+                toolObj_ = o;
+                o->selected = true;
+                return "need|旋转：点选轴第一点";
+            }
+            GeoElement *first = toolObj_;
+            if (toolPts_.empty()) {
+                GeoPoint *P1 = hit ? hit : make3D();
+                if (!P1) return "err|无法在空白处建点";
+                P1->selected = true;
+                toolPts_.push_back(P1);
+                return "need|旋转：点选轴第二点";
+            }
+            GeoPoint *P2 = hit ? hit : make3D();
+            if (!P2) return "err|无法在空白处建点";
+            P2->selected = true;
+            askKind_ = "rotate3D";
+            askObj_ = first;
+            askPts_ = { toolPts_[0], P2 };
+            toolObj_ = nullptr;
+            toolPts_.clear();
+            return "ask|旋转（3D）：输入角度（度，绕轴右手，可引用滑动条）";
         } else if (tool_ == "reflectPoint3D") {
             // 中心对称工具（3D）：对象 → 对称中心（点或对象均可起手）
             if (!toolObj_) {
@@ -14044,7 +14090,9 @@ std::unique_ptr<GeoElement> Kernel::makeImage(GeoElement *obj, const std::string
 std::unique_ptr<GeoElement> Kernel::makeImage3D(GeoElement *obj, const std::string &cmd,
                                                 const std::vector<std::string> &args,
                                                 const MapFn3 &map3,
-                                                GeoElement *extraDep)
+                                                GeoElement *extraDep,
+                                                GeoElement *extraDep2,
+                                                const RmulFn3 &rmul3)
 {
     std::unique_ptr<GeoElement> made;
     if (GeoPoint *p = dynamic_cast<GeoPoint *>(obj)) {
@@ -14210,13 +14258,14 @@ std::unique_ptr<GeoElement> Kernel::makeImage3D(GeoElement *obj, const std::stri
         isp->color = sp->color;
         isp->fillAlpha = sp->fillAlpha;
         isp->cImage = true;
-        isp->calc = [sp, map3](GeoSphere *q) {
+        isp->calc = [sp, map3, rmul3](GeoSphere *q) {
             double ox, oy, oz;
             map3(sp->ccx(), sp->ccy(), sp->ccz(), ox, oy, oz);
             q->icx = ox;
             q->icy = oy;
             q->icz = oz;
-            // 等距变换半径不变（平移/镜像/中心对称）
+            // 等距变换半径不变（平移/镜像/中心对称）；1.1.3.16 Dilate 走
+            // rmul3 缩放（×|k|）
             double RR = sp->radius;
             if (sp->radiusNum) RR = sp->radiusNum->value;
             else if (sp->through) {
@@ -14224,7 +14273,7 @@ std::unique_ptr<GeoElement> Kernel::makeImage3D(GeoElement *obj, const std::stri
                           + pow(sp->through->y - sp->ccy(), 2)
                           + pow(sp->through->z - sp->ccz(), 2));
             }
-            q->radius = RR;
+            q->radius = rmul3 ? rmul3(RR) : RR;
         };
         isp->update();
         made = std::move(isp);
@@ -14258,6 +14307,7 @@ std::unique_ptr<GeoElement> Kernel::makeImage3D(GeoElement *obj, const std::stri
     }
     made->inputs = { obj };
     if (extraDep) made->inputs.push_back(extraDep);
+    if (extraDep2) made->inputs.push_back(extraDep2);
     made->cmdName = cmd;
     made->cmdArgs = args;
     return made;
@@ -14871,6 +14921,13 @@ std::string Kernel::toolParam(const std::string &v)
     std::string made;
     if (kind == "rotate") {
         if (!input("Rotate(" + askObj_->label + ", " + t + ", " + askPts_[0]->label + ")")) {
+            return "err|" + (lastError.empty() ? "无法旋转该对象" : lastError);
+        }
+        made = geos_[before]->label;
+    } else if (kind == "rotate3D") {
+        // 1.1.3.16 旋转工具（3D）完成：Rotate(对象, 角度, 轴点1, 轴点2)
+        if (!input("Rotate(" + askObj_->label + ", " + t + ", "
+                   + askPts_[0]->label + ", " + askPts_[1]->label + ")")) {
             return "err|" + (lastError.empty() ? "无法旋转该对象" : lastError);
         }
         made = geos_[before]->label;

@@ -308,13 +308,18 @@ private:
     // 1.1.3.11 三维变换像（makeImage 3D 版）：Point3D/Segment/Ray/Vector/
     // Line3/Polygon3D/Solid/Sphere/Circle3；map3=(x,y,z)→出参 (x',y',z')。
     // 线段/射线/向量像置 lives3D（2D 视图跳绘），其余类型本就 3D 专属或
-    // is3D 标记；不支持类型返回空
+    // is3D 标记；不支持类型返回空。1.1.3.16 Dilate 3D：extraDep2（第二
+    // 依赖，如因子数值对象）+ rmul3（半径类长度缩放，空=等距）
     using MapFn3 = std::function<void(double, double, double, double &,
                                       double &, double &)>;
+    using RmulFn3 = std::function<double(double)>;
     std::unique_ptr<GeoElement> makeImage3D(GeoElement *obj, const std::string &cmd,
                                             const std::vector<std::string> &args,
                                             const MapFn3 &map3,
-                                            GeoElement *extraDep = nullptr);
+                                            GeoElement *extraDep = nullptr,
+                                            GeoElement *extraDep2 = nullptr,
+                                            const RmulFn3 &rmul3
+                                                = RmulFn3());
     // 滑动条落位：按已有 slider 数堆叠（画布左上区域）
     void placeSlider(GeoNumeric *n);
 
