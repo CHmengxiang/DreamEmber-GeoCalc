@@ -611,6 +611,7 @@ double GeoSolid::volume() const
 std::string GeoSolid::valueText() const
 {
     if (!defined()) return "未定义";
+    if (openSurface) return "旋转面";
     return "体积 " + FormatNum(volume());
 }
 

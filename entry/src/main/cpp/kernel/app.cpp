@@ -3997,6 +3997,66 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         made = std::move(c);
         return true;
     }
+    // 1.1.3.19 Circle(P, Q, R) 三点式：三维点 → 空间圆 Circle3（圆心=
+    // Cramer 解三点外心，法向=(Q−P)×(R−P) 归一，半径=|P−心|），依随三点
+    // 重算；三点共线退化为 r=0。2D 点暂不支持
+    if (cmdLower == "circle" && a.size() == 3) {
+        GeoPoint *p1 = lookupPoint(a[0]);
+        GeoPoint *p2 = lookupPoint(a[1]);
+        GeoPoint *p3 = lookupPoint(a[2]);
+        if (!p1 || !p2 || !p3) {
+            lastError = "Circle 三点式需要（点, 点, 点）且对象须已存在";
+            made = nullptr;
+            return true;
+        }
+        if (!(p1->is3D && p2->is3D && p3->is3D)) {
+            lastError = "Circle 三点式暂支持三维点";
+            made = nullptr;
+            return true;
+        }
+        auto c3 = std::make_unique<GeoCircle3>();
+        GeoPoint *q1 = p1, *q2 = p2, *q3 = p3;
+        c3->calc = [q1, q2, q3](GeoCircle3 *g) {
+            const double e1x = q2->x - q1->x, e1y = q2->y - q1->y,
+                         e1z = q2->z - q1->z;
+            const double e2x = q3->x - q1->x, e2y = q3->y - q1->y,
+                         e2z = q3->z - q1->z;
+            double nxv = e1y * e2z - e1z * e2y;
+            double nyv = e1z * e2x - e1x * e2z;
+            double nzv = e1x * e2y - e1y * e2x;
+            const double nl = sqrt(nxv * nxv + nyv * nyv + nzv * nzv);
+            if (!(nl > 1e-12)) { g->r = 0; return; }
+            nxv /= nl;
+            nyv /= nl;
+            nzv /= nl;
+            // 外心 Cramer：o−P=αe1+βe2+γn̂，e1·(o−P)=|e1|²/2、e2·(o−P)=
+            // |e2|²/2 → [e1·e1, e1·e2; e1·e2, e2·e2]·[α;β]=[b1;b2]
+            const double m11 = e1x * e1x + e1y * e1y + e1z * e1z;
+            const double m12 = e1x * e2x + e1y * e2y + e1z * e2z;
+            const double m22 = e2x * e2x + e2y * e2y + e2z * e2z;
+            const double det = m11 * m22 - m12 * m12;
+            if (fabs(det) < 1e-18) { g->r = 0; return; }
+            const double b1 = m11 / 2.0;
+            const double b2 = m22 / 2.0;
+            const double al = (b1 * m22 - b2 * m12) / det;
+            const double be = (m11 * b2 - m12 * b1) / det;
+            g->cx = q1->x + al * e1x + be * e2x;
+            g->cy = q1->y + al * e1y + be * e2y;
+            g->cz = q1->z + al * e1z + be * e2z;
+            g->nx = nxv;
+            g->ny = nyv;
+            g->nz = nzv;
+            g->r = sqrt((g->cx - q1->x) * (g->cx - q1->x)
+                        + (g->cy - q1->y) * (g->cy - q1->y)
+                        + (g->cz - q1->z) * (g->cz - q1->z));
+        };
+        c3->inputs = { p1, p2, p3 };
+        c3->cmdName = "Circle";
+        c3->cmdArgs = a;
+        c3->update();
+        made = std::move(c3);
+        return true;
+    }
     // 1.0.8.1 Sphere(M, r | A)：球心 M（2D 点按 z=0 允许），半径取数值/
     // 数值引用或过点距离。渲染 lat/long 线框（render3D）。1.0.8.6 球心/过点
     // 收字面量元组（Sphere((x,y,z), r)：image 缓存中心，inputs 只挂标签端）
@@ -11438,6 +11498,113 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         n->inputs = { sp, q1, q2 };
         n->update();
         made = std::move(n);
+        return true;
+    }
+    // 1.1.3.20 Revolve(轮廓, 轴线, 角度°) → 扫掠面（旋转面，开放曲面）：
+    // 轮廓=三维多边形（闭合环，顶点标签或截面 image3D），轴=Line3；逐顶点
+    // 绕轴 Rodrigues 采样 N 档（N=clamp(ceil(|角度|/15),2,48)），相邻轮廓
+    // 边×相邻角位张四边形环带；openSurface 置位（值列"旋转面"，无体积义）。
+    // 角度可为数值对象（滑条驱动扫掠动画）
+    if (cmdLower == "revolve" && a.size() == 3) {
+        GeoPolygon *pg = dynamic_cast<GeoPolygon *>(lookup(a[0]));
+        GeoLine3 *ax = dynamic_cast<GeoLine3 *>(lookup(a[1]));
+        GeoNumeric *angObj = dynamic_cast<GeoNumeric *>(lookup(a[2]));
+        double angv = 0;
+        const bool hasAng = angObj != nullptr || numArg(a[2], angv);
+        if (!pg || !ax || !hasAng) {
+            lastError = "Revolve 需要（三维多边形, 轴线, 角度）";
+            made = nullptr;
+            return true;
+        }
+        if (!ElementLives3D(pg)) {
+            lastError = "Revolve 轮廓须为三维多边形";
+            made = nullptr;
+            return true;
+        }
+        GeoPolygon *src = pg;
+        GeoLine3 *axs = ax;
+        GeoNumeric *an = angObj;
+        const double a0 = angv;
+        auto sd = std::make_unique<GeoSolid>();
+        sd->openSurface = true;
+        sd->cmdName = "Revolve";
+        sd->cmdArgs = a;
+        sd->inputs = { src, axs };
+        if (an) sd->inputs.push_back(an);
+        sd->calc = [src, axs, an, a0](GeoSolid *S) {
+            // 轮廓顶点现值（顶点标签环或截面 image3D）
+            std::vector<double> pvx, pvy, pvz;
+            if (src->image3D) {
+                const size_t c = src->n3();
+                for (size_t i = 0; i < c; ++i) {
+                    pvx.push_back(src->v3x(i));
+                    pvy.push_back(src->v3y(i));
+                    pvz.push_back(src->v3z(i));
+                }
+            } else {
+                for (size_t i = 0; i < src->verts.size(); ++i) {
+                    pvx.push_back(src->verts[i]->x);
+                    pvy.push_back(src->verts[i]->y);
+                    pvz.push_back(src->verts[i]->z);
+                }
+            }
+            const size_t m = pvx.size();
+            if (m < 2) return;
+            const double Ax = axs->ex1(), Ay = axs->ey1(), Az = axs->ez1();
+            const double dx = axs->ex2() - Ax, dy = axs->ey2() - Ay,
+                         dz = axs->ez2() - Az;
+            const double dl = sqrt(dx * dx + dy * dy + dz * dz);
+            if (!(dl > 1e-12)) return;
+            const double ux = dx / dl, uy = dy / dl, uz = dz / dl;
+            double ang = an ? an->value : a0;
+            if (!std::isfinite(ang)) return;
+            if (ang > 360.0) ang = 360.0;
+            if (ang < -360.0) ang = -360.0;
+            int N = (int)ceil(fabs(ang) / 15.0);
+            if (N < 2) N = 2;
+            if (N > 48) N = 48;
+            // 绕轴 Rodrigues（轴向分量不变，⊥分量旋转）
+            auto rot = [&](double px, double py, double pz, double th,
+                           double &ox, double &oy, double &oz) {
+                const double dxp = px - Ax, dyp = py - Ay, dzp = pz - Az;
+                const double dp = dxp * ux + dyp * uy + dzp * uz;
+                const double pxp = dxp - dp * ux, pyp = dyp - dp * uy,
+                             pzp = dzp - dp * uz;
+                const double wx = uy * pzp - uz * pyp;
+                const double wy = uz * pxp - ux * pzp;
+                const double wz = ux * pyp - uy * pxp;
+                const double cs = cos(th), sn = sin(th);
+                ox = Ax + dp * ux + pxp * cs + wx * sn;
+                oy = Ay + dp * uy + pyp * cs + wy * sn;
+                oz = Az + dp * uz + pzp * cs + wz * sn;
+            };
+            S->vx.clear();
+            S->vy.clear();
+            S->vz.clear();
+            S->faces.clear();
+            for (int i = 0; i <= N; ++i) {
+                const double th = ang * i / N * M_PI / 180.0;
+                for (size_t j = 0; j < m; ++j) {
+                    double ox, oy, oz;
+                    rot(pvx[j], pvy[j], pvz[j], th, ox, oy, oz);
+                    S->vx.push_back(ox);
+                    S->vy.push_back(oy);
+                    S->vz.push_back(oz);
+                }
+            }
+            // 环带四边形：轮廓边 (j→j+1，闭合环绕) × 角位 (i→i+1)
+            for (int i = 0; i < N; ++i) {
+                for (size_t j = 0; j < m; ++j) {
+                    const size_t j2 = (j + 1) % m;
+                    S->faces.push_back({ (int)(i * m + j),
+                                         (int)(i * m + j2),
+                                         (int)((i + 1) * m + j2),
+                                         (int)((i + 1) * m + j) });
+                }
+            }
+        };
+        sd->update();
+        made = std::move(sd);
         return true;
     }
     // Radius(圆) → 数值

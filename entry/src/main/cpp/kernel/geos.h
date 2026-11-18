@@ -614,6 +614,7 @@ public:
     std::vector<double> vx, vy, vz;       // 顶点现值表
     std::vector<std::vector<int>> faces;  // 面索引环（凸多面体，无孔）
     double fillAlpha = 0.25;              // 面填充不透明度（遮挡因子联动）
+    bool openSurface = false;             // 1.1.3.20 扫掠面（开放曲面，无体积义）
     std::function<void(GeoSolid *)> calc;
     bool defined() const
     {
