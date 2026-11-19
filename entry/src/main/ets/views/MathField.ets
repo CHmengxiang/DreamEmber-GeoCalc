@@ -2037,6 +2037,10 @@ export struct MathField {
   // 1.2.0.1④ 光标跟随记账键：raw+光标位变化才跟滚——blink 定时器重绘
   // （键不变）与 onAreaChange 重绘不抢滚，用户手势滚动不受影响
   private followKey: string = '\u0000';
+  // 1.2.0.1ⅶ 冒烟修正：contentW @State 赋值后布局异步生效——paint 内直接
+  // scrollTo 按旧内容宽被 clamp 回 0。目标挂起，Canvas onAreaChange（新宽
+  // 已布局）时补滚
+  private pendingScroll: number = -1;
 
   // 1.2.0.1④ 光标跟随滚动：光标出视口（左右缘 ±8px 缓冲）时以最小滚动量
   // 入视（键入续尾=右跟、点按回跳=左跟、内容短于视口=不滚）。仅本组件
@@ -2060,7 +2064,16 @@ export struct MathField {
       target = Math.max(0, cx + margin - vw);
     }
     if (Math.abs(target - cur) > 0.5) {
-      this.fieldScroller.scrollTo({ xOffset: target, yOffset: 0, animation: false });
+      this.pendingScroll = target;
+    }
+  }
+
+  // 1.2.0.1④ 布局后补滚（Canvas onAreaChange 调——新 contentW 已生效）
+  private flushPendingScroll(): void {
+    if (this.pendingScroll >= 0) {
+      const t = this.pendingScroll;
+      this.pendingScroll = -1;
+      this.fieldScroller.scrollTo({ xOffset: t, yOffset: 0, animation: false });
     }
   }
   // ---- 五十八包 RaTeX 编辑行状态 ----
@@ -2551,7 +2564,10 @@ export struct MathField {
             this.ready = true;
             this.paint();
           })
-          .onAreaChange(() => this.repaint())
+          .onAreaChange(() => {
+            this.repaint();
+            this.flushPendingScroll();   // 1.2.0.1④ 新内容宽布局后补滚
+          })
       }
       .scrollable(ScrollDirection.Horizontal)
       .scrollBar(BarState.Off)

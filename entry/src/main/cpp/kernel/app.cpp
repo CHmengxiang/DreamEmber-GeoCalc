@@ -4386,8 +4386,12 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                 - q1->x * q1->x - q1->y * q1->y;
             const double m2 = q3->x * q3->x + q3->y * q3->y
                 - q1->x * q1->x - q1->y * q1->y;
-            const double ox = q1->x + (m1 * d2y - m2 * d1y) / det;
-            const double oy = q1->y + (m2 * d1x - m1 * d2x) / det;
+            // 冒烟修正（1.2.0.4）：外心方程 2·d·O=m 对绝对 O 成立，代入
+            // O=A+w 后须减 2·d·A——probe 首版全用 A=原点未暴露
+            const double b1 = m1 - 2.0 * (d1x * q1->x + d1y * q1->y);
+            const double b2 = m2 - 2.0 * (d2x * q1->x + d2y * q1->y);
+            const double ox = q1->x + (b1 * d2y - b2 * d1y) / det;
+            const double oy = q1->y + (b2 * d1x - b1 * d2x) / det;
             g->icx = ox;
             g->icy = oy;
             g->radius = sqrt((ox - q1->x) * (ox - q1->x)
@@ -4493,8 +4497,11 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                 - q1->x * q1->x - q1->y * q1->y;
             const double m2 = q3->x * q3->x + q3->y * q3->y
                 - q1->x * q1->x - q1->y * q1->y;
-            const double ox = q1->x + (m1 * d2y - m2 * d1y) / det;
-            const double oy = q1->y + (m2 * d1x - m1 * d2x) / det;
+            // 冒烟修正（1.2.0.4）：同外接圆——减 2·d·A 修正项
+            const double b1 = m1 - 2.0 * (d1x * q1->x + d1y * q1->y);
+            const double b2 = m2 - 2.0 * (d2x * q1->x + d2y * q1->y);
+            const double ox = q1->x + (b1 * d2y - b2 * d1y) / det;
+            const double oy = q1->y + (b2 * d1x - b1 * d2x) / det;
             P->x = q1->x + q2->x + q3->x - 2.0 * ox;
             P->y = q1->y + q2->y + q3->y - 2.0 * oy;
             P->z = 0;
