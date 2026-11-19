@@ -1172,6 +1172,16 @@ static napi_value RatexLayout(napi_env env, napi_callback_info info)
         return nullptr;
     }
     const std::string latex = NapiToStr(env, argv[0]);
+    // 1.2.0.1 ratex 布局规模熔断：超长 LaTeX 直接报错返回，不进
+    // ratex_parse_and_layout——§84 冒烟 THREAD_BLOCK_6S 同源栈在
+    // libratex_ffi 主线程布局；正常键入线性串经 ratexConvertLinear 展开
+    // 后远低于此阈（输入行 raw 上限 512 另有闸门，此处为全调用方兜底）
+    if (latex.size() > 8192) {
+        napi_value out;
+        napi_create_string_utf8(env, "error:latex too long",
+                                sizeof("error:latex too long") - 1, &out);
+        return out;
+    }
     int displayMode = 0;
     if (argc >= 2) {
         napi_valuetype vt = napi_undefined;

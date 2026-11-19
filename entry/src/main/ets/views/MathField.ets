@@ -2026,6 +2026,7 @@ export struct MathField {
   @State private blink: boolean = true;
   @State private contentW: number = 320;
   @State private fieldH: number = 32;
+  @State private fieldW: number = 0;    // 1.2.0.1④ 光标跟随：Scroll 视口宽
   @State private canvasH: number = 30;
   private settings: RenderingContextSettings = new RenderingContextSettings(true);
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
@@ -2033,6 +2034,35 @@ export struct MathField {
   private blinkTimer: number = -1;
   private den: number = canvasDensity();
   private fieldScroller: Scroller = new Scroller();
+  // 1.2.0.1④ 光标跟随记账键：raw+光标位变化才跟滚——blink 定时器重绘
+  // （键不变）与 onAreaChange 重绘不抢滚，用户手势滚动不受影响
+  private followKey: string = '\u0000';
+
+  // 1.2.0.1④ 光标跟随滚动：光标出视口（左右缘 ±8px 缓冲）时以最小滚动量
+  // 入视（键入续尾=右跟、点按回跳=左跟、内容短于视口=不滚）。仅本组件
+  // 光标/内容变化触发的绘制路径调用；cx 为内容坐标系 px（含 padL 衬）
+  private followCaret(cx: number): void {
+    const key = this.raw + '\u0002' + this.caret + (this.caretScript ? 's' : '');
+    if (key === this.followKey) {
+      return;
+    }
+    this.followKey = key;
+    const vw = this.fieldW;
+    if (vw <= 0) {
+      return;
+    }
+    const cur = this.fieldScroller.currentOffset().xOffset;
+    const margin = 8;
+    let target = cur;
+    if (cx - margin < cur) {
+      target = Math.max(0, cx - margin);
+    } else if (cx + margin > cur + vw) {
+      target = Math.max(0, cx + margin - vw);
+    }
+    if (Math.abs(target - cur) > 0.5) {
+      this.fieldScroller.scrollTo({ xOffset: target, yOffset: 0, animation: false });
+    }
+  }
   // ---- 五十八包 RaTeX 编辑行状态 ----
   private rtxLay: RatexLayoutResult | null = null;   // 完整原文排版结果
   private rtxKey: string = '\u0000';                 // 已试转换的 raw+深浅色键
@@ -2107,7 +2137,10 @@ export struct MathField {
   private canFieldRatex(raw: string): boolean {
     // 六十二包⑤：括号多开（sqrt( 中途态）自动补右括号显示——GGB 模板中途
     // 态即结构化渲染同语义；多闭（语法错误态）仍回旧 painter
-    if (raw.length === 0 || parenBalance(raw) < 0) {
+    // 1.2.0.1：超长原文不进 RaTeX（线性串经转换可膨胀 2-4×，napi 端 8192
+    // 熔断兜底，此处 512 与内核 inputImpl 闸门同口径）——超限走旧 painter
+    // 线性绘制，杜绝畸形长串触达 libratex 主线程布局（§84 THREAD_BLOCK_6S）
+    if (raw.length === 0 || parenBalance(raw) < 0 || raw.length > 512) {
       return false;
     }
     // 六十包②③：()/,)/(,/log( 全部放开——空参模板在转换器层出灰块占
@@ -2356,10 +2389,11 @@ export struct MathField {
     for (let i = 0; i < lay.items.length; i++) {
       ratexDrawItem(this.ctx, lay.items[i], fs, padY, color, padL);
     }
-    if (this.focused && this.blink) {
+    if (this.focused && this.caret >= 0) {
       // 六十一包②：光标盒取自探针（GGB CursorAtom 同源——当前 TeX style
       // 的竖线：脚本内引擎缩放并抬升/下沉、根号内同尺寸贴内容基线，x=真
-      // 实落点）；探针未命中回退旧二态估算（caretScript 小光标）
+      // 实落点）；探针未命中回退旧二态估算（caretScript 小光标）。
+      // 1.2.0.1④：cx 恒计算（blink=false 相位也要跟滚），blink 只管描边
       const pb = this.probeCaret(this.caret);
       let cx: number;
       let y0: number;
@@ -2377,12 +2411,15 @@ export struct MathField {
           y1 = baselineY - 0.07 * fs;
         }
       }
-      this.ctx.strokeStyle = Theme.accent(this.dark);
-      this.ctx.lineWidth = 1.5;
-      this.ctx.beginPath();
-      this.ctx.moveTo(cx, y0);
-      this.ctx.lineTo(cx, y1);
-      this.ctx.stroke();
+      if (this.blink) {
+        this.ctx.strokeStyle = Theme.accent(this.dark);
+        this.ctx.lineWidth = 1.5;
+        this.ctx.beginPath();
+        this.ctx.moveTo(cx, y0);
+        this.ctx.lineTo(cx, y1);
+        this.ctx.stroke();
+      }
+      this.followCaret(cx);
     }
     return true;
   }
@@ -2481,6 +2518,17 @@ export struct MathField {
     if (Math.abs(total - this.contentW) > 0.5) {
       this.contentW = total;
     }
+    // 1.2.0.1④ 旧 painter 路径同跟滚：caret 片（kind 3，buildDisplayAtoms
+    // 仅聚焦且 caret≥0 时发射）x 即光标内容坐标——多闭括号语法错误态、
+    // RaTeX 失败回退与超长原文（canFieldRatex 512 上限）都在此路径
+    if (this.focused && this.caret >= 0) {
+      for (let q = 0; q < lay.pieces.length; q++) {
+        if (lay.pieces[q].kind === 3) {
+          this.followCaret(lay.pieces[q].x);
+          break;
+        }
+      }
+    }
     mathDraw(this.ctx, lay.pieces, 22, Theme.text(this.dark),
       Theme.faint(this.dark), Theme.accent(this.dark),
       this.focused && this.blink, 9, k);
@@ -2518,6 +2566,11 @@ export struct MathField {
       const h = Number(n.height);
       if (h > 0 && Math.abs(h - this.fieldH) > 0.5) {
         this.fieldH = h;
+      }
+      // 1.2.0.1④ 光标跟随：视口宽（Scroll 可视宽度）入账
+      const w = Number(n.width);
+      if (w > 0 && Math.abs(w - this.fieldW) > 0.5) {
+        this.fieldW = w;
       }
     })
     .onClick((evt: ClickEvent) => {

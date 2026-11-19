@@ -1374,6 +1374,34 @@ bool Kernel::inputImpl(const std::string &srcRaw)
     src = ReplaceAns(src);
     lastError.clear();
 
+    // 1.2.0.1 输入防护双闸门（§84 冒烟附带发现：畸形超长输入主线程解析
+    // 阻塞 THREAD_BLOCK_6S，栈在 ratex_parse_and_layout + JSON 解析；本闸门
+    // 在解析前置拒，ETS 显示层另有 canFieldRatex/napi 同口径上限）。超限
+    // 直接拒绝不进解析；引号串内（Text 文本内容）括号不计嵌套
+    if (srcRaw.size() > 512) {
+        lastError = "输入过长（上限 512 字符）";
+        return false;
+    }
+    {
+        int depth = 0;
+        int maxDepth = 0;
+        bool inStr = false;
+        for (char c : srcRaw) {
+            if (c == '"') inStr = !inStr;
+            else if (!inStr) {
+                if (c == '(' || c == '[' || c == '{') {
+                    if (++depth > maxDepth) maxDepth = depth;
+                } else if (c == ')' || c == ']' || c == '}') {
+                    --depth;
+                }
+            }
+        }
+        if (maxDepth > 32) {
+            lastError = "嵌套过深（上限 32 层）";
+            return false;
+        }
+    }
+
     // 上游 快捷建点 "X(u,v)"：大写开头标识 + 两常量参数 ⇒ 改写为 "X=(u,v)"
     // 走普通赋值路径（自动获得标签冲突检测与重定义语义）
     {
