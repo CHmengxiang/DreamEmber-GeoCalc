@@ -6003,6 +6003,66 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         made = std::move(w);
         return true;
     }
+    // 1.2.0.6 Curve(x, y, z, t)：空间参数曲线——t 为同名滑条（定义域即参数
+    // 域，GGB 口径）；分量表达式 refs 模式解析（Surface 参数式同机制，
+    // t 与滑条引用经 resolver 求值）；采样缓存 update 按指纹重采样
+    if (cmdLower == "curve" && a.size() == 4) {
+        GeoNumeric *ts = dynamic_cast<GeoNumeric *>(lookup(a[3]));
+        if (!ts) {
+            lastError = "Curve 第 4 参数须为已有滑条（先建 t=Slider(...) 再 "
+                        "Curve(x(t), y(t), z(t), t)）";
+            made = nullptr;
+            return true;
+        }
+        auto cv = std::make_unique<GeoCurve3>();
+        cv->tName = a[3];
+        cv->tSlider = ts;
+        const char *compName[3] = { "x", "y", "z" };
+        std::string *compSrc[3] = { &cv->srcX, &cv->srcY, &cv->srcZ };
+        Expr *compExpr[3] = { &cv->ex, &cv->ey, &cv->ez };
+        for (int ci = 0; ci < 3; ++ci) {
+            std::string cerr2;
+            if (!compExpr[ci]->parse(a[ci], cerr2, std::string(), true)) {
+                lastError = std::string(compName[ci]) + " 分量无法解析: " + cerr2;
+                made = nullptr;
+                return true;
+            }
+            if (compExpr[ci]->containsX() || compExpr[ci]->containsY()) {
+                lastError = "分量请用参数 " + cv->tName + "，不要用 x/y";
+                made = nullptr;
+                return true;
+            }
+            *compSrc[ci] = a[ci];
+            for (const std::string &rn : compExpr[ci]->refs()) {
+                if (rn == cv->tName) continue;
+                GeoNumeric *dn = dynamic_cast<GeoNumeric *>(lookup(rn));
+                if (!dn) {
+                    lastError = "分量引用须为数值对象: " + rn;
+                    made = nullptr;
+                    return true;
+                }
+                bool seen = false;
+                for (const auto &d : cv->refDeps) {
+                    if (d.first == rn) { seen = true; break; }
+                }
+                if (!seen) {
+                    cv->refDeps.emplace_back(rn, dn);
+                    cv->inputs.push_back(dn);
+                }
+            }
+        }
+        cv->inputs.push_back(ts);
+        cv->cmdName = "Curve";
+        cv->cmdArgs = a;
+        cv->update();
+        if (!cv->ok) {
+            lastError = "曲线在参数域内存在未定义点";
+            made = nullptr;
+            return true;
+        }
+        made = std::move(cv);
+        return true;
+    }
     if (cmdLower == "angle" && a.size() == 3) {
         // Angle(A,B,C)：从 BA 逆时针到 BC 的角度（度，0..360），画布画弧
         auto pts = needPts(3);
@@ -12513,6 +12573,7 @@ void Kernel::algebraRows(std::vector<AlgebraRow> &out) const
         case GeoType::Circle3: r.type = "circle"; break;
         // 1.1.0.1 圆锥曲线独立行类型（入「圆锥曲线」分组）
         case GeoType::Conic2: r.type = "conic2"; break;   // 1.2.0.2
+        case GeoType::Curve3: r.type = "curve3"; break;   // 1.2.0.6
         case GeoType::Conic3: r.type = "conic"; break;
         case GeoType::Cone: r.type = "cone"; break;
         case GeoType::Solid: r.type = "solid"; break;
@@ -12901,6 +12962,23 @@ GeoElement *Kernel::pickObject3D(double px, double py)
                     + std::sin(t0) * e2z), sx1, sy1);
                 double d;
                 segDist(sx1, sy1, sx1, sy1, px, py, d);
+                if (d < dmin) dmin = d;
+            }
+            consider(g.get(), dmin);
+            break;
+        }
+        case GeoType::Curve3: {
+            // 1.2.0.6 空间曲线拾取：采样折线段距最近邻（投影后）
+            GeoCurve3 *cv3 = static_cast<GeoCurve3 *>(g.get());
+            if (!cv3->ok || cv3->sx.size() < 2) break;
+            double dmin = 1e9;
+            for (size_t i = 0; i + 1 < cv3->sx.size(); ++i) {
+                double ax, ay, bx, by;
+                view3d.project(cv3->sx[i], cv3->sy[i], cv3->sz[i], ax, ay);
+                view3d.project(cv3->sx[i + 1], cv3->sy[i + 1], cv3->sz[i + 1],
+                               bx, by);
+                double d;
+                segDist(ax, ay, bx, by, px, py, d);
                 if (d < dmin) dmin = d;
             }
             consider(g.get(), dmin);
@@ -14162,6 +14240,7 @@ std::string Kernel::propsOf(const std::string &label) const
     case GeoType::Vector: ty = "vector"; break;
     case GeoType::Circle: ty = "circle"; break;
     case GeoType::Conic2: ty = "conic2"; break;   // 1.2.0.2
+    case GeoType::Curve3: ty = "curve3"; break;   // 1.2.0.6
     case GeoType::Polygon: ty = "polygon"; break;
     case GeoType::Function: ty = "function"; break;
     case GeoType::List: ty = "list"; break;
@@ -17816,6 +17895,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
         case GeoType::Conic3:
         case GeoType::Cone:
         case GeoType::Solid:
+        case GeoType::Curve3:   // 1.2.0.6 空间曲线只在 render3D 绘制
             break;
         }
     }
@@ -19223,6 +19303,35 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             lb.color = cCol;
             lb.pts = { (float)(labX + 6 * us), (float)(labY - 6 * us) };
             lb.text = c3->label;
+            labelList.push_back(lb);
+            break;
+        }
+        case GeoType::Curve3: {
+            // 1.2.0.6 空间参数曲线：采样缓存折线逐段 drawSplitSeg 遮挡拆段；
+            // 标签锚中点采样
+            GeoCurve3 *cv3 = static_cast<GeoCurve3 *>(g.get());
+            if (!cv3->ok || cv3->sx.size() < 2) break;
+            const std::string vCol = ObjectColor(cv3->color, darkTheme);
+            const size_t NN = cv3->sx.size() - 1;
+            double labX = 0, labY = 0;
+            for (size_t i = 0; i < NN; ++i) {
+                drawSplitSeg(cv3->sx[i], cv3->sy[i], cv3->sz[i],
+                             cv3->sx[i + 1], cv3->sy[i + 1], cv3->sz[i + 1],
+                             vCol, cv3->lineThickness / 3.0f, nullptr);
+                if (i == NN / 2) {
+                    double ppx, ppy;
+                    proj((cv3->sx[i] + cv3->sx[i + 1]) / 2,
+                         (cv3->sy[i] + cv3->sy[i + 1]) / 2,
+                         (cv3->sz[i] + cv3->sz[i + 1]) / 2, ppx, ppy);
+                    labX = ppx;
+                    labY = ppy;
+                }
+            }
+            DrawCmd lb;
+            lb.op = DrawOp::Text;
+            lb.color = vCol;
+            lb.pts = { (float)(labX + 6 * us), (float)(labY - 6 * us) };
+            lb.text = cv3->label;
             labelList.push_back(lb);
             break;
         }
@@ -20821,6 +20930,14 @@ std::string Kernel::getXml() const
             AppendCommandXml(o, *cn);
             AppendElementHead(o, *cn, "conic2");
             AppendLineStyle(o, cn->lineThickness);
+            break;
+        }
+        case GeoType::Curve3: {
+            // 1.2.0.6 空间参数曲线：命令产物走通用重放
+            GeoCurve3 *cv3 = static_cast<GeoCurve3 *>(g);
+            AppendCommandXml(o, *cv3);
+            AppendElementHead(o, *cv3, "curve3");
+            AppendLineStyle(o, cv3->lineThickness);
             break;
         }
         }

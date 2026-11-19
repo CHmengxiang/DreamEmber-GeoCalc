@@ -12,7 +12,7 @@
 namespace dreamember {
 
 enum class GeoType { Point, Segment, Line, Ray, Vector, Circle, Conic2, Polygon, Function, Numeric, Angle, List, Text,
-                     Surface, Sphere, Cylinder, Line3, Plane, Circle3, Conic3, Cone, Solid };
+                     Surface, Sphere, Cylinder, Line3, Plane, Circle3, Conic3, Cone, Solid, Curve3 };
 
 struct GeoColor {
     int r = 0, g = 0, b = 0;
@@ -727,6 +727,42 @@ public:
             && std::isfinite(vx) && std::isfinite(vy) && std::isfinite(vz);
     }
     void update() override { if (calc) calc(this); }
+    std::string valueText() const override;
+    std::string definitionText() const override;
+};
+
+// 空间参数曲线（1.2.0.6 Curve(x,y,z,t)：t 取同名滑条定义域，GGB 口径）。
+// 三分量表达式 refs 模式解析（GeoSurface 参数式同机制），t/滑条引用经
+// resolver 求值；采样缓存表（域/表达式/引用现值指纹不变不重采样——
+// 1.1.3.21 性能口径），渲染逐段 drawSplitSeg 遮挡拆段，拾取采样最近邻
+class GeoCurve3 : public GeoElement {
+public:
+    GeoCurve3() : GeoElement(GeoType::Curve3) { color = { 0x2C, 0x6B, 0xD4 }; lineThickness = 3; }
+    std::string srcX, srcY, srcZ;    // 分量表达式原文（定义列回填）
+    Expr ex, ey, ez;
+    std::string tName = "t";
+    GeoNumeric *tSlider = nullptr;   // 定义域滑条（min/max 现值即参数域）
+    std::vector<std::pair<std::string, GeoNumeric *>> refDeps;  // 其余数值引用
+    double t0 = 0, t1 = 1;           // 域缓存（update 刷新自滑条现值）
+    // 采样缓存（update 按指纹重采样；N=192 段）
+    std::vector<double> sx, sy, sz;
+    double fkey = -1e18;             // 域+引用现值指纹
+    bool ok = false;
+    // 单参数求值：t/滑条引用按名回填（GeoSurface::evalUV 同机制）
+    void evalT(double t, double &ox, double &oy, double &oz) const
+    {
+        auto res = [this, t](const std::string &nm) -> double {
+            if (nm == tName) return t;
+            for (const auto &d : refDeps) {
+                if (d.first == nm) return d.second->value;
+            }
+            return NAN;
+        };
+        ox = ex.evalXYResolved(0.0, 0.0, res);
+        oy = ey.evalXYResolved(0.0, 0.0, res);
+        oz = ez.evalXYResolved(0.0, 0.0, res);
+    }
+    void update() override;
     std::string valueText() const override;
     std::string definitionText() const override;
 };

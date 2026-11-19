@@ -320,6 +320,58 @@ std::string GeoConic2::definitionText() const
     return std::string(kind == 0 ? "Ellipse(" : "Hyperbola(") + f1s + ", " + f2s + ", " + as + ")";
 }
 
+// ---- GeoCurve3（1.2.0.6）----
+
+void GeoCurve3::update()
+{
+    // 域刷新：t 滑条 min/max 现值（滑条改范围/动画驱动重采样）
+    if (tSlider) {
+        t0 = tSlider->smin;
+        t1 = tSlider->smax;
+    }
+    ok = t1 > t0 && std::isfinite(t0) && std::isfinite(t1);
+    if (!ok) return;
+    // 指纹：域端点 + 引用现值（表达式/滑条对象不变则不重采样）
+    double fk = t0 * 1e3 + t1 * 1e-3;
+    for (const auto &d : refDeps) fk += d.second->value * 7.0;
+    if (fabs(fk - fkey) < 1e-12 && !sx.empty()) {
+        fkey = fk;
+        return;
+    }
+    fkey = fk;
+    const int N = 192;
+    sx.clear();
+    sy.clear();
+    sz.clear();
+    sx.reserve(N + 1);
+    sy.reserve(N + 1);
+    sz.reserve(N + 1);
+    for (int i = 0; i <= N; ++i) {
+        const double t = t0 + (t1 - t0) * i / N;
+        double ox = 0, oy = 0, oz = 0;
+        evalT(t, ox, oy, oz);
+        if (!std::isfinite(ox) || !std::isfinite(oy) || !std::isfinite(oz)) {
+            ok = false;   // 未定义区：整体不渲染（上游 曲线断口语义简化）
+            return;
+        }
+        sx.push_back(ox);
+        sy.push_back(oy);
+        sz.push_back(oz);
+    }
+}
+
+std::string GeoCurve3::valueText() const
+{
+    return ok ? "空间曲线" : "undefined";
+}
+
+std::string GeoCurve3::definitionText() const
+{
+    std::string d = cmdDefText();
+    if (!d.empty()) return d;
+    return "Curve(" + srcX + ", " + srcY + ", " + srcZ + ", " + tName + ")";
+}
+
 // ---- GeoFunction ----
 
 std::string GeoFunction::valueText() const
