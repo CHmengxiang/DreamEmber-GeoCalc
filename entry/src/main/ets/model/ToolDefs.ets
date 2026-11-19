@@ -27,6 +27,8 @@ export const TOOLS: ToolDef[] = [
   { id: 'intersect', icon: '∩', name: '交点' },
   // 四十五包 路径依附点（附着/脱离点，上游 同名工具）
   { id: 'attachDetach', icon: '⌒', name: '附着/脱离点' },
+  { id: 'circumcircle', icon: '△', name: '外接圆' },
+  { id: 'incircle', icon: '◬', name: '内切圆' },
   { id: 'tangent', icon: '⊘', name: '切线' },
   { id: 'translate', icon: '»', name: '平移' },
   { id: 'reflect', icon: '⇋', name: '反射' },
@@ -99,7 +101,7 @@ export const TOOL_GROUPS: ToolGroup[] = [
   { name: '基础', ids: ['', 'point'] },
   { name: '线', ids: ['segment', 'line', 'ray', 'vector', 'perpLine', 'parLine', 'vecFromPoint', 'segLength'] },
   { name: '圆与多边形', ids: ['circle', 'ellipse', 'hyperbola', 'parabola', 'polygon', 'circleRadius'] },
-  { name: '构造', ids: ['midpoint', 'perpBisector', 'angleBisector', 'angle', 'intersect', 'angleSize', 'attachDetach'] },
+  { name: '构造', ids: ['midpoint', 'perpBisector', 'angleBisector', 'angle', 'intersect', 'angleSize', 'attachDetach', 'circumcircle', 'incircle'] },
   { name: '测量', ids: ['dist', 'area', 'slope'] },
   { name: '变换', ids: ['translate', 'reflect', 'reflectPoint', 'rotate', 'dilate'] },
   { name: '特殊', ids: ['tangent', 'slider'] },
@@ -146,6 +148,12 @@ export function toolUsage(id: string): string {
   }
   if (id === 'parabola') {
     return '先点选焦点，再点选准线（直线）';
+  }
+  if (id === 'circumcircle') {
+    return '依次点选三角形三个顶点';
+  }
+  if (id === 'incircle') {
+    return '依次点选三角形三个顶点';
   }
   if (id === 'perpBisector') {
     return '点选线段两端';

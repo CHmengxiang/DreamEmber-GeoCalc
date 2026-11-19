@@ -4359,6 +4359,153 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         extras_.push_back(std::move(mkAsym(-1)));
         return true;
     }
+    // 1.2.0.4 Circumcircle(A, B, C)：外接圆——GeoCircle image 缓存装外心
+    //（零辅助对象），calc 依随三顶点现值重解（2·d·(O−A)=|B|²−|A|² 二元
+    // Cramer）；共线退化 radius=0（渲染/拾取自然跳过）
+    if (cmdLower == "circumcircle" && a.size() == 3) {
+        GeoPoint *p1 = lookupPoint(a[0]);
+        GeoPoint *p2 = lookupPoint(a[1]);
+        GeoPoint *p3 = lookupPoint(a[2]);
+        if (!p1 || !p2 || !p3) {
+            lastError = "Circumcircle 需要（点, 点, 点）且对象须已存在";
+            made = nullptr;
+            return true;
+        }
+        auto cc = std::make_unique<GeoCircle>();
+        cc->image = true;
+        GeoPoint *q1 = p1, *q2 = p2, *q3 = p3;
+        cc->calc = [q1, q2, q3](GeoCircle *g) {
+            const double d1x = q2->x - q1->x, d1y = q2->y - q1->y;
+            const double d2x = q3->x - q1->x, d2y = q3->y - q1->y;
+            const double det = 2.0 * (d1x * d2y - d1y * d2x);
+            if (fabs(det) < 1e-12) {
+                g->radius = 0;
+                return;
+            }
+            const double m1 = q2->x * q2->x + q2->y * q2->y
+                - q1->x * q1->x - q1->y * q1->y;
+            const double m2 = q3->x * q3->x + q3->y * q3->y
+                - q1->x * q1->x - q1->y * q1->y;
+            const double ox = q1->x + (m1 * d2y - m2 * d1y) / det;
+            const double oy = q1->y + (m2 * d1x - m1 * d2x) / det;
+            g->icx = ox;
+            g->icy = oy;
+            g->radius = sqrt((ox - q1->x) * (ox - q1->x)
+                + (oy - q1->y) * (oy - q1->y));
+        };
+        cc->inputs = { p1, p2, p3 };
+        cc->cmdName = "Circumcircle";
+        cc->cmdArgs = a;
+        cc->update();
+        made = std::move(cc);
+        return true;
+    }
+    // 1.2.0.4 Incircle(A, B, C)：内切圆——image 圆心=内心（对边长加权
+    // barycentric），radius=内切半径 2·面积/周长；共线退化 radius=0
+    if (cmdLower == "incircle" && a.size() == 3) {
+        GeoPoint *p1 = lookupPoint(a[0]);
+        GeoPoint *p2 = lookupPoint(a[1]);
+        GeoPoint *p3 = lookupPoint(a[2]);
+        if (!p1 || !p2 || !p3) {
+            lastError = "Incircle 需要（点, 点, 点）且对象须已存在";
+            made = nullptr;
+            return true;
+        }
+        auto cc = std::make_unique<GeoCircle>();
+        cc->image = true;
+        GeoPoint *q1 = p1, *q2 = p2, *q3 = p3;
+        cc->calc = [q1, q2, q3](GeoCircle *g) {
+            const double e1x = q2->x - q1->x, e1y = q2->y - q1->y;
+            const double e2x = q3->x - q1->x, e2y = q3->y - q1->y;
+            const double la = sqrt((q3->x - q2->x) * (q3->x - q2->x)
+                + (q3->y - q2->y) * (q3->y - q2->y));
+            const double lb = sqrt(e2x * e2x + e2y * e2y);
+            const double lc = sqrt(e1x * e1x + e1y * e1y);
+            const double per = la + lb + lc;
+            if (!(per > 1e-12)) {
+                g->radius = 0;
+                return;
+            }
+            g->icx = (la * q1->x + lb * q2->x + lc * q3->x) / per;
+            g->icy = (la * q1->y + lb * q2->y + lc * q3->y) / per;
+            const double area2 = fabs(e1x * e2y - e1y * e2x);
+            g->radius = area2 / per;
+        };
+        cc->inputs = { p1, p2, p3 };
+        cc->cmdName = "Incircle";
+        cc->cmdArgs = a;
+        cc->update();
+        made = std::move(cc);
+        return true;
+    }
+    // 1.2.0.4 Centroid(A, B, C)：重心（依随点，均值闭包；共线仍定义）
+    if (cmdLower == "centroid" && a.size() == 3) {
+        GeoPoint *p1 = lookupPoint(a[0]);
+        GeoPoint *p2 = lookupPoint(a[1]);
+        GeoPoint *p3 = lookupPoint(a[2]);
+        if (!p1 || !p2 || !p3) {
+            lastError = "Centroid 需要（点, 点, 点）且对象须已存在";
+            made = nullptr;
+            return true;
+        }
+        auto gp = std::make_unique<GeoPoint>();
+        gp->isFree = false;
+        gp->pointSize = 4;
+        gp->color = { 0x64, 0x64, 0x64 };
+        GeoPoint *q1 = p1, *q2 = p2, *q3 = p3;
+        gp->calc = [q1, q2, q3](GeoPoint *P) {
+            P->x = (q1->x + q2->x + q3->x) / 3;
+            P->y = (q1->y + q2->y + q3->y) / 3;
+            P->z = 0;
+        };
+        gp->inputs = { p1, p2, p3 };
+        gp->cmdName = "Centroid";
+        gp->cmdArgs = a;
+        gp->update();
+        made = std::move(gp);
+        return true;
+    }
+    // 1.2.0.4 Orthocenter(A, B, C)：垂心=H=A+B+C−2·O（外心现值代入，欧拉
+    // 恒等式）；共线（外心无解）→ NaN 未定义
+    if (cmdLower == "orthocenter" && a.size() == 3) {
+        GeoPoint *p1 = lookupPoint(a[0]);
+        GeoPoint *p2 = lookupPoint(a[1]);
+        GeoPoint *p3 = lookupPoint(a[2]);
+        if (!p1 || !p2 || !p3) {
+            lastError = "Orthocenter 需要（点, 点, 点）且对象须已存在";
+            made = nullptr;
+            return true;
+        }
+        auto gp = std::make_unique<GeoPoint>();
+        gp->isFree = false;
+        gp->pointSize = 4;
+        gp->color = { 0x64, 0x64, 0x64 };
+        GeoPoint *q1 = p1, *q2 = p2, *q3 = p3;
+        gp->calc = [q1, q2, q3](GeoPoint *P) {
+            const double d1x = q2->x - q1->x, d1y = q2->y - q1->y;
+            const double d2x = q3->x - q1->x, d2y = q3->y - q1->y;
+            const double det = 2.0 * (d1x * d2y - d1y * d2x);
+            if (fabs(det) < 1e-12) {
+                P->x = P->y = NAN;
+                return;
+            }
+            const double m1 = q2->x * q2->x + q2->y * q2->y
+                - q1->x * q1->x - q1->y * q1->y;
+            const double m2 = q3->x * q3->x + q3->y * q3->y
+                - q1->x * q1->x - q1->y * q1->y;
+            const double ox = q1->x + (m1 * d2y - m2 * d1y) / det;
+            const double oy = q1->y + (m2 * d1x - m1 * d2x) / det;
+            P->x = q1->x + q2->x + q3->x - 2.0 * ox;
+            P->y = q1->y + q2->y + q3->y - 2.0 * oy;
+            P->z = 0;
+        };
+        gp->inputs = { p1, p2, p3 };
+        gp->cmdName = "Orthocenter";
+        gp->cmdArgs = a;
+        gp->update();
+        made = std::move(gp);
+        return true;
+    }
     // 1.0.8.1 Sphere(M, r | A)：球心 M（2D 点按 z=0 允许），半径取数值/
     // 数值引用或过点距离。渲染 lat/long 线框（render3D）。1.0.8.6 球心/过点
     // 收字面量元组（Sphere((x,y,z), r)：image 缓存中心，inputs 只挂标签端）
@@ -15208,9 +15355,13 @@ std::string Kernel::toolTapImpl(double wx, double wy, double px, double py)
         return "done|" + geos_[before]->label;
     }
 
-    // 三点工具：角平分线 / 角
-    if (tool_ == "angleBisector" || tool_ == "angle") {
-        const char *cmd3 = tool_ == "angle" ? "Angle" : "AngleBisector";
+    // 三点工具：角平分线 / 角 / 外接圆 / 内切圆（1.2.0.4）
+    if (tool_ == "angleBisector" || tool_ == "angle"
+        || tool_ == "circumcircle" || tool_ == "incircle") {
+        const char *cmd3 = tool_ == "angle" ? "Angle"
+            : tool_ == "circumcircle" ? "Circumcircle"
+            : tool_ == "incircle" ? "Incircle"
+            : "AngleBisector";
         if (!hit) hit = static_cast<GeoPoint *>(makeFreePoint(wx, wy));
         hit->selected = true;
         toolPts_.push_back(hit);

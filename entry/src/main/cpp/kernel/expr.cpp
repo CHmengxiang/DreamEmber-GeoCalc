@@ -308,6 +308,7 @@ bool IsCommandCallName(const std::string &n)
         // 1.2.0.2 圆锥曲线（防快捷建点改写劫持——Ellipse 大写头无 = 会被
         // 误判成建点 "Ellipse=(...)"）
         "ellipse", "hyperbola", "parabola", "asymptote",
+        "circumcircle", "incircle", "centroid", "orthocenter",   // 1.2.0.4
         "plane", "surface",     // 1.0.8.2 三维命令（Plane(1,2,3)/参数曲面同防）
         // 纯数值实参命令（1.0.8.1 补全：快捷建点改写只认「全数值参数」，
         // 这些命令首参也是数，不进名单会被劫持成建点——Normal(0,1) 两参

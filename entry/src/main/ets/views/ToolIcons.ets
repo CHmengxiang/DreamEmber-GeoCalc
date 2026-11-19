@@ -428,6 +428,26 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     ctx.strokeStyle = ink;
     ctx.stroke();
     dot(21, 10, 2.6);
+  } else if (id === 'circumcircle') {
+    // 三角形 + 外接圆（圆过三顶点）
+    ctx.beginPath();
+    ctx.arc(21, 19, 13, 0, Math.PI * 2);
+    ctx.lineWidth = 1.6;
+    ctx.strokeStyle = ink;
+    ctx.stroke();
+    shape([13, 26, 21, 9, 29, 26, 13, 26], '', 1.8, false);
+    dot(13, 26, 2.4);
+    dot(21, 9, 2.4);
+    dot(29, 26, 2.4);
+  } else if (id === 'incircle') {
+    // 三角形 + 内切圆
+    shape([13, 27, 21, 9, 29, 27, 13, 27], '', 1.8, false);
+    ctx.beginPath();
+    ctx.arc(21, 21, 5.5, 0, Math.PI * 2);
+    ctx.lineWidth = 1.8;
+    ctx.strokeStyle = ink;
+    ctx.stroke();
+    dot(21, 15.5, 2.2);
   } else {
     dot(21, 18, 4.5);
   }
