@@ -286,6 +286,40 @@ std::string GeoCircle::definitionText() const
     return "Circle";
 }
 
+// ---- GeoConic2（1.2.0.2）----
+
+std::string GeoConic2::valueText() const
+{
+    if (!ok) return "undefined";
+    if (kind == 0) return "椭圆 e=" + FormatNum(e);
+    if (kind == 1) return "双曲线 e=" + FormatNum(e);
+    return "抛物线";
+}
+
+std::string GeoConic2::definitionText() const
+{
+    std::string d = cmdDefText();
+    if (!d.empty()) return d;
+    if (kind == 2) {
+        std::string f = fImage
+            ? "(" + FormatNum(if1x) + ", " + FormatNum(if1y) + ")"
+            : (f1 ? f1->label : "?");
+        if (dirLine) return "Parabola(" + f + ", " + dirLine->label + ")";
+        return "Parabola";
+    }
+    std::string f1s = fImage
+        ? "(" + FormatNum(if1x) + ", " + FormatNum(if1y) + ")"
+        : (f1 ? f1->label : "?");
+    std::string f2s = fImage
+        ? "(" + FormatNum(if2x) + ", " + FormatNum(if2y) + ")"
+        : (f2 ? f2->label : "?");
+    std::string as;
+    if (throughPt) as = throughPt->label;
+    else if (aNum) as = aNum->label;
+    else as = FormatNum(aParam);
+    return std::string(kind == 0 ? "Ellipse(" : "Hyperbola(") + f1s + ", " + f2s + ", " + as + ")";
+}
+
 // ---- GeoFunction ----
 
 std::string GeoFunction::valueText() const

@@ -349,6 +349,9 @@ private:
     static Geometry CircleGeom(const GeoCircle &c, const EuclidianView &v);
     void appendFunctionPlot(const GeoFunction &f, std::vector<DrawCmd> &out,
                             bool sel = false) const;
+    // 1.2.0.2 圆锥曲线 2D 采样绘制（椭圆/双曲线/抛物线参数折线）
+    void appendConic2Plot(const GeoConic2 &cn, std::vector<DrawCmd> &out,
+                          bool sel = false) const;
     // 1.0.6.3 图表列表绘制（bar/hist/line/scatter/box/stem；普通列表不画）
     void appendChartPlot(const GeoList &L, std::vector<DrawCmd> &out,
                          const std::string &selHalo) const;

@@ -11,7 +11,7 @@
 
 namespace dreamember {
 
-enum class GeoType { Point, Segment, Line, Ray, Vector, Circle, Polygon, Function, Numeric, Angle, List, Text,
+enum class GeoType { Point, Segment, Line, Ray, Vector, Circle, Conic2, Polygon, Function, Numeric, Angle, List, Text,
                      Surface, Sphere, Cylinder, Line3, Plane, Circle3, Conic3, Cone, Solid };
 
 struct GeoColor {
@@ -156,6 +156,45 @@ public:
     double ccx() const { return image ? icx : center->x; }
     double ccy() const { return image ? icy : center->y; }
     void update() override;
+    std::string valueText() const override;
+    std::string definitionText() const override;
+};
+
+// 圆锥曲线 2D（1.2.0.2）：kind 0=椭圆 | 1=双曲线 | 2=抛物线。椭圆/双曲线
+// 两焦点（点引用或字面量 image 缓存）+ 半长轴 a（数值引用/字面量/过点形式
+// ——过点闭包 a=(|PF1|+|PF2|)/2 随 P 现值）；抛物线焦点 + 准线（GeoLine
+// 引用）。现值缓存 + calc 闭包（焦点/准线/滑条现值随动，GGB 同语义）。
+// 采样渲染/拾取走现值字段；未定义（椭圆 a≤c、双曲线 a≥c、抛物线 F 在准线上）
+// → ok=false 渲染跳过
+class GeoConic2 : public GeoElement {
+public:
+    GeoConic2() : GeoElement(GeoType::Conic2) { color = {0, 0, 0}; }
+    int kind = 0;                    // 0=椭圆 1=双曲线 2=抛物线
+    // 椭圆/双曲线焦点：点引用（f1/f2）或字面量 image 缓存（fImage）
+    GeoPoint *f1 = nullptr, *f2 = nullptr;
+    bool fImage = false;
+    double if1x = 0, if1y = 0, if2x = 0, if2y = 0;
+    // 半长轴 a：数值引用（aNum）或字面量（aParam）；过点形式存 throughPt
+    GeoNumeric *aNum = nullptr;
+    double aParam = 0;
+    GeoPoint *throughPt = nullptr;   // 过点形式（椭圆）：a=(|PF1|+|PF2|)/2 随现值
+    // 抛物线：焦点（同上 f1/字面量缓存）+ 准线（GeoLine 引用）
+    GeoLine *dirLine = nullptr;
+    std::function<void(GeoConic2 *)> calc;
+    // ---- 现值缓存（calc/update 填）----
+    bool ok = false;                 // 未定义 false（渲染跳过、值列「未定义」）
+    double cx = 0, cy = 0;           // 中心（抛物线=顶点）
+    double ux = 0, uy = 0;           // 主轴单位向量（椭圆/双曲线=F1→F2；抛物线=对称轴向焦点）
+    double vx = 0, vy = 0;           // 共轭方向单位向量（⊥主轴）
+    double a = 0, b = 0;             // 半轴（双曲线 b²=c²−a²）；抛物线 a 未用
+    double p = 0;                    // 抛物线焦准距（焦点到顶点 = 到准线一半）
+    double e = 0;                    // 离心率 c/a（抛物线恒 1）
+    double fx1() const { return fImage ? if1x : (f1 ? f1->x : 0); }
+    double fy1() const { return fImage ? if1y : (f1 ? f1->y : 0); }
+    double fx2() const { return fImage ? if2x : (f2 ? f2->x : 0); }
+    double fy2() const { return fImage ? if2y : (f2 ? f2->y : 0); }
+    bool defined() const { return ok; }
+    void update() override { if (calc) calc(this); }
     std::string valueText() const override;
     std::string definitionText() const override;
 };

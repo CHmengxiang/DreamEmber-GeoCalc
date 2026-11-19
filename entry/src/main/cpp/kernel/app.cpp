@@ -4085,6 +4085,222 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         made = std::move(c3);
         return true;
     }
+    // 1.2.0.2 Ellipse(F1, F2, a)：两焦点（标签点/字面量元组）+ 半长轴
+    //（数值引用/字面量/过点形式）——GGB 椭圆定义口径。a≤|F1F2|/2 → 未定义。
+    // 过点形式 a=(|PF1|+|PF2|)/2 随 P 现值（椭圆恒过 P，GGB 同语义）
+    if (cmdLower == "ellipse" && a.size() == 3) {
+        CmdPt q1, q2;
+        if (!cmdPointArg(a[0], q1)) {
+            lastError = "未找到点 " + a[0];
+            made = nullptr;
+            return true;
+        }
+        if (!cmdPointArg(a[1], q2)) {
+            lastError = "未找到点 " + a[1];
+            made = nullptr;
+            return true;
+        }
+        auto cn = std::make_unique<GeoConic2>();
+        cn->kind = 0;
+        cn->fImage = q1.lit || q2.lit;
+        cn->if1x = q1.lit ? q1.x : (q1.ref ? q1.ref->x : 0.0);
+        cn->if1y = q1.lit ? q1.y : (q1.ref ? q1.ref->y : 0.0);
+        cn->if2x = q2.lit ? q2.x : (q2.ref ? q2.ref->x : 0.0);
+        cn->if2y = q2.lit ? q2.y : (q2.ref ? q2.ref->y : 0.0);
+        cn->f1 = q1.lit ? nullptr : q1.ref;
+        cn->f2 = q2.lit ? nullptr : q2.ref;
+        GeoNumeric *an = nullptr;
+        double aLit = 0;
+        GeoPoint *tp = lookupPoint(a[2]);
+        if (tp != nullptr) {
+            cn->throughPt = tp;
+        } else if ((an = dynamic_cast<GeoNumeric *>(lookup(a[2]))) != nullptr) {
+            cn->aNum = an;
+        } else {
+            Expr re;
+            std::string err;
+            if (!re.parse(a[2], err) || re.containsX()) {
+                lastError = "半长轴不是数: " + a[2];
+                made = nullptr;
+                return true;
+            }
+            aLit = re.eval(0.0);
+            cn->aParam = aLit;
+        }
+        cn->calc = [q1, q2, an, aLit, tp](GeoConic2 *g) {
+            const double x1 = q1.lit ? q1.x : q1.ref->x;
+            const double y1 = q1.lit ? q1.y : q1.ref->y;
+            const double x2 = q2.lit ? q2.x : q2.ref->x;
+            const double y2 = q2.lit ? q2.y : q2.ref->y;
+            const double dx = x2 - x1, dy = y2 - y1;
+            const double fl = sqrt(dx * dx + dy * dy);
+            const double cc = fl / 2;
+            double av = aLit;
+            if (tp != nullptr) {
+                av = (sqrt((tp->x - x1) * (tp->x - x1) + (tp->y - y1) * (tp->y - y1))
+                    + sqrt((tp->x - x2) * (tp->x - x2) + (tp->y - y2) * (tp->y - y2))) / 2;
+            } else if (an != nullptr) {
+                av = an->value;
+            }
+            g->a = av;
+            if (!(fl > 1e-12) || !(av > cc + 1e-12)) {
+                g->ok = false;
+                return;
+            }
+            g->ok = true;
+            g->b = sqrt(av * av - cc * cc);
+            g->e = cc / av;
+            g->cx = (x1 + x2) / 2;
+            g->cy = (y1 + y2) / 2;
+            g->ux = dx / fl;
+            g->uy = dy / fl;
+            g->vx = -g->uy;
+            g->vy = g->ux;
+            g->p = 0;
+        };
+        if (q1.ref) cn->inputs.push_back(q1.ref);
+        if (q2.ref) cn->inputs.push_back(q2.ref);
+        if (tp) cn->inputs.push_back(tp);
+        if (an) cn->inputs.push_back(an);
+        cn->cmdName = "Ellipse";
+        cn->cmdArgs = a;
+        cn->update();
+        made = std::move(cn);
+        return true;
+    }
+    // 1.2.0.2 Hyperbola(F1, F2, a)：两焦点 + 实半轴——GGB 双曲线定义口径。
+    // a≥|F1F2|/2 → 未定义；b²=c²−a²，离心率 e=c/a>1
+    if (cmdLower == "hyperbola" && a.size() == 3) {
+        CmdPt q1, q2;
+        if (!cmdPointArg(a[0], q1)) {
+            lastError = "未找到点 " + a[0];
+            made = nullptr;
+            return true;
+        }
+        if (!cmdPointArg(a[1], q2)) {
+            lastError = "未找到点 " + a[1];
+            made = nullptr;
+            return true;
+        }
+        auto cn = std::make_unique<GeoConic2>();
+        cn->kind = 1;
+        cn->fImage = q1.lit || q2.lit;
+        cn->if1x = q1.lit ? q1.x : (q1.ref ? q1.ref->x : 0.0);
+        cn->if1y = q1.lit ? q1.y : (q1.ref ? q1.ref->y : 0.0);
+        cn->if2x = q2.lit ? q2.x : (q2.ref ? q2.ref->x : 0.0);
+        cn->if2y = q2.lit ? q2.y : (q2.ref ? q2.ref->y : 0.0);
+        cn->f1 = q1.lit ? nullptr : q1.ref;
+        cn->f2 = q2.lit ? nullptr : q2.ref;
+        GeoNumeric *an = nullptr;
+        double aLit = 0;
+        Expr re;
+        std::string err;
+        if ((an = dynamic_cast<GeoNumeric *>(lookup(a[2]))) != nullptr) {
+            cn->aNum = an;
+        } else if (!re.parse(a[2], err) || re.containsX()) {
+            lastError = "实半轴不是数: " + a[2];
+            made = nullptr;
+            return true;
+        } else {
+            aLit = re.eval(0.0);
+            cn->aParam = aLit;
+        }
+        cn->calc = [q1, q2, an, aLit](GeoConic2 *g) {
+            const double x1 = q1.lit ? q1.x : q1.ref->x;
+            const double y1 = q1.lit ? q1.y : q1.ref->y;
+            const double x2 = q2.lit ? q2.x : q2.ref->x;
+            const double y2 = q2.lit ? q2.y : q2.ref->y;
+            const double dx = x2 - x1, dy = y2 - y1;
+            const double fl = sqrt(dx * dx + dy * dy);
+            const double cc = fl / 2;
+            const double av = an != nullptr ? an->value : aLit;
+            g->a = av;
+            if (!(fl > 1e-12) || !(av > 1e-12) || !(cc > av + 1e-12)) {
+                g->ok = false;
+                return;
+            }
+            g->ok = true;
+            g->b = sqrt(cc * cc - av * av);
+            g->e = cc / av;
+            g->cx = (x1 + x2) / 2;
+            g->cy = (y1 + y2) / 2;
+            g->ux = dx / fl;
+            g->uy = dy / fl;
+            g->vx = -g->uy;
+            g->vy = g->ux;
+            g->p = 0;
+        };
+        if (q1.ref) cn->inputs.push_back(q1.ref);
+        if (q2.ref) cn->inputs.push_back(q2.ref);
+        if (an) cn->inputs.push_back(an);
+        cn->cmdName = "Hyperbola";
+        cn->cmdArgs = a;
+        cn->update();
+        made = std::move(cn);
+        return true;
+    }
+    // 1.2.0.2 Parabola(F, d)：焦点（标签点/字面量元组）+ 准线（GeoLine 引用，
+    // ax+by=c 口径）——GGB 抛物线定义口径。F 在准线上（p=0）→ 未定义。
+    // p=焦准距=|F 到准线|/2，顶点=焦点沿轴向准线退 p，轴 n̂ 指向焦点侧
+    if (cmdLower == "parabola" && a.size() == 2) {
+        CmdPt q1;
+        if (!cmdPointArg(a[0], q1)) {
+            lastError = "未找到点 " + a[0];
+            made = nullptr;
+            return true;
+        }
+        GeoLine *dl = dynamic_cast<GeoLine *>(lookup(a[1]));
+        if (dl == nullptr) {
+            lastError = "未找到准线直线 " + a[1];
+            made = nullptr;
+            return true;
+        }
+        auto cn = std::make_unique<GeoConic2>();
+        cn->kind = 2;
+        cn->fImage = q1.lit;
+        cn->if1x = q1.lit ? q1.x : 0.0;
+        cn->if1y = q1.lit ? q1.y : 0.0;
+        cn->f1 = q1.lit ? nullptr : q1.ref;
+        cn->dirLine = dl;
+        cn->calc = [q1, dl](GeoConic2 *g) {
+            const double fx = q1.lit ? q1.x : q1.ref->x;
+            const double fy = q1.lit ? q1.y : q1.ref->y;
+            const double nl = sqrt(dl->a * dl->a + dl->b * dl->b);
+            if (!(nl > 1e-12)) {
+                g->ok = false;
+                return;
+            }
+            const double dist = (dl->a * fx + dl->b * fy - dl->c) / nl;
+            const double pv = fabs(dist) / 2;
+            if (!(pv > 1e-12)) {
+                g->ok = false;
+                return;
+            }
+            g->ok = true;
+            g->p = pv;
+            double nx = dl->a / nl, ny = dl->b / nl;
+            if (dist < 0) {
+                nx = -nx;
+                ny = -ny;   // 轴 n̂ 恒指向焦点侧
+            }
+            g->cx = fx - nx * pv;
+            g->cy = fy - ny * pv;
+            g->ux = nx;
+            g->uy = ny;
+            g->vx = -ny;
+            g->vy = nx;
+            g->e = 1;
+            g->a = 0;
+            g->b = 0;
+        };
+        if (q1.ref) cn->inputs.push_back(q1.ref);
+        cn->inputs.push_back(dl);
+        cn->cmdName = "Parabola";
+        cn->cmdArgs = a;
+        cn->update();
+        made = std::move(cn);
+        return true;
+    }
     // 1.0.8.1 Sphere(M, r | A)：球心 M（2D 点按 z=0 允许），半径取数值/
     // 数值引用或过点距离。渲染 lat/long 线框（render3D）。1.0.8.6 球心/过点
     // 收字面量元组（Sphere((x,y,z), r)：image 缓存中心，inputs 只挂标签端）
@@ -11951,6 +12167,7 @@ void Kernel::algebraRows(std::vector<AlgebraRow> &out) const
         // 1.0.8.5 交圆复用 "circle" 行类型（入「圆」分组，Line3 同款口径）
         case GeoType::Circle3: r.type = "circle"; break;
         // 1.1.0.1 圆锥曲线独立行类型（入「圆锥曲线」分组）
+        case GeoType::Conic2: r.type = "conic2"; break;   // 1.2.0.2
         case GeoType::Conic3: r.type = "conic"; break;
         case GeoType::Cone: r.type = "cone"; break;
         case GeoType::Solid: r.type = "solid"; break;
@@ -13316,6 +13533,68 @@ GeoElement *Kernel::pickObject(double px, double py)
             double ccx = view.px(c->ccx()), ccy = view.py(c->ccy());
             double rr = c->radius * view.xscale;
             d = fabs(sqrt((px - ccx) * (px - ccx) + (py - ccy) * (py - ccy)) - rr);
+        } else if (t == GeoType::Conic2) {
+            // 1.2.0.2 圆锥曲线拾取：参数采样折线段距（椭圆 96/双曲线两支各 48/
+            // 抛物线 64，与渲染同参数化口径）
+            GeoConic2 *cn = static_cast<GeoConic2 *>(g.get());
+            d = 1e18;
+            if (cn->ok) {
+                auto feed = [&](double wx1, double wy1, double wx2, double wy2) {
+                    double dd = PtSegDist(px, py, view.px(wx1), view.py(wy1),
+                                          view.px(wx2), view.py(wy2));
+                    if (dd < d) d = dd;
+                };
+                if (cn->kind == 0) {
+                    double lx = cn->cx + cn->a * cn->ux, ly = cn->cy + cn->a * cn->uy;
+                    for (int i = 1; i <= 96; ++i) {
+                        const double th = 2.0 * M_PI * i / 96.0;
+                        const double nx2 = cn->cx + cn->a * std::cos(th) * cn->ux
+                            + cn->b * std::sin(th) * cn->vx;
+                        const double ny2 = cn->cy + cn->a * std::cos(th) * cn->uy
+                            + cn->b * std::sin(th) * cn->vy;
+                        feed(lx, ly, nx2, ny2);
+                        lx = nx2;
+                        ly = ny2;
+                    }
+                } else if (cn->kind == 1) {
+                    const double tMax = std::acosh(50.0);
+                    for (int br = 0; br < 2; ++br) {
+                        const double sgn = br == 0 ? 1.0 : -1.0;
+                        double lx = cn->cx + sgn * cn->a * cn->ux
+                            - sgn * cn->b * std::sinh(tMax) * cn->vx;
+                        double ly = cn->cy + sgn * cn->a * cn->uy
+                            - sgn * cn->b * std::sinh(tMax) * cn->vy;
+                        for (int i = 1; i <= 48; ++i) {
+                            const double tt = -tMax + 2.0 * tMax * i / 48.0;
+                            const double nx2 = cn->cx + sgn * (cn->a * std::cosh(tt)
+                                * cn->ux + cn->b * std::sinh(tt) * cn->vx);
+                            const double ny2 = cn->cy + sgn * (cn->a * std::cosh(tt)
+                                * cn->uy + cn->b * std::sinh(tt) * cn->vy);
+                            feed(lx, ly, nx2, ny2);
+                            lx = nx2;
+                            ly = ny2;
+                        }
+                    }
+                } else {
+                    const double diag = (view.xmax() - view.xmin())
+                        + (view.ymax() - view.ymin());
+                    const double sMax = sqrt(std::max(4.0 * cn->p * diag, 1e-9));
+                    double lx = cn->cx - sMax * cn->vx
+                        + (sMax * sMax / (4.0 * cn->p)) * cn->ux;
+                    double ly = cn->cy - sMax * cn->vy
+                        + (sMax * sMax / (4.0 * cn->p)) * cn->uy;
+                    for (int i = 1; i <= 64; ++i) {
+                        const double ss = -sMax + 2.0 * sMax * i / 64.0;
+                        const double nx2 = cn->cx + ss * cn->vx
+                            + (ss * ss / (4.0 * cn->p)) * cn->ux;
+                        const double ny2 = cn->cy + ss * cn->vy
+                            + (ss * ss / (4.0 * cn->p)) * cn->uy;
+                        feed(lx, ly, nx2, ny2);
+                        lx = nx2;
+                        ly = ny2;
+                    }
+                }
+            }
         } else if (t == GeoType::Polygon) {
             GeoPolygon *pg = static_cast<GeoPolygon *>(g.get());
             size_t n = pg->image ? pg->ivx.size() : pg->verts.size();
@@ -13488,6 +13767,7 @@ std::string Kernel::propsOf(const std::string &label) const
     case GeoType::Ray: ty = "ray"; break;
     case GeoType::Vector: ty = "vector"; break;
     case GeoType::Circle: ty = "circle"; break;
+    case GeoType::Conic2: ty = "conic2"; break;   // 1.2.0.2
     case GeoType::Polygon: ty = "polygon"; break;
     case GeoType::Function: ty = "function"; break;
     case GeoType::List: ty = "list"; break;
@@ -14140,6 +14420,32 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->p2x = s->p2x; d->p2y = s->p2y; d->p2z = s->p2z;
             d->wx = s->wx; d->wy = s->wy; d->wz = s->wz;
             d->tangent = s->tangent;
+            d->calc = s->calc;
+            break;
+        }
+        case GeoType::Conic2: {
+            // 1.2.0.2 圆锥曲线重定义搬运（引用 + 现值缓存 + 闭包）
+            GeoConic2 *d = static_cast<GeoConic2 *>(dst);
+            GeoConic2 *s = static_cast<GeoConic2 *>(src);
+            d->kind = s->kind;
+            d->f1 = s->f1;
+            d->f2 = s->f2;
+            d->fImage = s->fImage;
+            d->if1x = s->if1x;
+            d->if1y = s->if1y;
+            d->if2x = s->if2x;
+            d->if2y = s->if2y;
+            d->aNum = s->aNum;
+            d->aParam = s->aParam;
+            d->throughPt = s->throughPt;
+            d->dirLine = s->dirLine;
+            d->ok = s->ok;
+            d->cx = s->cx; d->cy = s->cy;
+            d->ux = s->ux; d->uy = s->uy;
+            d->vx = s->vx; d->vy = s->vy;
+            d->a = s->a; d->b = s->b;
+            d->p = s->p;
+            d->e = s->e;
             d->calc = s->calc;
             break;
         }
@@ -15402,6 +15708,74 @@ Geometry Kernel::CircleGeom(const GeoCircle &c, const EuclidianView &v)
 // 或弦转角 > 15° 就减半步长细分，平坦则步长加倍——曲线平缓处点少、弯曲/
 // 陡峭处点密（总量预算封顶，防振荡函数拖垮帧率）。NaN/Inf（未定义区）断线；
 // 有限值间的渐近线跳变（如 tan）按 上游 行为画出竖直 Connector，由画布裁剪。
+// 1.2.0.2 圆锥曲线 2D 采样绘制（Polyline，函数曲线同款选中垫亮色）。
+// 椭圆整周 128 段；双曲线两支各 96 段（cosh 参数 tMax=acosh(50)，50a 世界
+// 长度出视足矣）；抛物线 s∈[±√(4p·diag)] 128 段（y 向出视覆盖）。未定义
+// 不发射；标签锚中心/顶点左上（圆同款方位）
+void Kernel::appendConic2Plot(const GeoConic2 &cn, std::vector<DrawCmd> &out,
+                              bool sel) const
+{
+    if (!cn.ok) return;
+    auto emitBranch = [&](const std::function<void(double, double &, double &)> &pt,
+                          int n) {
+        DrawCmd cmd;
+        cmd.op = DrawOp::Polyline;
+        cmd.color = ObjectColor(cn.color, darkTheme);
+        cmd.lineWidth = cn.lineThickness / 3.0f;
+        cmd.pts.reserve((size_t)(n + 1) * 2);
+        for (int i = 0; i <= n; ++i) {
+            double wx = 0, wy = 0;
+            pt(static_cast<double>(i) / n, wx, wy);
+            if (!std::isfinite(wx) || !std::isfinite(wy)) return;
+            cmd.pts.push_back(static_cast<float>(view.px(wx)));
+            cmd.pts.push_back(static_cast<float>(view.py(wy)));
+        }
+        if (sel) {
+            DrawCmd h = cmd;
+            h.color = darkTheme ? "rgba(143,182,255,0.40)" : "rgba(0,125,255,0.30)";
+            h.lineWidth = cmd.lineWidth + 8.0f * view.uiScale;
+            out.push_back(h);
+        }
+        out.push_back(cmd);
+    };
+    if (cn.kind == 0) {
+        emitBranch([&](double t, double &x, double &y) {
+            const double th = t * 2.0 * M_PI;
+            x = cn.cx + cn.a * std::cos(th) * cn.ux + cn.b * std::sin(th) * cn.vx;
+            y = cn.cy + cn.a * std::cos(th) * cn.uy + cn.b * std::sin(th) * cn.vy;
+        }, 128);
+    } else if (cn.kind == 1) {
+        const double tMax = std::acosh(50.0);
+        for (int br = 0; br < 2; ++br) {
+            const double sgn = br == 0 ? 1.0 : -1.0;
+            emitBranch([&](double t, double &x, double &y) {
+                const double tt = (2.0 * t - 1.0) * tMax;
+                x = cn.cx + sgn * (cn.a * std::cosh(tt) * cn.ux
+                    + cn.b * std::sinh(tt) * cn.vx);
+                y = cn.cy + sgn * (cn.a * std::cosh(tt) * cn.uy
+                    + cn.b * std::sinh(tt) * cn.vy);
+            }, 96);
+        }
+    } else {
+        const double diag = (view.xmax() - view.xmin()) + (view.ymax() - view.ymin());
+        const double sMax = sqrt(std::max(4.0 * cn.p * diag, 1e-9));
+        emitBranch([&](double t, double &x, double &y) {
+            const double ss = (2.0 * t - 1.0) * sMax;
+            x = cn.cx + ss * cn.vx + (ss * ss / (4.0 * cn.p)) * cn.ux;
+            y = cn.cy + ss * cn.vy + (ss * ss / (4.0 * cn.p)) * cn.uy;
+        }, 128);
+    }
+    const double lr = cn.kind == 2 ? std::max(cn.p, 1e-9) : std::max(cn.a, cn.b);
+    const double rs = lr * view.xscale;
+    DrawCmd lb;
+    lb.op = DrawOp::Text;
+    lb.color = ObjectColor(cn.color, darkTheme);
+    lb.pts = { static_cast<float>(view.px(cn.cx) - rs * 0.5),
+               static_cast<float>(view.py(cn.cy) - rs * 0.85 + 14 * view.uiScale) };
+    lb.text = cn.label;
+    out.push_back(lb);
+}
+
 void Kernel::appendFunctionPlot(const GeoFunction &f, std::vector<DrawCmd> &out,
                                 bool sel) const
 {
@@ -16962,6 +17336,14 @@ void Kernel::render(std::vector<DrawCmd> &out)
                 out.push_back(h);
             }
             out.push_back(d);
+            break;
+        }
+        case GeoType::Conic2: {
+            // 1.2.0.2 圆锥曲线 2D 采样绘制
+            GeoConic2 *cn = static_cast<GeoConic2 *>(g.get());
+            if (cn->ok) {
+                appendConic2Plot(*cn, out, cn->selected);
+            }
             break;
         }
         // 1.0.8.1 三维对象只在 render3D 绘制（2D 帧显式跳过）
@@ -19970,6 +20352,14 @@ std::string Kernel::getXml() const
             GeoConic3 *cn = static_cast<GeoConic3 *>(g);
             AppendCommandXml(o, *cn);
             AppendElementHead(o, *cn, "conic3");
+            AppendLineStyle(o, cn->lineThickness);
+            break;
+        }
+        case GeoType::Conic2: {
+            // 1.2.0.2 圆锥曲线 2D：命令产物走通用重放
+            GeoConic2 *cn = static_cast<GeoConic2 *>(g);
+            AppendCommandXml(o, *cn);
+            AppendElementHead(o, *cn, "conic2");
             AppendLineStyle(o, cn->lineThickness);
             break;
         }
