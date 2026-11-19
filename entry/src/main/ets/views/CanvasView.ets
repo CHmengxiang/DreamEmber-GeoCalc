@@ -478,12 +478,15 @@ export struct CanvasView {
           break;
         case 'm':
           // 成对短划：每 4 个数一段（刻度用），不连成折线
-          for (let i = 0; i + 3 < nums.length; i += 4) {
+          // 1.1.3.21 批量描边：同命令同色同宽，一次 beginPath/stroke 出整行段
+          if (nums.length >= 4) {
             this.ctx.beginPath();
             this.ctx.strokeStyle = color;
             this.ctx.lineWidth = lw;
-            this.ctx.moveTo(nums[i], nums[i + 1]);
-            this.ctx.lineTo(nums[i + 2], nums[i + 3]);
+            for (let i = 0; i + 3 < nums.length; i += 4) {
+              this.ctx.moveTo(nums[i], nums[i + 1]);
+              this.ctx.lineTo(nums[i + 2], nums[i + 3]);
+            }
             this.ctx.stroke();
           }
           break;

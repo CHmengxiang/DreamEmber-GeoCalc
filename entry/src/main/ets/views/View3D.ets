@@ -71,9 +71,83 @@ export struct View3D {
   private dragUndoMarked: boolean = false;
   // 鼠标滚轮（onAxisEvent）：UPDATE 事件间的垂直轴值差
   private axisLastY: number = 0;
+  // 1.1.3.21 渲染合帧节流：Move 高频事件只累积增量，≤16ms 一帧出渲染
+  // （内核 rotateBy/dragDelta/panBy 均线性，合帧一次调用=逐次调用之和；
+  // 重型场景全量 render3D 不再随输入频率跑满主线程——ANR 对症）。
+  // Up 时先排空残余增量再收尾（拖点/旋转末帧不丢）
+  private frameTimer: number = -1;
+  private lastFrameAt: number = 0;
+  private pendAccX: number = 0;     // 旋转/拖点累积位移（vp）
+  private pendAccY: number = 0;
+  private pendZoom: number = 1.0;   // 双指缩放因子连乘
+  private pendPanX: number = 0;     // 双指平移累积（vp）
+  private pendPanY: number = 0;
 
   private onRefreshBump(): void {
     this.refresh();
+  }
+
+  // 1.1.3.21 合帧：排队一次 ≤16ms 后的 flushFrame（已有排队帧继续累积）
+  private scheduleFlush(): void {
+    if (this.frameTimer >= 0) {
+      return;
+    }
+    const delay = Math.max(0, 16 - (Date.now() - this.lastFrameAt));
+    this.frameTimer = setTimeout(() => {
+      this.frameTimer = -1;
+      this.flushFrame();
+    }, delay);
+  }
+
+  // 排空累积增量按当前手势一次出帧（旋转/拖点=位移和；双指=缩放因子
+  // 连乘 + 平移和，内核变更合并取末帧一次重绘）
+  private flushFrame(): void {
+    const dx = this.pendAccX;
+    const dy = this.pendAccY;
+    const zf = this.pendZoom;
+    const px = this.pendPanX;
+    const py = this.pendPanY;
+    this.pendAccX = 0;
+    this.pendAccY = 0;
+    this.pendZoom = 1.0;
+    this.pendPanX = 0;
+    this.pendPanY = 0;
+    if (this.canvasW <= 1) {
+      return;
+    }
+    if (this.mode === 3) {
+      if (zf !== 1.0) {
+        dreamemberKernel.kernel3DZoom(zf);
+      }
+      if (px !== 0 || py !== 0) {
+        const dpx = this.toPx(px, py);
+        this.execFrame(dreamemberKernel.kernel3DPan(dpx[0], dpx[1]));
+      }
+    } else if (this.mode === 1) {
+      if (dx !== 0 || dy !== 0) {
+        const dpx = this.toPx(dx, dy);
+        const frame = dreamemberKernel.kernel3DDragPoint(dpx[0], dpx[1]);
+        if (frame !== '-|') {
+          this.execFrame(frame);
+          this.onDragMoveSync();
+        }
+      }
+    } else if (this.mode === 2) {
+      if (dx !== 0 || dy !== 0) {
+        const dpx = this.toPx(dx, dy);
+        this.execFrame(dreamemberKernel.kernel3DRotate(dpx[0], dpx[1]));
+      }
+    }
+    this.lastFrameAt = Date.now();
+  }
+
+  // Up/Cancel 收尾前排空排队帧（残余增量不丢）
+  private drainPending(): void {
+    if (this.frameTimer >= 0) {
+      clearTimeout(this.frameTimer);
+      this.frameTimer = -1;
+    }
+    this.flushFrame();
   }
 
   // 触摸 vp 坐标 -> 位图像素
@@ -150,12 +224,16 @@ export struct View3D {
           }
           break;
         case 'm':
-          for (let i = 0; i + 3 < nums.length; i += 4) {
+          // 1.1.3.21 批量描边：同命令同色同宽，一次 beginPath/stroke 出整行
+          // 段（此前逐段 beginPath/stroke，主线程 canvas 调用数随段数倍增）
+          if (nums.length >= 4) {
             this.ctx.beginPath();
             this.ctx.strokeStyle = color;
             this.ctx.lineWidth = lw;
-            this.ctx.moveTo(nums[i], nums[i + 1]);
-            this.ctx.lineTo(nums[i + 2], nums[i + 3]);
+            for (let i = 0; i + 3 < nums.length; i += 4) {
+              this.ctx.moveTo(nums[i], nums[i + 1]);
+              this.ctx.lineTo(nums[i + 2], nums[i + 3]);
+            }
             this.ctx.stroke();
           }
           break;
@@ -318,18 +396,18 @@ export struct View3D {
           const dist = Math.sqrt(dx * dx + dy * dy);
           const cx = (ev.touches[0].x + ev.touches[1].x) / 2;
           const cy = (ev.touches[0].y + ev.touches[1].y) / 2;
-          // 1.0.8.3 双指手势：距离比 → 缩放，质心位移 → 平移（两次内核
-          // 变更合并取末帧一次重绘）
+          // 1.0.8.3 双指手势：距离比 → 缩放，质心位移 → 平移
+          // 1.1.3.21 合帧：因子连乘/位移累积，flushFrame 一次出帧
           if (this.pinchDist > 1e-6 && dist > 1e-6) {
-            dreamemberKernel.kernel3DZoom(dist / this.pinchDist);
+            this.pendZoom *= dist / this.pinchDist;
           }
-          const dpx = this.toPx(cx - this.pinchCx, cy - this.pinchCy);
-          const frame = dreamemberKernel.kernel3DPan(dpx[0], dpx[1]);
-          this.execFrame(frame);
+          this.pendPanX += cx - this.pinchCx;
+          this.pendPanY += cy - this.pinchCy;
           this.pinchDist = dist;
           this.pinchCx = cx;
           this.pinchCy = cy;
           this.tapMoved = true;
+          this.scheduleFlush();
           break;
         }
         if (ev.touches.length === 0 || this.mode === 0) {
@@ -352,21 +430,21 @@ export struct View3D {
             this.dragUndoMarked = true;
             dreamemberKernel.kernelPushUndo();
           }
-          const dpx = this.toPx(dx, dy);
-          const frame = dreamemberKernel.kernel3DDragPoint(dpx[0], dpx[1]);
-          if (frame !== '-|') {
-            this.execFrame(frame);
-            // 1.1.3.12 拖动级联更新依随对象：节流同步代数区（现值列随动）
-            this.onDragMoveSync();
-          }
+          // 1.1.3.21 合帧：位移累积，flushFrame 按手势一次出帧
+          this.pendAccX += dx;
+          this.pendAccY += dy;
+          this.scheduleFlush();
         } else if (this.mode === 2) {
-          const dpx = this.toPx(dx, dy);
-          this.execFrame(dreamemberKernel.kernel3DRotate(dpx[0], dpx[1]));
+          this.pendAccX += dx;
+          this.pendAccY += dy;
+          this.scheduleFlush();
         }
         break;
       }
       case TouchType.Up:
       case TouchType.Cancel: {
+        // 1.1.3.21 先排空残余增量（此时 drag 态仍在，末帧不丢）再收尾
+        this.drainPending();
         if (this.mode === 1 || this.mode === 2) {
           dreamemberKernel.kernelEndDrag();
         }

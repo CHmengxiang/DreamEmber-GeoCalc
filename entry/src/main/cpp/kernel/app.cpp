@@ -12063,7 +12063,9 @@ GeoPoint *Kernel::pickPoint3D(double px, double py, double *outD)
 {
     GeoPoint *best = nullptr;
     double bestD = 1e9;
-    const double grab = 18.0 * view3d.uiScale;
+    // 1.1.3.21 低密度下限：uiScale=位图px/vp，模拟器密度 1.0 时 ≈0.55 →
+    // 18·uiScale≈9.9 位图px（≈18 屏幕px）拾取过窄；真机 uiScale≥2 下限不激活
+    const double grab = std::max(18.0 * view3d.uiScale, 12.0);
     for (auto &g : geos_) {
         if (g->type() != GeoType::Point) continue;
         GeoPoint *p = static_cast<GeoPoint *>(g.get());
@@ -12208,7 +12210,8 @@ GeoElement *Kernel::pickObject3D(double px, double py)
     double bestD = 1e9;       // 边距类命中（线族/环采样/多边形边）
     double bestDep = 1e9;     // 盘内类命中（平面盘内/球剪影盘内）：深度小=近
     GeoElement *bestStrong = nullptr;
-    const double grab = 14.0 * view3d.uiScale;
+    // 1.1.3.21 低密度下限（同 pickPoint3D）
+    const double grab = std::max(14.0 * view3d.uiScale, 10.0);
     auto segDist = [](double ax, double ay, double bx, double by,
                       double qx, double qy, double &out) {
         const double dx = bx - ax, dy = by - ay;
@@ -12954,12 +12957,29 @@ std::string Kernel::toolTap3D(double px, double py)
             // (点点/点线/点面/线面/异面线) 与 Angle (线线/线面/面面) 走既有
             // 命令面；angle3D 两对象须线族/平面
             const char *name = tool_ == "dist3D" ? "距离" : "角度";
+            // 1.1.3.21 首拾先验类型再入 toolObj_：此前 Down 探针命中的点可作
+            // 首拾直接入态，angle3D 下后续任意合法对象都过不了校验且 toolObj_
+            // 不清 →「两对象须为直线/线段/射线/平面」死循环
+            auto angleOk = [](GeoType t) {
+                return t == GeoType::Line3 || t == GeoType::Segment
+                    || t == GeoType::Ray || t == GeoType::Plane
+                    || t == GeoType::Line;
+            };
             GeoElement *o = hit ? static_cast<GeoElement *>(hit)
                                 : pickObject3D(px, py);
             if (!o) {
-                return "need|" + std::string(name) + "：请点选第一个对象（点/线/面）";
+                // toolObj_ 已就位时在等第二个对象——文案按态给（此前恒报
+                // 「第一个对象」误导）
+                return toolObj_
+                    ? "need|" + std::string(name) + "：再点选第二个对象"
+                    : "need|" + std::string(name)
+                          + "：请点选第一个对象（点/线/面）";
             }
             if (!toolObj_) {
+                if (tool_ == "angle3D" && !angleOk(o->type())) {
+                    return "need|角度：请点选直线/线段/射线/平面"
+                           "（第一个对象）";
+                }
                 toolObj_ = o;
                 o->selected = true;
                 return "need|" + std::string(name) + "：再点选第二个对象";
@@ -12967,16 +12987,9 @@ std::string Kernel::toolTap3D(double px, double py)
             if (o == toolObj_) {
                 return "need|" + std::string(name) + "：两对象相同，请重新点选";
             }
-            if (tool_ == "angle3D") {
-                const GeoType t1 = toolObj_->type(), t2 = o->type();
-                auto angleOk = [](GeoType t) {
-                    return t == GeoType::Line3 || t == GeoType::Segment
-                        || t == GeoType::Ray || t == GeoType::Plane
-                        || t == GeoType::Line;
-                };
-                if (!angleOk(t1) || !angleOk(t2)) {
-                    return "need|角度：两对象须为直线/线段/射线/平面";
-                }
+            if (tool_ == "angle3D" && !angleOk(o->type())) {
+                // 首拾已验过，此处只剩第二对象类型不符——保持等第二对象
+                return "need|角度：第二个对象须为直线/线段/射线/平面";
             }
             o->selected = true;
             const std::string cmdName2 = tool_ == "dist3D" ? "Distance" : "Angle";
@@ -17213,6 +17226,10 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         // double 角点，poly 仍供 polyHit/求交）
         double dpoly[8] = {};
         const void *owner = nullptr;   // 所属对象（源实体背向面豁免用）
+        // 1.1.3.21 遮挡体 2D 像素足迹包围盒（±1px 缓冲）：veil/拆段查询先
+        // bbox 早退——查询投影不在足迹内则不可能遮挡。默认开区间=永不拒绝
+        // （漏填安全兜底）
+        double bx0 = -1e30, by0 = -1e30, bx1 = 1e30, by1 = 1e30;
     };
     std::vector<Occ3> occs;
     for (auto &g : geos_) {
@@ -17426,6 +17443,92 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             if (oc.poly.size() >= 6) occs.push_back(std::move(oc));
         }
     }
+    // 1.1.3.21 遮挡体 2D 像素足迹包围盒：多面体类（kind 0/3/5）直接取 poly
+    // 极值；解析类（球 1/柱 2/锥 4）投影特征点（正交投影下球取 ±r·ê 六点
+    // 恰好覆盖剪影盘，柱/锥取端圆 8 点采样）。任一投影非有限→退化为开区间
+    // （永不拒绝）。收集完毕统一一遍，收集点零改动
+    auto fillOccBBox = [&](Occ3 &oc) {
+        double x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
+        bool ok = true;
+        auto acc = [&](double wx, double wy, double wz) {
+            double ppx = 0, ppy = 0;
+            proj(wx, wy, wz, ppx, ppy);
+            if (!std::isfinite(ppx) || !std::isfinite(ppy)) {
+                ok = false;
+                return;
+            }
+            x0 = std::min(x0, ppx);
+            x1 = std::max(x1, ppx);
+            y0 = std::min(y0, ppy);
+            y1 = std::max(y1, ppy);
+        };
+        if (oc.kind == 0 || oc.kind == 3 || oc.kind == 5) {
+            for (size_t i = 0; i + 1 < oc.poly.size(); i += 2) {
+                if (!std::isfinite(oc.poly[i])
+                    || !std::isfinite(oc.poly[i + 1])) {
+                    ok = false;
+                    break;
+                }
+                x0 = std::min(x0, (double)oc.poly[i]);
+                x1 = std::max(x1, (double)oc.poly[i]);
+                y0 = std::min(y0, (double)oc.poly[i + 1]);
+                y1 = std::max(y1, (double)oc.poly[i + 1]);
+            }
+        } else if (oc.kind == 1) {
+            acc(oc.scx - oc.srad, oc.scy, oc.scz);
+            acc(oc.scx + oc.srad, oc.scy, oc.scz);
+            acc(oc.scx, oc.scy - oc.srad, oc.scz);
+            acc(oc.scx, oc.scy + oc.srad, oc.scz);
+            acc(oc.scx, oc.scy, oc.scz - oc.srad);
+            acc(oc.scx, oc.scy, oc.scz + oc.srad);
+        } else if (oc.kind == 2 || oc.kind == 4) {
+            // 柱/锥：轴向 ⊥ 基 e1/e2，底/顶（锥底）圆 8 点采样；锥加顶点
+            double ux = oc.cwx, uy = oc.cwy, uz = oc.cwz;
+            double hx = fabs(ux) < 0.9 ? 1.0 : 0.0;
+            double hy = hx == 1.0 ? 0.0 : 1.0;
+            double e1x = hx - (hx * ux + hy * uy + 0.0 * uz) * ux;
+            double e1y = hy - (hx * ux + hy * uy + 0.0 * uz) * uy;
+            double e1z = 0.0 - (hx * ux + hy * uy + 0.0 * uz) * uz;
+            const double nl1 = sqrt(e1x * e1x + e1y * e1y + e1z * e1z);
+            if (nl1 > 1e-12) {
+                e1x /= nl1;
+                e1y /= nl1;
+                e1z /= nl1;
+                const double e2x = uy * e1z - uz * e1y;
+                const double e2y = uz * e1x - ux * e1z;
+                const double e2z = ux * e1y - uy * e1x;
+                for (int k = 0; k < 8; ++k) {
+                    const double an = M_PI * 2.0 * k / 8.0;
+                    const double cxo = (std::cos(an) * e1x
+                                        + std::sin(an) * e2x) * oc.crad;
+                    const double cyo = (std::cos(an) * e1y
+                                        + std::sin(an) * e2y) * oc.crad;
+                    const double czo = (std::cos(an) * e1z
+                                        + std::sin(an) * e2z) * oc.crad;
+                    // 柱：底心=(cbx,cby,cbz)、顶心=底+轴·h；锥：
+                    // (cbx,cby,cbz)=锥顶，端圆在锥顶+轴·h（底面）
+                    acc(oc.cbx + (oc.kind == 4 ? oc.cwx * oc.chgt : 0.0) + cxo,
+                        oc.cby + (oc.kind == 4 ? oc.cwy * oc.chgt : 0.0) + cyo,
+                        oc.cbz + (oc.kind == 4 ? oc.cwz * oc.chgt : 0.0) + czo);
+                    if (oc.kind == 2) {
+                        acc(oc.cbx + oc.cwx * oc.chgt + cxo,
+                            oc.cby + oc.cwy * oc.chgt + cyo,
+                            oc.cbz + oc.cwz * oc.chgt + czo);
+                    }
+                }
+                if (oc.kind == 4) acc(oc.cbx, oc.cby, oc.cbz);
+            } else {
+                ok = false;
+            }
+        }
+        if (ok) {
+            oc.bx0 = x0 - 1.0;
+            oc.bx1 = x1 + 1.0;
+            oc.by0 = y0 - 1.0;
+            oc.by1 = y1 + 1.0;
+        }
+    };
+    for (auto &oc : occs) fillOccBBox(oc);
     // 投影像素点是否落在多边形内（射线交叉法）
     auto polyHit = [](const std::vector<float> &poly, double px, double py) -> bool {
         const size_t n = poly.size() / 2;
@@ -17478,7 +17581,14 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
     // 填充多边形（值 = Π(1−fillAlpha)，半透明平面后透视变淡）
     auto veilAt = [&](double wx2, double wy2, double wz2) -> double {
         double vis = 1.0;
+        // 1.1.3.21 查询投影一次，逐遮挡体足迹 bbox 早退
+        double qpx = 0, qpy = 0;
+        proj(wx2, wy2, wz2, qpx, qpy);
         for (const Occ3 &oc : occs) {
+            if (qpx < oc.bx0 || qpx > oc.bx1 || qpy < oc.by0
+                || qpy > oc.by1) {
+                continue;
+            }
             if (oc.kind == 4) {
                 // 1.1.0.5 圆锥实体：半线 {P−t·f, t>0} 与实体（角域
                 // (u·w)² ≥ γ²|u|² 且轴向 ∈ [0,h]）相交
@@ -17617,7 +17727,14 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
     auto veilAtEx = [&](double wx2, double wy2, double wz2,
                         const void *exempt) -> double {
         double vis = 1.0;
+        // 1.1.3.21 查询投影一次，逐遮挡体足迹 bbox 早退
+        double qpx = 0, qpy = 0;
+        proj(wx2, wy2, wz2, qpx, qpy);
         for (const Occ3 &oc : occs) {
+            if (qpx < oc.bx0 || qpx > oc.bx1 || qpy < oc.by0
+                || qpy > oc.by1) {
+                continue;
+            }
             if (oc.owner == exempt && exempt != nullptr) {
                 if (oc.kind == 1) {
                     const double dxx = wx2 - oc.scx, dyy = wy2 - oc.scy,
@@ -17758,11 +17875,19 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         const double dep1 = proj(wx1, wy1, wz1, ppx1, ppy1);
         const double dep2 = proj(wx2, wy2, wz2, ppx2, ppy2);
         const double sdx = ppx2 - ppx1, sdy = ppy2 - ppy1;
+        // 1.1.3.21 段 2D bbox 与遮挡体足迹不相交 → 该遮挡体不可能出交点
+        // （交点/边界穿越的投影必落在足迹内）——早退
+        const double sbx0 = std::min(ppx1, ppx2), sbx1 = std::max(ppx1, ppx2);
+        const double sby0 = std::min(ppy1, ppy2), sby1 = std::max(ppy1, ppy2);
         std::vector<double> ts;
         ts.reserve(occs.size() * 3 + 2);
         ts.push_back(0.0);
         ts.push_back(1.0);
         for (const Occ3 &oc : occs) {
+            if (sbx1 < oc.bx0 || sbx0 > oc.bx1 || sby1 < oc.by0
+                || sby0 > oc.by1) {
+                continue;
+            }
             if (oc.kind == 1) {
                 // 1.1.0.3 球面与段交（二次根）：|S1+t·d − C|² = r²
                 const double dxx = wx1 - oc.scx, dyy = wy1 - oc.scy,
@@ -19209,6 +19334,39 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
     // 退化为点）/0° 不画。扇面在全部对象之后发射（叠于平面填充上），填充
     // 透明度按扇心 veilAt 调淡
     // 1.1.0.4 发射：填充按深度远→近，描边按原序（扇面注记仍在其后）
+    // 1.1.3.21 发射前视口剔除：bbox 与视口（±24px 缓冲已含在 xmn..）完全
+    // 不相交的填充/描边/标签命令不发射——重型场景平移/缩放后大量对象出界
+    // 仍参与排序与序列化。部分出界保留（光栅端裁剪）；含非有限坐标保守保留
+    auto bboxOff = [xmn, ymn, xmx, ymx](const std::vector<float> &pts) -> bool {
+        if (pts.empty()) return false;
+        float x0 = pts[0], x1 = pts[0], y0 = pts[1], y1 = pts[1];
+        for (size_t i = 2; i + 1 < pts.size(); i += 2) {
+            if (!std::isfinite(pts[i]) || !std::isfinite(pts[i + 1]))
+                return false;
+            x0 = std::min(x0, pts[i]);
+            x1 = std::max(x1, pts[i]);
+            y0 = std::min(y0, pts[i + 1]);
+            y1 = std::max(y1, pts[i + 1]);
+        }
+        return std::isfinite(x0) && (x1 < xmn || x0 > xmx || y1 < ymn
+                                     || y0 > ymx);
+    };
+    fillList.erase(std::remove_if(fillList.begin(), fillList.end(),
+                                  [&bboxOff](const std::pair<double, DrawCmd>
+                                             &fpr) {
+                                      return bboxOff(fpr.second.pts);
+                                  }),
+                   fillList.end());
+    strokeList.erase(std::remove_if(strokeList.begin(), strokeList.end(),
+                                    [&bboxOff](const DrawCmd &dc) {
+                                        return bboxOff(dc.pts);
+                                    }),
+                     strokeList.end());
+    labelList.erase(std::remove_if(labelList.begin(), labelList.end(),
+                                   [&bboxOff](const DrawCmd &dc) {
+                                       return bboxOff(dc.pts);
+                                   }),
+                    labelList.end());
     std::stable_sort(fillList.begin(), fillList.end(),
                      [](const std::pair<double, DrawCmd> &a,
                         const std::pair<double, DrawCmd> &b) {
