@@ -16,6 +16,9 @@ export const TOOLS: ToolDef[] = [
   { id: 'ray', icon: '→', name: '射线' },
   { id: 'vector', icon: '⇢', name: '向量' },
   { id: 'circle', icon: '◯', name: '圆' },
+  { id: 'ellipse', icon: '⬭', name: '椭圆' },
+  { id: 'hyperbola', icon: '⦀', name: '双曲线' },
+  { id: 'parabola', icon: '∪', name: '抛物线' },
   { id: 'midpoint', icon: '⊙', name: '中点' },
   { id: 'perpBisector', icon: '⊥', name: '中垂线' },
   { id: 'angleBisector', icon: '∠', name: '角平分线' },
@@ -95,7 +98,7 @@ export interface ToolGroup {
 export const TOOL_GROUPS: ToolGroup[] = [
   { name: '基础', ids: ['', 'point'] },
   { name: '线', ids: ['segment', 'line', 'ray', 'vector', 'perpLine', 'parLine', 'vecFromPoint', 'segLength'] },
-  { name: '圆与多边形', ids: ['circle', 'polygon', 'circleRadius'] },
+  { name: '圆与多边形', ids: ['circle', 'ellipse', 'hyperbola', 'parabola', 'polygon', 'circleRadius'] },
   { name: '构造', ids: ['midpoint', 'perpBisector', 'angleBisector', 'angle', 'intersect', 'angleSize', 'attachDetach'] },
   { name: '测量', ids: ['dist', 'area', 'slope'] },
   { name: '变换', ids: ['translate', 'reflect', 'reflectPoint', 'rotate', 'dilate'] },
@@ -134,6 +137,15 @@ export function toolUsage(id: string): string {
   }
   if (id === 'circle') {
     return '点选圆心与圆上一点';
+  }
+  if (id === 'ellipse') {
+    return '依次点选三个点：前两个为焦点，第三个在曲线上';
+  }
+  if (id === 'hyperbola') {
+    return '点选两个焦点，再在弹窗输入实半轴 a';
+  }
+  if (id === 'parabola') {
+    return '先点选焦点，再点选准线（直线）';
   }
   if (id === 'perpBisector') {
     return '点选线段两端';

@@ -393,6 +393,41 @@ export function drawToolIcon(ctx: CanvasRenderingContext2D, id: string, w: numbe
     seg(8, 15, 8, 23, 1.5);
     seg(34, 15, 34, 23, 1.5);
     dot(21, 19, 4.2);
+  } else if (id === 'ellipse') {
+    // 椭圆本像（缩放圆弧）+ 两焦点蓝点
+    ctx.save();
+    ctx.translate(21, 19);
+    ctx.scale(1.55, 1);
+    ctx.beginPath();
+    ctx.arc(0, 0, 8.5, 0, Math.PI * 2);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = ink;
+    ctx.stroke();
+    ctx.restore();
+    dot(14, 19, 2.6);
+    dot(28, 19, 2.6);
+  } else if (id === 'hyperbola') {
+    // 双曲线两支（贝塞尔）+ 两焦点蓝点
+    ctx.beginPath();
+    ctx.moveTo(6, 8);
+    ctx.bezierCurveTo(17, 12, 17, 26, 6, 30);
+    ctx.moveTo(36, 8);
+    ctx.bezierCurveTo(25, 12, 25, 26, 36, 30);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = ink;
+    ctx.stroke();
+    dot(16, 19, 2.6);
+    dot(26, 19, 2.6);
+  } else if (id === 'parabola') {
+    // 准线虚线 + 焦点蓝点 + 开口向上抛物线
+    dash(6, 30, 36, 30, 1.4);
+    ctx.beginPath();
+    ctx.moveTo(9, 8);
+    ctx.quadraticCurveTo(21, 36, 33, 8);
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = ink;
+    ctx.stroke();
+    dot(21, 10, 2.6);
   } else {
     dot(21, 18, 4.5);
   }

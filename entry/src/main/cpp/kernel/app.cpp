@@ -4301,6 +4301,64 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         made = std::move(cn);
         return true;
     }
+    // 1.2.0.3 Asymptote(h[, n])：双曲线两渐近线（方向 sgn·a·û + b·v̂ 过中心，
+    // sgn=±1；法向 = ⊥方向）。未命名 → 两线多输出（Intersect 口径，第二条
+    // cmdIndex=1 重放带序号）；命名 → 第一条；带序号 n → 第 n 条。非双曲线/
+    // 未定义报错；双曲线退化后闭包出零系数线（渲染/拾取自然跳过）
+    if (cmdLower == "asymptote" && (a.size() == 1 || a.size() == 2)) {
+        GeoConic2 *src = dynamic_cast<GeoConic2 *>(lookup(a[0]));
+        if (!src || src->kind != 1) {
+            lastError = "Asymptote 仅支持双曲线";
+            made = nullptr;
+            return true;
+        }
+        if (!src->ok) {
+            lastError = "双曲线未定义，无渐近线";
+            made = nullptr;
+            return true;
+        }
+        int nth2 = -1;
+        if (a.size() == 2) {
+            double nval = 0;
+            if (!numArg(a[1], nval)) { lastError = "渐近线序号不是数: " + a[1]; made = nullptr; return true; }
+            nth2 = (int)nval - 1;
+            if (nth2 < 0 || nth2 > 1) { lastError = "渐近线序号取 1 或 2"; made = nullptr; return true; }
+        }
+        if (!name.empty() && nth2 < 0) nth2 = 0;   // 命名单输出=第一条
+        auto mkAsym = [&](int sgn) -> std::unique_ptr<GeoLine> {
+            auto l = std::make_unique<GeoLine>();
+            l->color = { 0x64, 0x64, 0x64 };
+            GeoConic2 *S = src;
+            l->calc = [S, sgn](GeoLine *L) {
+                if (!S->ok) {
+                    L->a = L->b = L->c = 0;
+                    return;
+                }
+                const double ddx = sgn * S->a * S->ux + S->b * S->vx;
+                const double ddy = sgn * S->a * S->uy + S->b * S->vy;
+                const double nl = sqrt(ddx * ddx + ddy * ddy);
+                if (!(nl > 1e-15)) {
+                    L->a = L->b = L->c = 0;
+                    return;
+                }
+                L->a = ddy / nl;
+                L->b = -ddx / nl;
+                L->c = L->a * S->cx + L->b * S->cy;
+            };
+            l->inputs = { src };
+            l->cmdName = "Asymptote";
+            l->cmdArgs = a;
+            l->update();
+            return l;
+        };
+        if (nth2 >= 0) {
+            made = std::move(mkAsym(nth2 == 0 ? 1 : -1));
+            return true;
+        }
+        made = std::move(mkAsym(1));
+        extras_.push_back(std::move(mkAsym(-1)));
+        return true;
+    }
     // 1.0.8.1 Sphere(M, r | A)：球心 M（2D 点按 z=0 允许），半径取数值/
     // 数值引用或过点距离。渲染 lat/long 线框（render3D）。1.0.8.6 球心/过点
     // 收字面量元组（Sphere((x,y,z), r)：image 缓存中心，inputs 只挂标签端）
@@ -13394,6 +13452,55 @@ bool Kernel::intersectAll(GeoElement *o1, GeoElement *o2,
         if (sq > 1e-12) pushBounded(x1 + t2 * dx, y1 + t2 * dy);
         return !pts.empty();
     }
+    // 1.2.0.3 直线 × 圆锥曲线（解析二次求根；椭圆/双曲线隐式二次、抛物线
+    // 焦准式；A≈0 退化一次方程；Segment/Ray 界内过滤由 pushBounded 承担）
+    {
+        GeoConic2 *k1 = dynamic_cast<GeoConic2 *>(o1);
+        if (!k1) k1 = dynamic_cast<GeoConic2 *>(o2);
+        if (ln1 && k1 && k1->ok) {
+            double la, lb, lc;
+            if (!LineCoefsOf(ln1, la, lb, lc)) return false;
+            double x1, y1, x2, y2;
+            if (fabs(lb) > 1e-15) {
+                x1 = 0; y1 = lc / lb; x2 = 1; y2 = (lc - la) / lb;
+            } else {
+                x1 = x2 = lc / la; y1 = 0; y2 = 1;
+            }
+            const double dx = x2 - x1, dy = y2 - y1;
+            const double w0u = (x1 - k1->cx) * k1->ux + (y1 - k1->cy) * k1->uy;
+            const double w0v = (x1 - k1->cx) * k1->vx + (y1 - k1->cy) * k1->vy;
+            const double du = dx * k1->ux + dy * k1->uy;
+            const double dv = dx * k1->vx + dy * k1->vy;
+            double A = 0, B = 0, C = 0;
+            if (k1->kind == 0) {
+                A = du * du / (k1->a * k1->a) + dv * dv / (k1->b * k1->b);
+                B = 2.0 * (w0u * du / (k1->a * k1->a) + w0v * dv / (k1->b * k1->b));
+                C = w0u * w0u / (k1->a * k1->a) + w0v * w0v / (k1->b * k1->b) - 1.0;
+            } else if (k1->kind == 1) {
+                A = du * du / (k1->a * k1->a) - dv * dv / (k1->b * k1->b);
+                B = 2.0 * (w0u * du / (k1->a * k1->a) - w0v * dv / (k1->b * k1->b));
+                C = w0u * w0u / (k1->a * k1->a) - w0v * w0v / (k1->b * k1->b) - 1.0;
+            } else {
+                A = dv * dv;
+                B = 2.0 * w0v * dv - 4.0 * k1->p * du;
+                C = w0v * w0v - 4.0 * k1->p * w0u;
+            }
+            if (fabs(A) < 1e-18) {
+                if (fabs(B) < 1e-18) return false;
+                const double t0 = -C / B;
+                pushBounded(x1 + t0 * dx, y1 + t0 * dy);
+                return !pts.empty();
+            }
+            const double disc = B * B - 4.0 * A * C;
+            if (disc < 0) return false;
+            const double sq = sqrt(disc);
+            const double t1 = (-B - sq) / (2.0 * A);
+            const double t2 = (-B + sq) / (2.0 * A);
+            pushBounded(x1 + t1 * dx, y1 + t1 * dy);
+            if (sq > 1e-12) pushBounded(x1 + t2 * dx, y1 + t2 * dy);
+            return !pts.empty();
+        }
+    }
     // 圆 × 圆（解析）
     if (c1 && c2) {
         double dx = c2->ccx() - c1->ccx(), dy = c2->ccy() - c1->ccy();
@@ -15121,6 +15228,61 @@ std::string Kernel::toolTapImpl(double wx, double wy, double px, double py)
         return "done|" + geos_[before]->label;
     }
 
+    // 1.2.0.3 椭圆工具：两焦点 + 曲线上点三点流（Ellipse 过点形式，
+    // a 随 P 现值——GGB 椭圆工具口径）
+    if (tool_ == "ellipse") {
+        if (!hit) hit = static_cast<GeoPoint *>(makeFreePoint(wx, wy));
+        hit->selected = true;
+        toolPts_.push_back(hit);
+        if (toolPts_.size() < 3) {
+            return "need|椭圆：还差 " + std::to_string(3 - (int)toolPts_.size())
+                + " 个点（第 1/2 个为焦点，第 3 个在曲线上）";
+        }
+        std::string expr = "Ellipse(" + toolPts_[0]->label + ", "
+            + toolPts_[1]->label + ", " + toolPts_[2]->label + ")";
+        toolPts_.clear();
+        size_t before = geos_.size();
+        if (!input(expr)) {
+            return "err|" + (lastError.empty() ? "无法创建椭圆" : lastError);
+        }
+        return "done|" + geos_[before]->label;
+    }
+
+    // 1.2.0.3 双曲线工具：两焦点 → ask 实半轴 a（弹窗通道，circleRadius 同构）
+    if (tool_ == "hyperbola") {
+        if (!hit) hit = static_cast<GeoPoint *>(makeFreePoint(wx, wy));
+        hit->selected = true;
+        toolPts_.push_back(hit);
+        if (toolPts_.size() < 2) {
+            return "need|双曲线：还差 1 个焦点";
+        }
+        askKind_ = "hyperbolaA";
+        askPts_ = { toolPts_[0], toolPts_[1] };
+        toolPts_.clear();
+        return "ask|双曲线：输入实半轴 a（须小于半焦距，可引用滑动条）";
+    }
+
+    // 1.2.0.3 抛物线工具：焦点点按 → 准线直线拾取（两步；准线须为直线对象）
+    if (tool_ == "parabola") {
+        if (toolPts_.empty()) {
+            GeoPoint *F = hit ? hit : static_cast<GeoPoint *>(makeFreePoint(wx, wy));
+            F->selected = true;
+            toolPts_.push_back(F);
+            return "need|抛物线：再点选准线（直线）";
+        }
+        GeoElement *dl = pickObject(px, py);
+        if (!dl || !dynamic_cast<GeoLine *>(dl)) {
+            return "need|抛物线：请点选准线（直线）";
+        }
+        std::string expr = "Parabola(" + toolPts_[0]->label + ", " + dl->label + ")";
+        toolPts_.clear();
+        size_t before = geos_.size();
+        if (!input(expr)) {
+            return "err|" + (lastError.empty() ? "无法创建抛物线" : lastError);
+        }
+        return "done|" + geos_[before]->label;
+    }
+
     // 多边形：点第一个顶点闭合（上游 行为）
     if (tool_ == "polygon") {
         if (!hit) hit = static_cast<GeoPoint *>(makeFreePoint(wx, wy));
@@ -15656,6 +15818,13 @@ std::string Kernel::toolParam(const std::string &v)
     } else if (kind == "segLength") {
         if (!input("Segment(" + askPts_[0]->label + ", " + t + ")")) {
             return "err|" + (lastError.empty() ? "无法创建线段" : lastError);
+        }
+        made = geos_[before]->label;
+    } else if (kind == "hyperbolaA") {
+        // 1.2.0.3 双曲线工具完成：Hyperbola(F1, F2, a)
+        if (!input("Hyperbola(" + askPts_[0]->label + ", " + askPts_[1]->label
+            + ", " + t + ")")) {
+            return "err|" + (lastError.empty() ? "无法创建双曲线" : lastError);
         }
         made = geos_[before]->label;
     } else if (kind == "angleSize") {
