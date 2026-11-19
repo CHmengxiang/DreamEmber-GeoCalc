@@ -5778,9 +5778,13 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             form = 3;
             s1 = o1;
             s2 = o2;
+        } else if (dynamic_cast<GeoVector *>(o1) && dynamic_cast<GeoVector *>(o2)) {
+            form = 4;   // 1.2.0.5 向量夹角
+            s1 = o1;
+            s2 = o2;
         }
         if (form == 0) {
-            lastError = "Angle 需要（点, 顶点, 点）或（平面/直线/线段/射线 组合）";
+            lastError = "Angle 需要（点, 顶点, 点）或（平面/直线/线段/射线/向量 组合）";
             made = nullptr;
             return true;
         }
@@ -5826,6 +5830,13 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                     dz = r->ez2() - r->ez1();
                     return true;
                 }
+                if (GeoVector *v = dynamic_cast<GeoVector *>(e)) {
+                    // 1.2.0.5 向量方向=端点差（image/字面量端点统一走访问器）
+                    dx = v->ex2() - v->ex1();
+                    dy = v->ey2() - v->ey1();
+                    dz = v->ez2() - v->ez1();
+                    return true;
+                }
                 return false;
             };
             double u1x = 0, u1y = 0, u1z = 0, u2x = 0, u2y = 0, u2z = 0;
@@ -5850,6 +5861,20 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             if (!dirOfEl(S2, u2x, u2y, u2z)) return 0.0;
             if (!unit3(u1x, u1y, u1z, u1x, u1y, u1z)
                 || !unit3(u2x, u2y, u2z, u2x, u2y, u2z)) return 0.0;
+            // 1.2.0.5 form4 向量夹角：2D 逆时针方向角 0..360（三点角同口径）；
+            // 含 z 分量 → unsigned acos 0..90 锐角侧（线线同口径）
+            if (FORM == 4) {
+                if (fabs(u1z) < 1e-12 && fabs(u2z) < 1e-12) {
+                    const double crs = u1x * u2y - u1y * u2x;
+                    const double dt = u1x * u2x + u1y * u2y;
+                    double ang = atan2(crs, dt) * 180.0 / M_PI;
+                    while (ang < 0.0) ang += 360.0;
+                    while (ang >= 360.0) ang -= 360.0;
+                    return ang;
+                }
+                const double c4 = fabs(u1x * u2x + u1y * u2y + u1z * u2z);
+                return acos(std::min(1.0, c4)) * 180.0 / M_PI;
+            }
             const double c = fabs(u1x * u2x + u1y * u2y + u1z * u2z);
             return acos(std::min(1.0, c)) * 180.0 / M_PI;
         };
@@ -5861,6 +5886,121 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         n->visible = true;      // 1.0.8.10 扇面随角值绘制（代数行可关）
         n->update();
         made = std::move(n);
+        return true;
+    }
+    // 1.2.0.5 Dot(u, v)：向量点积（2D/3D，端点差现值实时取，随基准重算）
+    if (cmdLower == "dot" && a.size() == 2) {
+        GeoVector *v1 = dynamic_cast<GeoVector *>(lookup(a[0]));
+        GeoVector *v2 = dynamic_cast<GeoVector *>(lookup(a[1]));
+        if (!v1 || !v2) {
+            lastError = "Dot 需要（向量, 向量）";
+            made = nullptr;
+            return true;
+        }
+        auto n = std::make_unique<GeoNumeric>();
+        GeoVector *p1 = v1, *p2 = v2;
+        n->calc = [p1, p2]() {
+            return (p1->ex2() - p1->ex1()) * (p2->ex2() - p2->ex1())
+                + (p1->ey2() - p1->ey1()) * (p2->ey2() - p2->ey1())
+                + (p1->ez2() - p1->ez1()) * (p2->ez2() - p2->ez1());
+        };
+        n->cmd = "Dot(" + v1->label + ", " + v2->label + ")";
+        n->cmdName = "Dot";
+        n->cmdArgs = { a[0], a[1] };
+        n->inputs = { v1, v2 };
+        n->update();
+        made = std::move(n);
+        return true;
+    }
+    // 1.2.0.5 Cross(u, v)：2D→z 分量标量；含 z→叉积向量（image 向量
+    // lives3D，起点原点缓存）；零向量收缩为零长向量（渲染自然不可见）
+    if (cmdLower == "cross" && a.size() == 2) {
+        GeoVector *v1 = dynamic_cast<GeoVector *>(lookup(a[0]));
+        GeoVector *v2 = dynamic_cast<GeoVector *>(lookup(a[1]));
+        if (!v1 || !v2) {
+            lastError = "Cross 需要（向量, 向量）";
+            made = nullptr;
+            return true;
+        }
+        GeoVector *p1 = v1, *p2 = v2;
+        const bool d3 = fabs(v1->ez2() - v1->ez1()) > 1e-12
+            || fabs(v2->ez2() - v2->ez1()) > 1e-12
+            || v1->lives3D || v2->lives3D;
+        if (!d3) {
+            auto n = std::make_unique<GeoNumeric>();
+            n->calc = [p1, p2]() {
+                return (p1->ex2() - p1->ex1()) * (p2->ey2() - p2->ey1())
+                    - (p1->ey2() - p1->ey1()) * (p2->ex2() - p2->ex1());
+            };
+            n->cmd = "Cross(" + v1->label + ", " + v2->label + ")";
+            n->cmdName = "Cross";
+            n->cmdArgs = { a[0], a[1] };
+            n->inputs = { v1, v2 };
+            n->update();
+            made = std::move(n);
+            return true;
+        }
+        auto w = std::make_unique<GeoVector>();
+        w->image = true;
+        w->lives3D = true;
+        w->calc = [p1, p2](GeoVector *q) {
+            const double dx1 = p1->ex2() - p1->ex1();
+            const double dy1 = p1->ey2() - p1->ey1();
+            const double dz1 = p1->ez2() - p1->ez1();
+            const double dx2 = p2->ex2() - p2->ex1();
+            const double dy2 = p2->ey2() - p2->ey1();
+            const double dz2 = p2->ez2() - p2->ez1();
+            q->ix1 = 0;
+            q->iy1 = 0;
+            q->iz1 = 0;
+            q->ix2 = dy1 * dz2 - dz1 * dy2;
+            q->iy2 = dz1 * dx2 - dx1 * dz2;
+            q->iz2 = dx1 * dy2 - dy1 * dx2;
+        };
+        w->inputs = { v1, v2 };
+        w->cmdName = "Cross";
+        w->cmdArgs = { a[0], a[1] };
+        w->update();
+        made = std::move(w);
+        return true;
+    }
+    // 1.2.0.5 UnitVector(v)：同起点单位向量（image 向量；2D/3D 各归其
+    // 渲染层）；零向量收缩为零长
+    if (cmdLower == "unitvector" && a.size() == 1) {
+        GeoVector *v1 = dynamic_cast<GeoVector *>(lookup(a[0]));
+        if (!v1) {
+            lastError = "UnitVector 需要向量";
+            made = nullptr;
+            return true;
+        }
+        GeoVector *p1 = v1;
+        const bool d3 = fabs(v1->ez2() - v1->ez1()) > 1e-12 || v1->lives3D;
+        auto w = std::make_unique<GeoVector>();
+        w->image = true;
+        w->lives3D = d3;
+        w->calc = [p1](GeoVector *q) {
+            const double dx = p1->ex2() - p1->ex1();
+            const double dy = p1->ey2() - p1->ey1();
+            const double dz = p1->ez2() - p1->ez1();
+            const double l = sqrt(dx * dx + dy * dy + dz * dz);
+            q->ix1 = p1->ex1();
+            q->iy1 = p1->ey1();
+            q->iz1 = p1->ez1();
+            if (!(l > 1e-12)) {
+                q->ix2 = q->ix1;
+                q->iy2 = q->iy1;
+                q->iz2 = q->iz1;   // 零向量收缩
+                return;
+            }
+            q->ix2 = q->ix1 + dx / l;
+            q->iy2 = q->iy1 + dy / l;
+            q->iz2 = q->iz1 + dz / l;
+        };
+        w->inputs = { v1 };
+        w->cmdName = "UnitVector";
+        w->cmdArgs = { a[0] };
+        w->update();
+        made = std::move(w);
         return true;
     }
     if (cmdLower == "angle" && a.size() == 3) {
