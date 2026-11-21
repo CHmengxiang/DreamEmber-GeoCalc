@@ -545,6 +545,10 @@ struct Index {
             this.menuOpen = false;
             this.fireEvt('evt.openSteps');
           })
+          this.MenuRow('导出动画 GIF', '滑动条动画逐帧捕获存图库', () => {
+            this.menuOpen = false;
+            this.fireEvt('evt.exportGif');
+          })
 
           Divider().color(this.cDivider())
 

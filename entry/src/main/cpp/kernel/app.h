@@ -5,7 +5,8 @@
 #include <memory>
 #include <string>
 #include <vector>
-#include "kernel/geos.h"
+#include <cstdint>
+#include "kernel/geos.h"   // 150包 EncodeGif89a 用 uint8_t
 #include "kernel/view.h"
 
 namespace dreamember {
@@ -209,6 +210,11 @@ public:
     bool setVisible(const std::string &label, bool vis);
     bool animateToggle(const std::string &label);   // 返回 toggle 后是否在动画
     bool animTick(double dt);                       // 有 slider 推进返回 true
+    // 150包 动画导出 GIF：RGBA 帧序列（w*h*4 连续 * frameCount）→ GIF89a
+    // 字节流（256 色中位切量化 + LZW，NETSCAPE2.0 循环）。主机探针含解码
+    // 回环校验
+    std::string EncodeGif89a(const std::vector<uint8_t> &rgba, int w, int h,
+                             int frameCount, int delayMs);
     bool anyAnimating() const;
     // 画布选中特效（单选；label 空串清除）。渲染时对选中对象加亮色加宽描边
     void setSelected(const std::string &label);

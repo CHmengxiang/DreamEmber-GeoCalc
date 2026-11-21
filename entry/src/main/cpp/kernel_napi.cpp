@@ -19,6 +19,44 @@ dreamember::GeoNumeric *g_dragSlider = nullptr; // N5 当前被拖动的滑动�
 dreamember::GeoPoint *g_dragPoint3D = nullptr;  // 1.0.8.1 当前被拖动的三维自由点
 dreamember::GeoElement *g_dragObj3D = nullptr;  // 1.1.3.8 当前被拖动的三维非点对象（球/面/实体）
 
+napi_value ToNapi(napi_env env, const std::string &s)
+{
+    napi_value out;
+    napi_create_string_utf8(env, s.c_str(), s.size(), &out);
+    return out;
+}
+
+// 150包 动画导出 GIF：frames(ArrayBuffer 连续 RGBA)+w+h+帧数+延时ms →
+// GIF89a ArrayBuffer（编码失败返回空 buffer）
+napi_value KernelExportGif(napi_env env, napi_callback_info info)
+{
+    size_t argc = 5;
+    napi_value argv[5];
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    napi_value out;
+    napi_create_arraybuffer(env, 0, nullptr, &out);
+    if (argc < 5) return out;
+    void *data = nullptr;
+    size_t len = 0;
+    if (napi_get_arraybuffer_info(env, argv[0], &data, &len) != napi_ok) return out;
+    double w = 0, h = 0, fc = 0, delay = 0;
+    napi_get_value_double(env, argv[1], &w);
+    napi_get_value_double(env, argv[2], &h);
+    napi_get_value_double(env, argv[3], &fc);
+    napi_get_value_double(env, argv[4], &delay);
+    std::vector<uint8_t> frames((uint8_t *)data, (uint8_t *)data + len);
+    const std::string gif = g_kernel.EncodeGif89a(frames, (int)w, (int)h,
+                                                  (int)fc, (int)delay);
+    void *od = nullptr;
+    napi_value ob;
+    if (napi_create_arraybuffer(env, gif.size(), &od, &ob) == napi_ok
+        && gif.size() > 0) {
+        memcpy(od, gif.data(), gif.size());
+        return ob;
+    }
+    return out;
+}
+
 std::string NapiToString(napi_env env, napi_value v)
 {
     size_t len = 0;
@@ -27,13 +65,6 @@ std::string NapiToString(napi_env env, napi_value v)
     napi_get_value_string_utf8(env, v, &s[0], len + 1, &len);
     s.resize(len);
     return s;
-}
-
-napi_value ToNapi(napi_env env, const std::string &s)
-{
-    napi_value out;
-    napi_create_string_utf8(env, s.c_str(), s.size(), &out);
-    return out;
 }
 
 // ---- 协议编码 ----
@@ -1054,6 +1085,7 @@ void DreamemberRegisterKernelApis(napi_env env, napi_value exports)
         { "kernelAnimTick", nullptr, KernelAnimTick, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelGetProps", nullptr, KernelGetProps, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelSetProp", nullptr, KernelSetProp, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelExportGif", nullptr, KernelExportGif, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelTableEval", nullptr, KernelTableEval, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelObjValue", nullptr, KernelObjValue, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelSetTablePoints", nullptr, KernelSetTablePoints, nullptr, nullptr, nullptr, napi_default, nullptr },

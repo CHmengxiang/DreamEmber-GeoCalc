@@ -97,3 +97,7 @@ export const ratexLayout: (latex: string, displayMode: number, color?: string) =
 // 六十一包②：rest=光标后剩余串时，在 linear/rest 边界（光标落点）插入
 // 魔色 rule 探针 {\color{#010203}\rule{0.05em}{0.8em}}，供光标定位
 export const ratexConvert: (linear: string, rest?: string) => string;
+// 150包 动画导出 GIF：frames=连续 RGBA 帧缓冲，w/h/帧数/帧延时ms
+// → GIF89a 字节 ArrayBuffer（编码失败为空 buffer）
+export const kernelExportGif: (frames: ArrayBuffer, w: number, h: number,
+  frameCount: number, delayMs: number) => ArrayBuffer;

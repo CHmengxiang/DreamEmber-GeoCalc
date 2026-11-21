@@ -13093,6 +13093,216 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
     return false;
 }
 
+// ---------- 150包 动画导出 GIF：GIF89a 编码器（纯 C++，无系统依赖） ----------
+namespace {
+
+// 中位切盒子（distinct 24bit 颜色集合）
+struct GifBox {
+    std::vector<uint32_t> cs;
+};
+
+// 按最长通道中位分裂至 ≤256 盒
+void GifMedianCut(std::vector<GifBox> &boxes)
+{
+    while (boxes.size() < 256) {
+        int bi = -1, bspan = -1;
+        size_t baxis = 0;
+        for (size_t i = 0; i < boxes.size(); ++i) {
+            if (boxes[i].cs.size() < 2) continue;
+            for (int a = 0; a < 3; ++a) {
+                const size_t sh = (size_t)(2 - a) * 8;   // a0=R a1=G a2=B
+                uint32_t lo = 255, hi = 0;
+                for (uint32_t c : boxes[i].cs) {
+                    const uint32_t v = (c >> sh) & 0xFF;
+                    if (v < lo) lo = v;
+                    if (v > hi) hi = v;
+                }
+                if ((int)(hi - lo) > bspan) {
+                    bspan = (int)(hi - lo);
+                    bi = (int)i;
+                    baxis = sh;
+                }
+            }
+        }
+        if (bi < 0) break;
+        auto &cs = boxes[bi].cs;
+        std::sort(cs.begin(), cs.end(),
+                  [baxis](uint32_t x, uint32_t y) {
+                      return ((x >> baxis) & 0xFF) < ((y >> baxis) & 0xFF);
+                  });
+        const size_t mid = cs.size() / 2;
+        GifBox nb;
+        nb.cs.assign(cs.begin() + mid, cs.end());
+        cs.resize(mid);
+        boxes.push_back(std::move(nb));
+    }
+}
+
+// GIF LZW 压缩（变宽码 LSB-first 装包；字典 4094 截断发 clear 防边界）
+void GifLzwCompress(const std::vector<uint8_t> &idx, int mcs,
+                    std::vector<uint8_t> &out)
+{
+    const int clear = 1 << mcs;
+    const int eoi = clear + 1;
+    int codeSize = mcs + 1;
+    int next = eoi + 1;
+    std::unordered_map<uint32_t, int> dict;
+    uint32_t acc = 0;
+    int nbits = 0;
+    auto emit = [&](int code) {
+        acc |= (uint32_t)code << nbits;
+        nbits += codeSize;
+        while (nbits >= 8) {
+            out.push_back((uint8_t)(acc & 0xFF));
+            acc >>= 8;
+            nbits -= 8;
+        }
+    };
+    emit(clear);
+    uint32_t prefix = idx.empty() ? 0 : idx[0];
+    for (size_t i = 1; i < idx.size(); ++i) {
+        const uint32_t ch = idx[i];
+        const uint32_t key = (prefix << 8) | ch;
+        auto it = dict.find(key);
+        if (it != dict.end()) {
+            prefix = (uint32_t)it->second;
+            continue;
+        }
+        emit((int)prefix);
+        if (next >= 4094) {
+            emit(clear);
+            dict.clear();
+            codeSize = mcs + 1;
+            next = eoi + 1;
+        } else {
+            dict.emplace(key, next);
+            // 码宽增长：分配值 == 2^cs 时增宽（镜像解码器「已分配 2^cs−1
+            // 后增宽」——解码器加项滞后一码，增长点必须同步在 c_{k+2} 前）
+            if (next == (1 << codeSize) && codeSize < 12) ++codeSize;
+            ++next;
+        }
+        prefix = ch;
+    }
+    emit((int)prefix);
+    emit(eoi);
+    if (nbits > 0) out.push_back((uint8_t)(acc & 0xFF));
+}
+
+} // namespace
+
+std::string Kernel::EncodeGif89a(const std::vector<uint8_t> &rgba, int w, int h,
+                                 int frameCount, int delayMs)
+{
+    if (w <= 0 || h <= 0 || frameCount <= 0
+        || rgba.size() < (size_t)w * h * 4 * (size_t)frameCount) {
+        return "";
+    }
+    const size_t frameBytes = (size_t)w * h * 4;
+    // 1) 收集 distinct 颜色
+    std::unordered_map<uint32_t, int> counts;
+    for (int f = 0; f < frameCount; ++f) {
+        const uint8_t *p = rgba.data() + frameBytes * (size_t)f;
+        for (size_t i = 0; i < (size_t)w * h; ++i) {
+            ++counts[((uint32_t)p[i * 4] << 16) | ((uint32_t)p[i * 4 + 1] << 8)
+                     | p[i * 4 + 2]];
+        }
+    }
+    // 2) 调色板：≤256 直用，否则中位切
+    std::vector<uint32_t> palette;
+    if (counts.size() <= 256) {
+        for (const auto &kv : counts) palette.push_back(kv.first);
+    } else {
+        std::vector<GifBox> boxes(1);
+        for (const auto &kv : counts) boxes[0].cs.push_back(kv.first);
+        GifMedianCut(boxes);
+        for (const GifBox &b : boxes) {
+            if (b.cs.empty()) continue;
+            double r = 0, g = 0, bl = 0;
+            for (uint32_t c : b.cs) {
+                r += (c >> 16) & 0xFF;
+                g += (c >> 8) & 0xFF;
+                bl += c & 0xFF;
+            }
+            palette.push_back(((uint32_t)(r / b.cs.size() + 0.5) << 16)
+                              | ((uint32_t)(g / b.cs.size() + 0.5) << 8)
+                              | (uint32_t)(bl / b.cs.size() + 0.5));
+        }
+    }
+    while (palette.size() < 2) palette.push_back(0);
+    int gctBits = 1;
+    while ((1 << gctBits) < (int)palette.size()) ++gctBits;
+    palette.resize((size_t)1 << gctBits, 0);
+    // 3) 颜色→索引（5bit 桶缓存限扫描量）
+    std::unordered_map<uint32_t, uint8_t> colorToIdx;
+    auto nearestIdx = [&](uint32_t c) -> uint8_t {
+        const uint32_t key = (((c >> 16) & 0xF8) << 13) | (((c >> 8) & 0xF8) << 6)
+                             | ((c & 0xF8) >> 2);
+        auto it = colorToIdx.find(key);
+        if (it != colorToIdx.end()) return it->second;
+        int best = 0;
+        long long bd = (long long)1 << 60;
+        for (size_t i = 0; i < palette.size(); ++i) {
+            const long long dr = (long long)((c >> 16) & 0xFF) - (palette[i] >> 16 & 0xFF);
+            const long long dg = (long long)((c >> 8) & 0xFF) - (palette[i] >> 8 & 0xFF);
+            const long long db = (long long)(c & 0xFF) - (palette[i] & 0xFF);
+            const long long d = dr * dr + dg * dg + db * db;
+            if (d < bd) { bd = d; best = (int)i; }
+        }
+        colorToIdx.emplace(key, (uint8_t)best);
+        return (uint8_t)best;
+    };
+    // 4) 组装 GIF89a
+    std::string o = "GIF89a";
+    o += (char)(w & 0xFF); o += (char)((w >> 8) & 0xFF);
+    o += (char)(h & 0xFF); o += (char)((h >> 8) & 0xFF);
+    o += (char)(0x80 | (gctBits - 1));
+    o += (char)0; o += (char)0;
+    for (uint32_t c : palette) {
+        o += (char)((c >> 16) & 0xFF);
+        o += (char)((c >> 8) & 0xFF);
+        o += (char)(c & 0xFF);
+    }
+    // NETSCAPE2.0 无限循环
+    o += (char)0x21; o += (char)0xFF; o += (char)0x0B;
+    o += "NETSCAPE2.0";
+    o += (char)0x03; o += (char)0x01;
+    o += (char)0x00; o += (char)0x00; o += (char)0x00;
+    const int delayCs = delayMs / 10 <= 0 ? 1 : delayMs / 10;
+    const int mcs = gctBits < 2 ? 2 : gctBits;
+    for (int f = 0; f < frameCount; ++f) {
+        const uint8_t *p = rgba.data() + frameBytes * (size_t)f;
+        std::vector<uint8_t> idx;
+        idx.reserve((size_t)w * h);
+        for (size_t i = 0; i < (size_t)w * h; ++i) {
+            idx.push_back(nearestIdx(((uint32_t)p[i * 4] << 16)
+                                     | ((uint32_t)p[i * 4 + 1] << 8)
+                                     | p[i * 4 + 2]));
+        }
+        std::vector<uint8_t> lzw;
+        GifLzwCompress(idx, mcs, lzw);
+        // GCE：disposal=1 不消去
+        o += (char)0x21; o += (char)0xF9; o += (char)0x04; o += (char)0x04;
+        o += (char)(delayCs & 0xFF); o += (char)((delayCs >> 8) & 0xFF);
+        o += (char)0x00; o += (char)0x00;
+        // Image Descriptor
+        o += (char)0x2C;
+        o += (char)0x00; o += (char)0x00; o += (char)0x00; o += (char)0x00;
+        o += (char)(w & 0xFF); o += (char)((w >> 8) & 0xFF);
+        o += (char)(h & 0xFF); o += (char)((h >> 8) & 0xFF);
+        o += (char)0x00;
+        // LZW 子块
+        o += (char)(uint8_t)mcs;
+        for (size_t i = 0; i < lzw.size(); i += 255) {
+            const size_t n = std::min<size_t>(255, lzw.size() - i);
+            o += (char)(uint8_t)n;
+            o.append((const char *)lzw.data() + i, n);
+        }
+        o += (char)0x00;
+    }
+    o += (char)0x3B;
+    return o;
+}
+
 // ---------- 构造列表管理 ----------
 
 GeoElement *Kernel::add(std::unique_ptr<GeoElement> made, const std::string &name)

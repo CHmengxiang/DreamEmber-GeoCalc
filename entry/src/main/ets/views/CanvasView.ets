@@ -245,6 +245,8 @@ export struct CanvasView {
   @StorageProp('evt.saveGgb') @Watch('onSaveGgbEvt') private saveGgbTick: number = 0;
   // 1.2.0.12 导出图片 / 复制构图事件（Index ☰ 菜单触发）
   @StorageProp('evt.exportPng') @Watch('onExportPngEvt') private exportPngTick: number = 0;
+  // 150包 导出动画 GIF（Index ☰ 菜单触发）
+  @StorageProp('evt.exportGif') @Watch('onExportGifEvt') private exportGifTick: number = 0;
   @StorageProp('evt.copyGgb') @Watch('onCopyGgbEvt') private copyGgbTick: number = 0;
   // 第五包：CAS 视图（☰ 菜单"视图"分组发起，上游经典版 同位）
   @StorageProp('evt.openCas') @Watch('onOpenCasEvt') private openCasTick: number = 0;
@@ -1868,6 +1870,89 @@ export struct CanvasView {
     }).catch(() => {
       this.alertBox('复制失败', '剪贴板写入未成功');
     });
+  }
+
+  // 150包 导出动画 GIF：找动画中滑条（行协议 anim=1 + min/max）→
+  // 等步采样 N 帧（setProp value → 等渲染 → componentSnapshot →
+  // readPixelsToBuffer）→ napi GIF89a 编码 → 图库落盘（saveButton
+  // 口径同 PNG 导出，零权限）。完成回置滑条原值
+  private sleepMs(ms: number): Promise<void> {
+    return new Promise<void>((r) => {
+      setTimeout(() => r(), ms);
+    });
+  }
+
+  private async onExportGifEvt(): Promise<void> {
+    let sl: AlgebraEntry | null = null;
+    for (const e of this.algebra) {
+      if (e.type === 'slider' && e.anim === '1') { sl = e; break; }
+    }
+    if (sl === null) {
+      this.alertBox('导出动画', '没有正在播放的滑动条动画——先打开滑条动画再导出');
+      return;
+    }
+    const is3d = (AppStorage.get<boolean>('view3dOn') ?? false);
+    const compId = is3d ? 'geo3dView' : 'geo2dStage';
+    const N = 36;
+    const delayMs = 60;
+    try {
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      let w = 0;
+      let h = 0;
+      const bufs: ArrayBuffer[] = [];
+      for (let k = 0; k < N; ++k) {
+        const v = sl.min + (sl.max - sl.min) * k / N;
+        dreamemberKernel.kernelSetProp(sl.label, 'value', v.toFixed(6));
+        await this.sleepMs(45);
+        const snap = await this.getUIContext().getComponentSnapshot().get(compId);
+        if (k === 0) {
+          const info = await snap.getImageInfo();
+          w = info.size.width;
+          h = info.size.height;
+        }
+        const ab = new ArrayBuffer(w * h * 4);
+        await snap.readPixelsToBuffer(ab);
+        bufs.push(ab);
+      }
+      dreamemberKernel.kernelSetProp(sl.label, 'value', sl.value);
+      const all = new ArrayBuffer(w * h * 4 * N);
+      const u8 = new Uint8Array(all);
+      let off = 0;
+      for (const b of bufs) {
+        u8.set(new Uint8Array(b), off);
+        off += b.byteLength;
+      }
+      const gif: ArrayBuffer = dreamemberKernel.kernelExportGif(all, w, h, N, delayMs);
+      if (gif.byteLength <= 0) {
+        this.alertBox('导出失败', 'GIF 编码未成功，请重试');
+        return;
+      }
+      const path = ctx.cacheDir + '/dreamember_anim.gif';
+      const file = fs.openSync(path,
+        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(file.fd, gif);
+      } finally {
+        fs.closeSync(file);
+      }
+      const ph = photoAccessHelper.getPhotoAccessHelper(ctx);
+      const now = new Date();
+      const pad = (v: number): string =>
+        (v < 10 ? '0' : '') + v.toString();
+      const title = '梦烬几何_动画_' + pad(now.getHours()) + pad(now.getMinutes())
+        + pad(now.getSeconds());
+      const infos: Array<photoAccessHelper.PhotoCreationConfig> = [
+        { title: title, fileNameExtension: 'gif',
+          photoType: photoAccessHelper.PhotoType.IMAGE }
+      ];
+      const created = await ph.showAssetsCreationDialog(
+        [fileUri.getUriFromPath(path)], infos);
+      if (created.length > 0) {
+        this.alertBox('导出成功', title + '.gif 已存入图库（' + N + ' 帧）');
+      }
+    } catch (e) {
+      this.alertBox('导出失败', '动画帧捕获未成功，请重试');
+    }
   }
 
   // 1.2.0.12 导出 PNG：componentSnapshot 截当前活动画布（2D/3D）→ PNG 落
