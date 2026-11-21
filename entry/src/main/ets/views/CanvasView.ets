@@ -247,6 +247,8 @@ export struct CanvasView {
   @StorageProp('evt.exportPng') @Watch('onExportPngEvt') private exportPngTick: number = 0;
   // 150包 导出动画 GIF（Index ☰ 菜单触发）
   @StorageProp('evt.exportGif') @Watch('onExportGifEvt') private exportGifTick: number = 0;
+  // 1.5.1 导出合并：弹三选弹窗分派 .ggb / 图片 / 动画 GIF
+  @StorageProp('evt.exportMenu') @Watch('onExportMenuEvt') private exportMenuTick: number = 0;
   @StorageProp('evt.copyGgb') @Watch('onCopyGgbEvt') private copyGgbTick: number = 0;
   // 第五包：CAS 视图（☰ 菜单"视图"分组发起，上游经典版 同位）
   @StorageProp('evt.openCas') @Watch('onOpenCasEvt') private openCasTick: number = 0;
@@ -1800,6 +1802,37 @@ export struct CanvasView {
       primaryButton: {
         value: '确定',
         action: () => {}
+      }
+    });
+  }
+
+  // 1.5.1 导出合并弹窗：ActionSheet 三选项分派既有处理器（PNG 与 GIF
+  // 均走 showAssetsCreationDialog 系统允许确认，零权限口径不变）
+  private onExportMenuEvt(): void {
+    ActionSheet.show({
+      title: '导出',
+      message: '选择导出类型',
+      sheets: [
+        {
+          title: '保存 .ggb 文件',
+          action: (): void => {
+            this.onSaveGgbEvt();
+          }
+        },
+        {
+          title: '保存图片',
+          action: (): void => {
+            this.onExportPngEvt();
+          }
+        },
+        {
+          title: '导出动画 GIF',
+          action: (): void => {
+            this.onExportGifEvt();
+          }
+        }
+      ],
+      cancel: (): void => {
       }
     });
   }

@@ -495,6 +495,10 @@ struct Index {
 
           Divider().color(this.cDivider())
 
+          // 1.5.1：菜单项多时抽屉溢出——Scroll 包住菜单区（标题区常驻），
+          // 小屏/自由窗口下「关于」等末尾行可滚动到达可点（审核项）
+          Scroll() {
+            Column() {
           this.MenuRow('新建', '清空全部对象并重置视图', () => {
             this.confirmNew();
           })
@@ -502,41 +506,14 @@ struct Index {
             this.menuOpen = false;
             this.fireEvt('evt.openGgb');
           })
-          this.MenuRow('保存', '当前图保存为 .ggb 文件', () => {
+          // 1.5.1 导出合并：保存 .ggb / 图片 / 动画 GIF 三入口收进
+          // 「导出」一行，CanvasView 弹三选弹窗分派（PNG 走系统保存
+          // 对话框自带允许确认——与 GIF 路径同口径，不再依赖 SaveButton
+          // 安全组件包层）
+          this.MenuRow('导出', '保存 .ggb 文件 / 图片 / 动画 GIF', () => {
             this.menuOpen = false;
-            this.fireEvt('evt.saveGgb');
+            this.fireEvt('evt.exportMenu');
           })
-          // 1.2.0.12 导出 PNG：saveButton 安全组件包一层（零权限——点击
-          // 成功即获临时授权窗口，showAssetsCreationDialog 由用户确认落图库，
-          // 避免 photoAccessHelper 权限弹窗审核风险）
-          Row() {
-            Column() {
-              SaveButton({
-                icon: SaveIconStyle.FULL_FILLED,
-                text: SaveDescription.SAVE_IMAGE,
-                buttonType: ButtonType.Capsule
-              })
-                .backgroundColor(this.dark ? '#33363B' : '#E9EBF2')
-                .fontColor(this.cText())
-                .width(120)
-                .height(30)
-                .onClick((event: ClickEvent, result: SaveButtonOnClickResult) => {
-                  if (result === SaveButtonOnClickResult.SUCCESS) {
-                    this.menuOpen = false;
-                    this.fireEvt('evt.exportPng');
-                  }
-                })
-              Text('导出图片')
-                .fontSize(16)
-                .fontColor(this.cText())
-                .margin({ top: 4 })
-            }
-            .alignItems(HorizontalAlign.Start)
-            .layoutWeight(1)
-          }
-          .width('100%')
-          .height(64)
-          .padding({ left: 20, right: 16 })
           this.MenuRow('复制构图', '当前构图 .ggb 文本进剪贴板', () => {
             this.menuOpen = false;
             this.fireEvt('evt.copyGgb');
@@ -544,10 +521,6 @@ struct Index {
           this.MenuRow('构造步骤', '构造序逐步回看与步进导航', () => {
             this.menuOpen = false;
             this.fireEvt('evt.openSteps');
-          })
-          this.MenuRow('导出动画 GIF', '滑动条动画逐帧捕获存图库', () => {
-            this.menuOpen = false;
-            this.fireEvt('evt.exportGif');
           })
 
           Divider().color(this.cDivider())
@@ -589,15 +562,19 @@ struct Index {
             router.pushUrl({ url: 'pages/About' });
           })
 
-          Blank()
-
           // 三十八轮：页脚声明改事实表述（早期 Web 方案遗留文案已撤，现应用
           // 零第三方代码；开源地址见「关于」页）
           Text('原创独立开发 · 源码按 GPL-3.0 协议开源\n基于开源 CAS 库 giac（GPL-3.0+）')
             .fontSize(10)
             .fontColor(this.dark ? '#5F646B' : '#AAAAAA')
             .width('100%')
-            .padding({ left: 20, bottom: 20 })
+            .padding({ left: 20, top: 16, bottom: 20 })
+            }
+          }
+          .scrollBar(BarState.Auto)
+          .align(Alignment.Top)
+          .constraintSize({ minWidth: this.isWide ? 360 : 300 })
+          .width(this.isWide ? 360 : 300)
         }
         .width(this.isWide ? 360 : 300)
         .height('100%')
