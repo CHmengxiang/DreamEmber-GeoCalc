@@ -71,7 +71,8 @@ export struct StepsPanel {
 
       List() {
         ForEach(this.algebra, (e: AlgebraEntry, idx: number) => {
-          Row() {
+          ListItem() {
+            Row() {
             Text(`${idx + 1}.`)
               .fontSize(12)
               .fontColor(Theme.faint(this.dark))
@@ -101,6 +102,7 @@ export struct StepsPanel {
             this.cur = idx;
             this.onSelect(e.label);
           })
+          }
         }, (e: AlgebraEntry): string => e.label)
       }
       .width('100%')
