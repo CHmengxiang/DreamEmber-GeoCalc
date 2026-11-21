@@ -30,6 +30,8 @@ struct GeoFillState {
 
 std::string ColorHex(const GeoColor &c);
 std::string FormatNum(double v);
+// 143包 复数显示 a+bi：b=0 → a；b=±1 省系数；a=0 纯虚；负 b 用 -
+std::string ComplexText(double re, double im);
 // ax+by=c 的展示文本（y = ... 优先；b≈0 时 x = ...）
 std::string LineEqText(double a, double b, double c);
 // ax+by+cz=d 的展示文本（1.0.8.2 平面：零系数跳过、±1 省略数值，全零写 "0 = d"）
@@ -102,6 +104,9 @@ public:
     //（CopyGeoState）、随对象删除消失；XML <trace val="true"/> 往返
     bool trace = false;
     std::vector<double> traceBuf;
+    // 143包 复数标记：true 时值列 a+bi 显示（几何仍为 2D 点；拖动/附着
+    // 不变）。Complex 命令建自由复数点，复运算命令产物 calc 依赖置位
+    bool isComplex = false;
 
     void update() override;
     std::string valueText() const override;

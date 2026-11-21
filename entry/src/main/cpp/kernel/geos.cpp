@@ -94,9 +94,27 @@ std::string GeoLocus::definitionText() const
     return cmdDefText();
 }
 
+// 143包 复数 a+bi 文本：b=0 → a；|b|=1 省系数；a=0 纯虚；负 b 用 -
+std::string ComplexText(double re, double im)
+{
+    const std::string a = FormatNum(re);
+    if (fabs(im) < 1e-15) return a;
+    const bool neg = im < 0;
+    const double ai = fabs(im);
+    std::string b;
+    if (fabs(ai - 1.0) < 1e-15) {
+        b = "i";
+    } else {
+        b = FormatNum(ai) + "i";
+    }
+    if (fabs(re) < 1e-15) return neg ? "-" + b : b;
+    return a + (neg ? "-" : "+") + b;
+}
+
 std::string GeoPoint::valueText() const
 {
     if (is3D) return "(" + FormatNum(x) + ", " + FormatNum(y) + ", " + FormatNum(z) + ")";
+    if (isComplex) return ComplexText(x, y);   // 143包 复数点 a+bi
     return "(" + FormatNum(x) + ", " + FormatNum(y) + ")";
 }
 

@@ -3802,6 +3802,139 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         made = std::move(lc);
         return true;
     }
+    // 143包 复数一期：复数 = isComplex 标记 2D 点（值列 a+bi）。命令族
+    // 方案（eval 层 {re,im} 通道留二期，见 §101 调研）：
+    //   Complex(re,im) 建自由复数点；Re/Im/AbsC/Arg 取分量（数值依赖）；
+    //   Conjugate/SqrtC/MulC/DivC/AddC/SubC 复运算（复数点依赖）
+    if (cmdLower == "complex" && a.size() == 2) {
+        double re = 0, im = 0;
+        if (!numArg(a[0], re) || !numArg(a[1], im)) {
+            lastError = "Complex 的两参须为数值";
+            made = nullptr;
+            return true;
+        }
+        auto pp = std::make_unique<GeoPoint>();
+        pp->x = re;
+        pp->y = im;
+        pp->isComplex = true;
+        pp->pointSize = 4;
+        pp->cmdName = "Complex";
+        pp->cmdArgs = { a[0], a[1] };
+        made = std::move(pp);
+        return true;
+    }
+    if ((cmdLower == "re" || cmdLower == "im" || cmdLower == "absc"
+         || cmdLower == "arg") && a.size() == 1) {
+        GeoPoint *z = lookupPoint(a[0]);
+        if (!z) {
+            lastError = cmdLower == "absc"
+                ? "AbsC 需要（复数点）且对象须已存在"
+                : "需要（复数点）且对象须已存在";
+            made = nullptr;
+            return true;
+        }
+        const std::string disp = cmdLower == "re" ? "Re"
+            : cmdLower == "im" ? "Im" : cmdLower == "absc" ? "AbsC" : "Arg";
+        GeoPoint *src = z;
+        std::function<double()> f;
+        if (cmdLower == "re") {
+            f = [src]() { return src->x; };
+        } else if (cmdLower == "im") {
+            f = [src]() { return src->y; };
+        } else if (cmdLower == "absc") {
+            f = [src]() { return sqrt(src->x * src->x + src->y * src->y); };
+        } else {
+            f = [src]() { return atan2(src->y, src->x); };
+        }
+        auto n = std::make_unique<GeoNumeric>();
+        n->isFree = false;
+        n->calc = f;
+        n->cmd = disp + "(" + z->label + ")";
+        n->cmdName = disp;
+        n->cmdArgs = { a[0] };
+        n->inputs = { z };
+        n->update();
+        made = std::move(n);
+        return true;
+    }
+    if ((cmdLower == "conjugate" || cmdLower == "sqrtc") && a.size() == 1) {
+        GeoPoint *z = lookupPoint(a[0]);
+        if (!z) {
+            lastError = "需要（复数点）且对象须已存在";
+            made = nullptr;
+            return true;
+        }
+        auto pp = std::make_unique<GeoPoint>();
+        pp->isComplex = true;
+        pp->isFree = false;
+        pp->pointSize = 4;
+        GeoPoint *src = z;
+        if (cmdLower == "conjugate") {
+            pp->calc = [src](GeoPoint *q) { q->x = src->x; q->y = -src->y; };
+            pp->cmdName = "Conjugate";
+        } else {
+            pp->calc = [src](GeoPoint *q) {
+                const double r = sqrt(src->x * src->x + src->y * src->y);
+                if (r <= 1e-15) { q->x = 0.0; q->y = 0.0; return; }
+                const double th = atan2(src->y, src->x) / 2.0;
+                q->x = sqrt(r) * cos(th);
+                q->y = sqrt(r) * sin(th);
+            };
+            pp->cmdName = "SqrtC";
+        }
+        pp->cmdArgs = { a[0] };
+        pp->inputs = { z };
+        pp->update();
+        made = std::move(pp);
+        return true;
+    }
+    if ((cmdLower == "mulc" || cmdLower == "divc" || cmdLower == "addc"
+         || cmdLower == "subc") && a.size() == 2) {
+        GeoPoint *z = lookupPoint(a[0]);
+        GeoPoint *w = lookupPoint(a[1]);
+        if (!z || !w) {
+            lastError = "需要（复数点, 复数点）且两对象须已存在";
+            made = nullptr;
+            return true;
+        }
+        auto pp = std::make_unique<GeoPoint>();
+        pp->isComplex = true;
+        pp->isFree = false;
+        pp->pointSize = 4;
+        GeoPoint *s1 = z, *s2 = w;
+        if (cmdLower == "mulc") {
+            pp->calc = [s1, s2](GeoPoint *q) {
+                q->x = s1->x * s2->x - s1->y * s2->y;
+                q->y = s1->x * s2->y + s1->y * s2->x;
+            };
+            pp->cmdName = "MulC";
+        } else if (cmdLower == "divc") {
+            pp->calc = [s1, s2](GeoPoint *q) {
+                const double dd = s2->x * s2->x + s2->y * s2->y;
+                if (dd < 1e-15) return;   // 除零 v1 口径：保持 (0,0)
+                q->x = (s1->x * s2->x + s1->y * s2->y) / dd;
+                q->y = (s1->y * s2->x - s1->x * s2->y) / dd;
+            };
+            pp->cmdName = "DivC";
+        } else if (cmdLower == "addc") {
+            pp->calc = [s1, s2](GeoPoint *q) {
+                q->x = s1->x + s2->x;
+                q->y = s1->y + s2->y;
+            };
+            pp->cmdName = "AddC";
+        } else {
+            pp->calc = [s1, s2](GeoPoint *q) {
+                q->x = s1->x - s2->x;
+                q->y = s1->y - s2->y;
+            };
+            pp->cmdName = "SubC";
+        }
+        pp->cmdArgs = { a[0], a[1] };
+        pp->inputs = { z, w };
+        pp->update();
+        made = std::move(pp);
+        return true;
+    }
     // 1.0.8.6 Line(点, 向量) / Ray(点, 向量)（GGB Line/Ray(Point, Vector) 同
     // 口径）：过点沿方向的空间直线/射线。方向=向量对象标签端点差（image 感
     // 知）——裸元组按 GGB 口径是点（走两点直线，probe_1083 R18 口径），点标
@@ -15350,6 +15483,7 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->isFree = s->isFree;
             d->calc = s->calc;
             d->pointSize = s->pointSize;
+            d->isComplex = s->isComplex;   // 143包 复数标记随重定义迁移
             // 四十五包：路径依附状态随重定义迁移（重定义为坐标=脱离，
             // 重定义为 Point(path)=换路径/附着）
             d->path = s->path;
@@ -21824,7 +21958,11 @@ std::string Kernel::getXml() const
                 o += "<coords x=\"" + NumA(p->x) + "\" y=\"" + NumA(p->y)
                    + "\" z=\"" + NumA(p->z) + "\" is3D=\"true\"/>\n";
             } else {
-                o += "<coords x=\"" + NumA(p->x) + "\" y=\"" + NumA(p->y) + "\" z=\"1\"/>\n";
+                o += "<coords x=\"" + NumA(p->x) + "\" y=\"" + NumA(p->y) + "\" z=\"1\"";
+                if (p->isComplex) {
+                    o += " complex=\"true\"";   // 143包 复数标记往返
+                }
+                o += "/>\n";
             }
             // 141包 轨迹追踪持久化（官方 <element> 同位自产口径：开=有段）
             if (p->trace) {
@@ -22346,6 +22484,12 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
             ? label + "=(" + NumA(x) + "," + NumA(y) + "," + NumA(z) + ")"
             : label + "=(" + NumA(x) + "," + NumA(y) + ")";
         if (!input(src)) { ++*skipped; return; }
+        // 143包：complex="true" 回填（自由点重建后补复数态；复运算产物经
+        // command 重放自动重建不受此路）
+        if (AttrVal(t, "complex") == "true") {
+            GeoPoint *np = lookupPoint(label);
+            if (np) np->isComplex = true;
+        }
     } else if (type == "numeric" && !label.empty()) {
         const size_t v = inner.find("<value");
         if (v == std::string::npos) { ++*skipped; return; }
