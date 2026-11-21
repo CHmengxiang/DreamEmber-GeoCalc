@@ -16,6 +16,7 @@ export class AlgebraEntry {
   vis: string;      // '0' = 隐藏（实/空心按钮）
   sel: string;      // '1' = 画布选中（行高亮）
   anim: string;     // slider 行：'1'=动画播放中
+  trace: string;    // point 行：'1'=轨迹追踪开（141包）
   min: number;      // slider 下限
   max: number;      // slider 上限
   step: number;     // slider 步长
@@ -29,6 +30,7 @@ export class AlgebraEntry {
     this.vis = '1';
     this.sel = '0';
     this.anim = '0';
+    this.trace = '0';
     this.min = 0;
     this.max = 5;
     this.step = 0;
@@ -45,6 +47,8 @@ function applyProp(e: AlgebraEntry, k: string, v: string): void {
     }
   } else if (k === 'anim') {
     e.anim = v;
+  } else if (k === 'trace') {
+    e.trace = v;
   } else if (k === 'min') {
     const n = parseFloat(v);
     if (!isNaN(n)) {

@@ -21,6 +21,8 @@ export struct AlgebraRowView {
   // 二十九包②：slider 行值文本点击 → 父级行内展开四项参数编辑（不走定义回填）
   onSliderEdit: (label: string) => void = (_l: string) => {};
   onToggleAnim: (label: string) => void = (_l: string) => {};
+  // 141包：point 行轨迹追踪开关（◉ 开 / ○ 关；点行独有）
+  onToggleTrace: (label: string) => void = (_l: string) => {};
   onDelete: (label: string) => void = (_l: string) => {};
   onSlider: (label: string, v: number, mode: number) => void =
     (_l: string, _v: number, _m: number) => {};
@@ -187,6 +189,15 @@ export struct AlgebraRowView {
           .onClick(() => this.onEdit(this.entry.label, this.entry.definition))
         Blank()
           .layoutWeight(1)
+      }
+      // 141包 轨迹追踪开关：point 行 ◉（开，主题色）/ ○（关，弱色）
+      if (this.entry.type === 'point') {
+        Text(this.entry.trace === '1' ? '◉' : '○')
+          .fontSize(15)
+          .fontColor(this.entry.trace === '1'
+            ? Theme.accent(this.dark) : Theme.faint(this.dark))
+          .padding({ left: 8, right: 2 })
+          .onClick(() => this.onToggleTrace(this.entry.label))
       }
       if (this.entry.type === 'slider') {
         Text(this.entry.anim === '1' ? '⏸' : '▶')

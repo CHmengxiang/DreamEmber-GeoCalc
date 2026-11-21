@@ -595,6 +595,37 @@ napi_value KernelSetVisible(napi_env env, napi_callback_info info)
     return ToNapi(env, out);
 }
 
+// kernelSetTrace(label, on): void — 141包 轨迹追踪开关（开/关均清缓冲，
+// 再开从当前位置重启记录）；重绘由 ArkTS 侧 syncAlgebra+refresh 完成
+napi_value KernelSetTrace(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 2) {
+        napi_throw_error(env, nullptr, "kernelSetTrace requires (label, on)");
+        return nullptr;
+    }
+    std::string label = NapiToString(env, argv[0]);
+    bool on = false;
+    napi_get_value_bool(env, argv[1], &on);
+    g_kernel.setTrace(label, on);
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
+// kernelClearTraces(): void — 清全部轨迹缓冲（开关状态保持；GGB Ctrl+F 口径）
+napi_value KernelClearTraces(napi_env env, napi_callback_info info)
+{
+    (void)env;
+    (void)info;
+    g_kernel.clearTraces();
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
 // kernelSelect(label): void — 设置画布选中对象（"" 清除），重绘由 ArkTS 侧 refresh 完成
 napi_value KernelSelect(napi_env env, napi_callback_info info)
 {
@@ -1008,6 +1039,8 @@ void DreamemberRegisterKernelApis(napi_env env, napi_value exports)
         { "kernelToolParam", nullptr, KernelToolParam, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelPickObj", nullptr, KernelPickObj, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelSetVisible", nullptr, KernelSetVisible, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelSetTrace", nullptr, KernelSetTrace, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelClearTraces", nullptr, KernelClearTraces, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelSelect", nullptr, KernelSelect, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelRename", nullptr, KernelRename, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelRedefine", nullptr, KernelRedefine, nullptr, nullptr, nullptr, napi_default, nullptr },

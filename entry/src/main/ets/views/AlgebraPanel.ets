@@ -108,6 +108,7 @@ export struct AlgebraPanel {
   // 二十九包②：slider 行值文本点击 → 父级行内展开四项编辑（透传行组件）
   onSliderEdit: (l: string) => void = (_l: string) => {};
   onToggleAnim: (l: string) => void = (_l: string) => {};
+  onToggleTrace: (l: string) => void = (_l: string) => {};
   onDelete: (l: string) => void = (_l: string) => {};
   onSlider: (l: string, v: number, m: number) => void =
     (_l: string, _v: number, _m: number) => {};
@@ -647,6 +648,7 @@ export struct AlgebraPanel {
           onEdit: (l: string, d: string): void => this.onEdit(l, d),
           onSliderEdit: (l: string): void => this.onSliderEdit(l),
           onToggleAnim: (l: string): void => this.onToggleAnim(l),
+          onToggleTrace: (l: string): void => this.onToggleTrace(l),
           onDelete: (l: string): void => this.onDelete(l),
           onSlider: (l: string, v: number, m: number): void => this.onSlider(l, v, m),
           onAlpha: (l: string, v: number, m: number): void => this.onAlpha(l, v, m)

@@ -1551,6 +1551,17 @@ export struct CanvasView {
     }
   }
 
+  // 141包 轨迹追踪开关：按行当前态取反下发内核，行协议 trace=1 随
+  // syncAlgebra 刷新（◉/○ 图标随行数据翻转）
+  private toggleTrace(label: string): void {
+    this.commitPending();
+    const cur = this.algebra.some((e: AlgebraEntry): boolean =>
+      e.label === label && e.trace === '1');
+    dreamemberKernel.kernelSetTrace(label, !cur);
+    this.syncAlgebra(dreamemberKernel.kernelAlgebra());
+    this.refresh();
+  }
+
   private toggleAnim(label: string): void {
     this.commitPending();
     const r = dreamemberKernel.kernelAnimateToggle(label);
@@ -3663,6 +3674,7 @@ export struct CanvasView {
       onEdit: (l: string, d: string): void => this.editDefinition(l, d),
       onSliderEdit: (l: string): void => this.openSliderEdit(l),
       onToggleAnim: (l: string): void => this.toggleAnim(l),
+      onToggleTrace: (l: string): void => this.toggleTrace(l),
       onDelete: (l: string): void => this.deleteObj(l),
       onSlider: (l: string, v: number, m: number): void => this.onSliderChange(l, v, m),
       onAlpha: (l: string, v: number, m: number): void => this.onAlphaChange(l, v, m),

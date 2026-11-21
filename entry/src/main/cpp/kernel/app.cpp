@@ -1533,6 +1533,10 @@ struct NumRefExpr {
 // 识别形式："(u,v)" 点 / "A=(u,v)" / 命令 / "f(x)=表达式" / 纯表达式(按函数画)
 bool Kernel::inputImpl(const std::string &srcRaw)
 {
+    // 141包：重定义轨迹态暂存只服务本次调用的删旧→建新配对，入口先清
+    //（上次调用中途失败残留的陈留态不得串到无关新对象）
+    traceCarryOn_ = false;
+    traceCarryBuf_.clear();
     autoCells_ = 0;   // 本次输入经 refs 分支自动物化的空单元格数
     // 键盘线性形式预解析（第七包）：$A$1→A1、循环小数、带分数（带分数
     // 规则依赖空白，必须先于去空白执行；引号串内不受影响）
@@ -1717,6 +1721,12 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                 // 上游 M={{…}} 重输即重建，Transpose(M) 的依赖者一并级联
                 || (ol != nullptr && ol->calc);
             if (!hasDeps && freeObj) {
+                // 141包：追踪中自由点重定义，轨迹开关/缓冲暂存随迁
+                //（traceCarryOn_ 只在 trace=true 时置位）
+                if (op && op->trace) {
+                    traceCarryOn_ = true;
+                    traceCarryBuf_ = op->traceBuf;
+                }
                 for (auto it = geos_.begin(); it != geos_.end(); ++it) {
                     if (it->get() == old) { geos_.erase(it); break; }
                 }
@@ -12633,6 +12643,16 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
 GeoElement *Kernel::add(std::unique_ptr<GeoElement> made, const std::string &name)
 {
     made->label = name.empty() ? nextLabelFor(made->type()) : name;
+    // 141包：重定义轨迹态回填（新对象同型点才收；非点即弃）
+    if (traceCarryOn_) {
+        traceCarryOn_ = false;
+        GeoPoint *np = dynamic_cast<GeoPoint *>(made.get());
+        if (np) {
+            np->trace = true;
+            np->traceBuf = std::move(traceCarryBuf_);
+        }
+        traceCarryBuf_.clear();
+    }
     GeoElement *raw = made.get();
     geos_.push_back(std::move(made));
     recomputeAll();
@@ -12763,6 +12783,8 @@ void Kernel::recomputeAll()
     // 1.0.7.1 滑条范围对象引用动态联动：重算后引用对象可能已变值，
     // 刷新范围并钳位；值变化再级联一遍（见 refreshSliderRefBounds）
     refreshSliderRefBounds();
+    // 141包 轨迹追踪记录：全部重算落定后按位移阈值采样（trace 点）
+    recordTraces();
 }
 
 void Kernel::refreshSliderRefBounds()
@@ -12790,6 +12812,62 @@ void Kernel::refreshSliderRefBounds()
         }
         if (!changed) break;
         for (auto &g : geos_) g->update();   // 钳位值的依赖者重算
+    }
+}
+
+// 141包 轨迹追踪：开关与记录。记录在 recomputeAll 尾（唯一汇点）——
+// 位移 <1px（按 view.xscale 换算世界距离）不记（静止重算不增长）；
+// 三维点 stride 3（x,y,z），2D stride 2；lives3D 像点不记。上限
+// kTraceMaxPts 点满则丢最旧
+void Kernel::setTrace(const std::string &label, bool on)
+{
+    GeoElement *g = lookup(label);
+    GeoPoint *p = g ? dynamic_cast<GeoPoint *>(g) : nullptr;
+    if (!p) return;
+    p->trace = on;
+    p->traceBuf.clear();
+    if (on) {
+        // 种基线采样（GGB 口径：轨迹从当前位置起）——后续重算按 1px
+        // 位移阈值增量记录，静止重算不增长
+        p->traceBuf.push_back(p->x);
+        p->traceBuf.push_back(p->y);
+        if (p->is3D) p->traceBuf.push_back(p->z);
+    }
+}
+
+void Kernel::clearTraces()
+{
+    for (auto &g : geos_) {
+        GeoPoint *p = dynamic_cast<GeoPoint *>(g.get());
+        if (p) p->traceBuf.clear();
+    }
+}
+
+void Kernel::recordTraces()
+{
+    const double eps = 1.0 / std::max(view.xscale, 1e-9);
+    const double eps2 = eps * eps;
+    for (auto &g : geos_) {
+        GeoPoint *p = dynamic_cast<GeoPoint *>(g.get());
+        if (!p || !p->trace || p->lives3D) continue;
+        const size_t stride = p->is3D ? 3 : 2;
+        if (!p->traceBuf.empty()) {
+            const double dx = p->x - p->traceBuf[p->traceBuf.size() - stride];
+            const double dy = p->y - p->traceBuf[p->traceBuf.size() - stride + 1];
+            double dd = dx * dx + dy * dy;
+            if (p->is3D) {
+                const double dz = p->z - p->traceBuf[p->traceBuf.size() - 1];
+                dd += dz * dz;
+            }
+            if (dd < eps2) continue;
+        }
+        p->traceBuf.push_back(p->x);
+        p->traceBuf.push_back(p->y);
+        if (p->is3D) p->traceBuf.push_back(p->z);
+        if (p->traceBuf.size() > stride * kTraceMaxPts) {
+            p->traceBuf.erase(p->traceBuf.begin(),
+                              p->traceBuf.begin() + static_cast<long>(stride));
+        }
     }
 }
 
@@ -13008,6 +13086,13 @@ std::string Kernel::algebraText() const
             tail += ";min=" + FormatNum(n ? n->smin : 0.0);
             tail += ";max=" + FormatNum(n ? n->smax : 0.0);
             tail += ";step=" + FormatNum(n ? n->sstep : 0.0);
+        }
+        if (r.type == "point") {
+            GeoPoint *tp = dynamic_cast<GeoPoint *>(lookup(r.label));
+            if (tp && tp->trace) {
+                if (!tail.empty()) tail.push_back(';');
+                tail += "trace=1";
+            }
         }
         if (r.fillAlphaPct >= 0) {
             if (!tail.empty()) tail.push_back(';');
@@ -15131,6 +15216,9 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             // 重定义为 Point(path)=换路径/附着）
             d->path = s->path;
             d->pathParam = s->pathParam;
+            // 141包：轨迹开关与缓冲随重定义迁移（痕迹视觉不因重定义消失）
+            d->trace = s->trace;
+            d->traceBuf = s->traceBuf;
             break;
         }
         case GeoType::Segment: {
@@ -17852,6 +17940,51 @@ void Kernel::render(std::vector<DrawCmd> &out)
         appendTickMarks(out);
     }
 
+    // 141包 轨迹追踪发射：追踪点缓冲折线画在对象层之下（对象环前）。
+    // 相邻记录点像素距 >40px 视为跳变（重定义/载入跳位）断段不连线；
+    // 细线 1.2px + 45% 透明对象色（痕迹视觉，GGB trace 同为底层残留）
+    for (auto &g : geos_) {
+        if (g->type() != GeoType::Point) continue;
+        GeoPoint *p = static_cast<GeoPoint *>(g.get());
+        if (!p->trace || p->is3D || p->lives3D || p->traceBuf.size() < 4) continue;
+        const GeoColor &tc = p->color;
+        const std::string col = "rgba(" + std::to_string(tc.r) + ","
+            + std::to_string(tc.g) + "," + std::to_string(tc.b) + ",0.45)";
+        std::vector<float> run;
+        run.reserve(p->traceBuf.size());
+        double lx = 0, ly = 0;
+        for (size_t t = 0; t + 1 < p->traceBuf.size(); t += 2) {
+            const double tx = view.px(p->traceBuf[t]);
+            const double ty = view.py(p->traceBuf[t + 1]);
+            // 跳变判据=欧氏平方 >40²（曼哈顿和对斜向移动虚高——
+            // 25px+25px 对角步被误判 50>40，dbg-emit 实证后改）
+            const double gx = tx - lx, gy = ty - ly;
+            if (!run.empty() && (gx * gx + gy * gy) > 1600.0) {
+                if (run.size() >= 4) {
+                    DrawCmd tr;
+                    tr.op = DrawOp::Polyline;
+                    tr.color = col;
+                    tr.lineWidth = 1.2f;
+                    tr.pts = run;
+                    out.push_back(std::move(tr));
+                }
+                run.clear();
+            }
+            run.push_back((float)tx);
+            run.push_back((float)ty);
+            lx = tx;
+            ly = ty;
+        }
+        if (run.size() >= 4) {
+            DrawCmd tr;
+            tr.op = DrawOp::Polyline;
+            tr.color = col;
+            tr.lineWidth = 1.2f;
+            tr.pts = std::move(run);
+            out.push_back(std::move(tr));
+        }
+    }
+
     // 选中特效配色（代数区点行 / 长按菜单 → kernelSelect）
     const std::string selHalo = darkTheme ? "rgba(143,182,255,0.40)" : "rgba(0,125,255,0.30)";
     const std::string selRing = darkTheme ? "#8FB6FF" : "#007DFF";
@@ -18711,6 +18844,47 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         // （漏填安全兜底）
         double bx0 = -1e30, by0 = -1e30, bx1 = 1e30, by1 = 1e30;
     };
+    // 141包 轨迹追踪发射（3D）：is3D 追踪点缓冲（stride 3）投影折线，
+    // 画在最底层（面/实体遮挡收集之前）；断段阈值同 2D 40px
+    for (auto &g : geos_) {
+        if (g->type() != GeoType::Point) continue;
+        GeoPoint *p = static_cast<GeoPoint *>(g.get());
+        if (!p->trace || !p->is3D || p->lives3D || p->traceBuf.size() < 6) continue;
+        const GeoColor &tc = p->color;
+        const std::string col = "rgba(" + std::to_string(tc.r) + ","
+            + std::to_string(tc.g) + "," + std::to_string(tc.b) + ",0.45)";
+        std::vector<float> run;
+        double lx = 0, ly = 0;
+        for (size_t t = 0; t + 2 < p->traceBuf.size(); t += 3) {
+            double tx = 0, ty = 0;
+            V.project(p->traceBuf[t], p->traceBuf[t + 1], p->traceBuf[t + 2], tx, ty);
+            const double gx = tx - lx, gy = ty - ly;
+            if (!run.empty() && (gx * gx + gy * gy) > 1600.0) {
+                if (run.size() >= 4) {
+                    DrawCmd tr;
+                    tr.op = DrawOp::Polyline;
+                    tr.color = col;
+                    tr.lineWidth = 1.2f;
+                    tr.pts = run;
+                    out.push_back(std::move(tr));
+                }
+                run.clear();
+            }
+            run.push_back((float)tx);
+            run.push_back((float)ty);
+            lx = tx;
+            ly = ty;
+        }
+        if (run.size() >= 4) {
+            DrawCmd tr;
+            tr.op = DrawOp::Polyline;
+            tr.color = col;
+            tr.lineWidth = 1.2f;
+            tr.pts = std::move(run);
+            out.push_back(std::move(tr));
+        }
+    }
+
     std::vector<Occ3> occs;
     for (auto &g : geos_) {
         if (!g->visible || g->type() != GeoType::Plane) continue;
@@ -21489,6 +21663,10 @@ std::string Kernel::getXml() const
             } else {
                 o += "<coords x=\"" + NumA(p->x) + "\" y=\"" + NumA(p->y) + "\" z=\"1\"/>\n";
             }
+            // 141包 轨迹追踪持久化（官方 <element> 同位自产口径：开=有段）
+            if (p->trace) {
+                o += "<trace val=\"true\"/>\n";
+            }
             o += "<pointSize val=\"" + std::to_string(p->pointSize) + "\"/>\n</element>\n";
             break;
         }
@@ -21871,6 +22049,15 @@ void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
             const size_t end = inner.find('>', ps);
             const std::string t = inner.substr(ps, end == std::string::npos ? end : end - ps);
             p->pointSize = (int)AttrNum(t, "val", (double)p->pointSize);
+        }
+        // 141包 轨迹追踪恢复（<trace val="true"/>；缺段=关）
+        {
+            size_t trc = inner.find("<trace");
+            if (trc != std::string::npos) {
+                const size_t tend = inner.find('>', trc);
+                p->trace = AttrVal(inner.substr(trc, tend == std::string::npos
+                    ? std::string::npos : tend - trc), "val") == "true";
+            }
         }
         // 四十五包：路径依附点的 <coords> 重投影恢复路径参数（命令重放
         // Point(g) 只建出默认参数的点，真实落位由保存的坐标恢复；自由点

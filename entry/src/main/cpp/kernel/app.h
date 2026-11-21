@@ -119,6 +119,17 @@ public:
     void moveObject3D(GeoElement *g, double dxPx, double dyPx);
     void resetView3D() { view3d.reset(); }
 
+    // 141包 轨迹追踪：label 点开/关（开=清缓冲重启记录；关=清缓冲）；
+    // clearTraces 清全部缓冲（开关状态保持）。记录钩子 recomputeAll 尾
+    // ——拖动/重定义/滑条/动画全路重算汇于此，≈1px 世界距离去重
+    void setTrace(const std::string &label, bool on);
+    void clearTraces();
+    void recordTraces();
+    // 141包 自由点重定义（删旧建新）轨迹态暂存：input() 删旧前置，add()
+    // 消费（一次配对；input 入口清陈留态防失败路径残留串位）
+    bool traceCarryOn_ = false;
+    std::vector<double> traceCarryBuf_;
+
     // 命中测试：找像素 (px,py) 附近的可拖动自由点；返回 nullptr 表示无。
     // outD 非空时回写命中距离（无命中 1e9）——工具层点/对象就近比较用
     GeoPoint *pickPoint(double px, double py, double *outD = nullptr);

@@ -72,6 +72,10 @@ private:
     GeoType type_;
 };
 
+// 141包 轨迹追踪缓冲上限（点数；平铺 [x0,y0,x1,y1,...]（三维含 z），
+// 满则丢最旧——环形语义，erase 头部一次 stride 个 double）
+inline constexpr size_t kTraceMaxPts = 600;
+
 // 自由点（或 Midpoint/Intersect/变换像等依随点）。默认色 = 上游 自由点 (77,77,255)。
 // 1.0.8.1：z + is3D 扩展三维点（(x,y,z) 元组/3D 命令产物）；is3D=false 时
 // z 恒 0，2D 渲染/命中不受影响，3D 视图按 z 绘制
@@ -92,6 +96,12 @@ public:
     // 多边形=边序号+t（整数部分为边序号）。path 进 inputs（级联删除/重算）。
     GeoElement *path = nullptr;
     double pathParam = 0;
+    // 141包 轨迹追踪：开启后每次重算位置移动 ≥1px（世界距离，按 view.xscale
+    // 换算）即记录进 traceBuf；渲染在 render()/render3D() 对象层之下发射细
+    // 折线（相邻记录点像素距 >40px 视为跳变断段不连线）。缓冲随重定义迁移
+    //（CopyGeoState）、随对象删除消失；XML <trace val="true"/> 往返
+    bool trace = false;
+    std::vector<double> traceBuf;
 
     void update() override;
     std::string valueText() const override;
