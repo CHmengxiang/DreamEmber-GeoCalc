@@ -590,6 +590,7 @@ export struct CanvasView {
         old.vis = p.vis;
         old.sel = p.sel;
         old.anim = p.anim;
+        old.trace = p.trace;   // 141包：追踪态并入就地合并（漏拷则行图标不刷新）
         old.min = p.min;
         old.max = p.max;
         old.step = p.step;
