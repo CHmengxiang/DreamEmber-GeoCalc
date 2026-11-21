@@ -131,6 +131,11 @@ public:
     std::vector<double> traceCarryBuf_;
 
     // 142包 Locus：Q 路径参数扫掠域（按路径类型取口径）与重采样引擎。
+    // 147包 嵌套命令作参深度：0=顶层输入，>0=正在实化嵌套实参
+    int inputDepth_ = 0;
+    // 147包 最近一次 add() 落地的标签（嵌套实化取 helper 用——递归一次
+    // 可能建多对象，按下标取首会错）
+    std::string lastAddedLabel_;
     // sweeping_ 挡住采样中嵌套触发的 Locus update（防重入）
     bool locusDomain(GeoElement *path, double &a, double &b);
     void updateLocus(GeoLocus *L);

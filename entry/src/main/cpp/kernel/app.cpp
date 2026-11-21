@@ -1537,6 +1537,7 @@ bool Kernel::inputImpl(const std::string &srcRaw)
     //（上次调用中途失败残留的陈留态不得串到无关新对象）
     traceCarryOn_ = false;
     traceCarryBuf_.clear();
+    lastAddedLabel_.clear();   // 147包 嵌套实化取 helper 标签用
     autoCells_ = 0;   // 本次输入经 refs 分支自动物化的空单元格数
     // 键盘线性形式预解析（第七包）：$A$1→A1、循环小数、带分数（带分数
     // 规则依赖空白，必须先于去空白执行；引号串内不受影响）
@@ -2648,9 +2649,13 @@ bool Kernel::inputImpl(const std::string &srcRaw)
         return false;
     }
     GeoElement *added = add(std::move(made), name);
-    // ans 回填（上游：代数输入的数值结果更新上一答案）
-    if (GeoNumeric *gn = dynamic_cast<GeoNumeric *>(added)) {
-        if (std::isfinite(gn->value)) SetAnsValue(gn->value);
+    lastAddedLabel_ = added->label;   // 147包 嵌套实化取 helper 标签用
+    // ans 回填（上游：代数输入的数值结果更新上一答案）；147包 嵌套实化
+    // 的 helper 不回填（ans 只跟顶层输入走）
+    if (inputDepth_ == 0) {
+        if (GeoNumeric *gn = dynamic_cast<GeoNumeric *>(added)) {
+            if (std::isfinite(gn->value)) SetAnsValue(gn->value);
+        }
     }
     flushExtras();
     return true;
@@ -3499,6 +3504,43 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             }
         }
         a.push_back(Trim(args.substr(start)));
+    }
+    // 147包 嵌套命令作参一期：实参在已有标签之外识别内联命令调用
+    // Name(...)——无标签递归 inputImpl 实化（自动命名进构造列表），随后
+    // a[i] 换成具体标签：既有命令分支零改动吃到嵌套实参（lookupPoint/
+    // numArg 照旧命中），XML 重放存具体标签平铺重建（helper 自带元素）。
+    // 引号串/列表/元组字面量与表达式函数调用（f(0.5)、sqrt(2)）不参与，
+    // 走既有路径；递归解析上限三层（call-in-call 同形，单层守护无法
+    // 区分同级嵌套与二层嵌套）
+    for (size_t i = 0; i < a.size(); ++i) {
+        const std::string &s = a[i];
+        if (s.size() < 3 || s.front() == '"' || s.front() == '{'
+            || s.front() == '(') continue;
+        if (lookup(s) != nullptr) continue;
+        const size_t op = s.find('(');
+        if (op == std::string::npos || s.back() != ')') continue;
+        bool nameOk = isalpha((unsigned char)s[0]) || s[0] == '_';
+        for (size_t j = 1; nameOk && j < op; ++j) {
+            if (!isalnum((unsigned char)s[j]) && s[j] != '_') nameOk = false;
+        }
+        if (!nameOk || !IsCommandCallName(s.substr(0, op))) continue;
+        if (inputDepth_ >= 3) {
+            lastError = "嵌套实参过深（上限三层）: " + s.substr(0, op);
+            return false;
+        }
+        // 嵌套入口会清轨迹重定义暂存（141包），先暂存回填防丢
+        const bool carryOn = traceCarryOn_;
+        const std::vector<double> carryBuf = traceCarryBuf_;
+        ++inputDepth_;
+        const bool nestedOk = inputImpl(s);
+        --inputDepth_;
+        traceCarryOn_ = carryOn;
+        traceCarryBuf_ = carryBuf;
+        if (!nestedOk || lastAddedLabel_.empty()) {
+            if (lastError.empty()) lastError = "嵌套实参创建失败: " + s;
+            return false;
+        }
+        a[i] = lastAddedLabel_;
     }
     auto needPts = [&](size_t n) -> std::vector<GeoPoint *> {
         std::vector<GeoPoint *> pts;
