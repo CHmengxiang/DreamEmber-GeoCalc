@@ -188,7 +188,7 @@ export const COMMANDS: CommandMeta[] = [
     sig: 'Polygon( <点>, …, <点> )', desc: '依次连接各点的多边形',
     keys: 'polygon 多边形' },
   { name: 'Tangent', category: 'geometry', ins: 'Tangent(,)', back: 2,
-    sig: 'Tangent( <点>, <圆|函数> )', desc: '过点作圆/函数的切线',
+    sig: 'Tangent( <点>, <圆|函数|锥曲线> )', desc: '过点作圆/函数/锥曲线的切线',
     keys: 'tangent 切线' },
   { name: 'Intersect', category: 'geometry', ins: 'Intersect(,)', back: 2,
     sig: 'Intersect( <对象>, <对象> [, <序号>] )', desc: '两对象的交点（面∩面出交线、面/球∩球出圆、面∩圆柱/圆锥出圆锥曲线，3D 视图）',

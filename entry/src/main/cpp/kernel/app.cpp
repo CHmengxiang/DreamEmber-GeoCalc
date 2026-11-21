@@ -531,6 +531,90 @@ bool PathProject(GeoElement *e, double wx, double wy, double prev,
     }
 }
 
+// 1.2.0.11 锥曲线极线（P 的切点弦，世界坐标 ax+by=c）∩ 锥曲线解析二次，
+// 返回实切点数（0=内点 1=重根/P 在曲线上 2=外点两切），切点坐标与极线
+// ax+by=c 回参——Tangent(点, 锥曲线) 计数与切线闭包共用。极线口径下
+// P 在曲线上时极线即切线本身（P→切点 零向退化，n==1 走极线）；
+// 判别式按系数最大模归一（顶点重根 disc 为 1e-16 级 fp 噪声，非归一
+// 尺度会把内点判据崩到 1e-18——dbg_12011 实证）
+static int ConicPolarContacts(GeoConic2 *cn, double px, double py,
+                              double &q1x, double &q1y, double &q2x,
+                              double &q2y, double &pla, double &plb,
+                              double &plc)
+{
+    q1x = q1y = q2x = q2y = NAN;
+    pla = plb = plc = NAN;
+    if (!cn->ok || (cn->kind == 2 && !(cn->p > 1e-15))) return 0;
+    const double X0 = (px - cn->cx) * cn->ux + (py - cn->cy) * cn->uy;
+    const double Y0 = (px - cn->cx) * cn->vx + (py - cn->cy) * cn->vy;
+    double pa, pb, pc;
+    if (cn->kind == 0) {
+        pa = X0 / (cn->a * cn->a) * cn->ux + Y0 / (cn->b * cn->b) * cn->vx;
+        pb = X0 / (cn->a * cn->a) * cn->uy + Y0 / (cn->b * cn->b) * cn->vy;
+        pc = 1.0 + pa * cn->cx + pb * cn->cy;
+    } else if (cn->kind == 1) {
+        pa = X0 / (cn->a * cn->a) * cn->ux - Y0 / (cn->b * cn->b) * cn->vx;
+        pb = X0 / (cn->a * cn->a) * cn->uy - Y0 / (cn->b * cn->b) * cn->vy;
+        pc = 1.0 + pa * cn->cx + pb * cn->cy;
+    } else {
+        pa = 2.0 * cn->p * cn->ux - Y0 * cn->vx;
+        pb = 2.0 * cn->p * cn->uy - Y0 * cn->vy;
+        pc = pa * cn->cx + pb * cn->cy - 2.0 * cn->p * X0;
+    }
+    pla = pa;
+    plb = pb;
+    plc = pc;
+    if (fabs(pa) + fabs(pb) < 1e-15) return 0;   // 退化极线（P=中心）
+    double x1, y1, dx, dy;
+    if (fabs(pb) > fabs(pa)) {
+        x1 = 0;
+        y1 = pc / pb;
+        dx = 1;
+        dy = -pa / pb;
+    } else {
+        x1 = pc / pa;
+        y1 = 0;
+        dx = -pb / pa;
+        dy = 1;
+    }
+    const double w0u = (x1 - cn->cx) * cn->ux + (y1 - cn->cy) * cn->uy;
+    const double w0v = (x1 - cn->cx) * cn->vx + (y1 - cn->cy) * cn->vy;
+    const double du = dx * cn->ux + dy * cn->uy;
+    const double dv = dx * cn->vx + dy * cn->vy;
+    double A = 0, B = 0, C = 0;
+    if (cn->kind == 0) {
+        A = du * du / (cn->a * cn->a) + dv * dv / (cn->b * cn->b);
+        B = 2.0 * (w0u * du / (cn->a * cn->a) + w0v * dv / (cn->b * cn->b));
+        C = w0u * w0u / (cn->a * cn->a) + w0v * w0v / (cn->b * cn->b) - 1.0;
+    } else if (cn->kind == 1) {
+        A = du * du / (cn->a * cn->a) - dv * dv / (cn->b * cn->b);
+        B = 2.0 * (w0u * du / (cn->a * cn->a) - w0v * dv / (cn->b * cn->b));
+        C = w0u * w0u / (cn->a * cn->a) - w0v * w0v / (cn->b * cn->b) - 1.0;
+    } else {
+        A = dv * dv;
+        B = 2.0 * w0v * dv - 4.0 * cn->p * du;
+        C = w0v * w0v - 4.0 * cn->p * w0u;
+    }
+    const double mx = std::max(std::max(fabs(A), fabs(B)), fabs(C));
+    if (!(mx > 1e-18)) return 0;
+    const double An = A / mx, Bn = B / mx, Cn = C / mx;
+    const double disc = Bn * Bn - 4.0 * An * Cn;
+    if (disc < -1e-12) return 0;
+    const double sq = sqrt(std::max(disc, 0.0));
+    const double t1 = (-Bn - sq) / (2.0 * An);
+    q1x = x1 + t1 * dx;
+    q1y = y1 + t1 * dy;
+    if (disc > 1e-12) {
+        const double t2 = (-Bn + sq) / (2.0 * An);
+        q2x = x1 + t2 * dx;
+        q2y = y1 + t2 * dy;
+        return 2;
+    }
+    q2x = q1x;
+    q2y = q1y;
+    return 1;
+}
+
 } // namespace
 
 // ---------- 输入解析 ----------
@@ -6679,8 +6763,9 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         GeoElement *t = lookup(a[1]);
         GeoCircle *circ = dynamic_cast<GeoCircle *>(t);
         GeoFunction *fn = dynamic_cast<GeoFunction *>(t);
-        if (!P || (!circ && !fn)) {
-            lastError = "Tangent 需要（点, 圆/函数）且对象须已存在";
+        GeoConic2 *cn = dynamic_cast<GeoConic2 *>(t);   // 1.2.0.11 锥曲线切线
+        if (!P || (!circ && !fn && !cn)) {
+            lastError = "Tangent 需要（点, 圆/函数/锥曲线）且对象须已存在";
             made = nullptr;
             return true;
         }
@@ -6724,7 +6809,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                     L->b = P->x - tx;
                     L->c = L->a * P->x + L->b * P->y;
                 };
-            } else {
+            } else if (fn) {
                 l->calc = [P, fn](GeoLine *L) {
                     // 函数在 P.x 处的切线（数值导数）
                     double x0 = P->x;
@@ -6734,6 +6819,35 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                     L->a = m;
                     L->b = -1.0;
                     L->c = m * x0 - y0;
+                };
+            } else {
+                l->calc = [P, cn, k](GeoLine *L) {
+                    // 1.2.0.11 锥曲线切线（极线口径）：P 的极线=切点弦，
+                    // 极线∩锥曲线解析二次得切点 Q_k，切线=PQ_k（拖 P/锥
+                    // 曲线随动）。P 在曲线上（重根）：切线=极线本身
+                    //（P→切点 零向退化）。P 在内部：无实切点 → 未定义
+                    //（a=b=0，圆内同款约定）
+                    double q1x = 0, q1y = 0, q2x = 0, q2y = 0;
+                    double pla = 0, plb = 0, plc = 0;
+                    const int n = ConicPolarContacts(cn, P->x, P->y,
+                                                     q1x, q1y, q2x, q2y,
+                                                     pla, plb, plc);
+                    if (n == 0) {
+                        L->a = 0;
+                        L->b = 0;
+                        return;
+                    }
+                    if (n == 1) {
+                        L->a = pla;
+                        L->b = plb;
+                        L->c = plc;
+                        return;
+                    }
+                    const double qx = k == 0 ? q1x : q2x;
+                    const double qy = k == 0 ? q1y : q2y;
+                    L->a = qy - P->y;
+                    L->b = P->x - qx;
+                    L->c = L->a * P->x + L->b * P->y;
                 };
             }
             l->update();
@@ -6758,6 +6872,26 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             }
             made = mkTangent(0);
             if (d > circ->radius + 1e-9) extras_.push_back(mkTangent(1));   // 圆外：两条
+        } else if (cn) {
+            double q1x = 0, q1y = 0, q2x = 0, q2y = 0;
+            double pla = 0, plb = 0, plc = 0;
+            const int n = ConicPolarContacts(cn, P->x, P->y,
+                                             q1x, q1y, q2x, q2y,
+                                             pla, plb, plc);
+            if (n == 0) {
+                // 内点判据前置：命名/序号形式同样报内点文案（非笼统
+                // 「未找到切线」）
+                lastError = "点在锥曲线内，不存在实切线";
+                made = nullptr;
+                return true;
+            }
+            if (kOnly >= 0) {
+                if (kOnly >= n) { lastError = "未找到切线"; made = nullptr; return true; }
+                made = mkTangent(kOnly);
+                return true;
+            }
+            made = mkTangent(0);
+            if (n == 2) extras_.push_back(mkTangent(1));   // 外点：两条
         } else {
             if (kOnly > 0) { lastError = "未找到切线"; made = nullptr; return true; }
             made = mkTangent(0);
@@ -13004,6 +13138,22 @@ bool Kernel::canDragObject3D(GeoElement *g)
         return sp->center && sp->center->isFree && sp->center->is3D
                && !sp->center->path;
     }
+    case GeoType::Cylinder: {
+        // 1.2.0.11 字面量底/顶心（Cylinder((x,y,z), …)）：image 缓存平移
+        //（§76 球字面量心同款）
+        GeoCylinder *cy = static_cast<GeoCylinder *>(g);
+        if (cy->bImage || cy->tImage) return true;
+        std::vector<GeoPoint *> pts;
+        CollectFreeInputPoints(g, pts);
+        return !pts.empty();
+    }
+    case GeoType::Cone: {
+        GeoCone *co = static_cast<GeoCone *>(g);
+        if (co->aImage || co->bImage) return true;
+        std::vector<GeoPoint *> pts;
+        CollectFreeInputPoints(g, pts);
+        return !pts.empty();
+    }
     case GeoType::Plane:
     case GeoType::Solid: {
         std::vector<GeoPoint *> pts;
@@ -13037,14 +13187,81 @@ void Kernel::moveObject3D(GeoElement *g, double dxPx, double dyPx)
         GeoSphere *sp = static_cast<GeoSphere *>(g);
         if (sp->cImage) {
             // 字面量心 Sphere((x,y,z), …)：无 calc（静态球），平移 image
-            // 缓存即持久（过点/半径引读 ccx()/radius 不受影响）
+            // 缓存并同步重写字面量 cmdArgs（拖动=重定义，XML 重放/定义
+            // 列携带拖后位置——缓存不落盘重载会回跳，1.2.0.11 修正）
             sp->icx += wx;
             sp->icy += wy;
             sp->icz += wz;
+            if (!sp->cmdArgs.empty()) {
+                sp->cmdArgs[0] = "(" + FormatNum(sp->icx) + ", "
+                    + FormatNum(sp->icy) + ", " + FormatNum(sp->icz) + ")";
+            }
         } else {
             sp->center->x += wx;
             sp->center->y += wy;
             sp->center->z += wz;
+        }
+        recomputeAll();
+        return;
+    }
+    case GeoType::Cylinder: {
+        // 1.2.0.11 image 部分平移缓存、点引用部分平移自由点——混合构成
+        // 整体刚性平移
+        GeoCylinder *cy = static_cast<GeoCylinder *>(g);
+        if (cy->bImage) {
+            cy->ibx += wx;
+            cy->iby += wy;
+            cy->ibz += wz;
+            if (!cy->cmdArgs.empty()) {
+                cy->cmdArgs[0] = "(" + FormatNum(cy->ibx) + ", "
+                    + FormatNum(cy->iby) + ", " + FormatNum(cy->ibz) + ")";
+            }
+        }
+        if (cy->tImage) {
+            cy->itx += wx;
+            cy->ity += wy;
+            cy->itz += wz;
+            if (cy->cmdArgs.size() > 1) {
+                cy->cmdArgs[1] = "(" + FormatNum(cy->itx) + ", "
+                    + FormatNum(cy->ity) + ", " + FormatNum(cy->itz) + ")";
+            }
+        }
+        std::vector<GeoPoint *> pts;
+        CollectFreeInputPoints(g, pts);
+        for (GeoPoint *p : pts) {
+            p->x += wx;
+            p->y += wy;
+            p->z += wz;
+        }
+        recomputeAll();
+        return;
+    }
+    case GeoType::Cone: {
+        GeoCone *co = static_cast<GeoCone *>(g);
+        if (co->aImage) {
+            co->iax += wx;
+            co->iay += wy;
+            co->iaz += wz;
+            if (!co->cmdArgs.empty()) {
+                co->cmdArgs[0] = "(" + FormatNum(co->iax) + ", "
+                    + FormatNum(co->iay) + ", " + FormatNum(co->iaz) + ")";
+            }
+        }
+        if (co->bImage) {
+            co->ibx += wx;
+            co->iby += wy;
+            co->ibz += wz;
+            if (co->cmdArgs.size() > 1) {
+                co->cmdArgs[1] = "(" + FormatNum(co->ibx) + ", "
+                    + FormatNum(co->iby) + ", " + FormatNum(co->ibz) + ")";
+            }
+        }
+        std::vector<GeoPoint *> pts;
+        CollectFreeInputPoints(g, pts);
+        for (GeoPoint *p : pts) {
+            p->x += wx;
+            p->y += wy;
+            p->z += wz;
         }
         recomputeAll();
         return;
@@ -16021,7 +16238,9 @@ std::string Kernel::toolTapImpl(double wx, double wy, double px, double py)
     if (tool_ == "tangent") {
         GeoPoint *pt = pickPoint(px, py);
         GeoElement *o = pt ? nullptr : pickObject(px, py);
-        bool oIsCircFn = o && (dynamic_cast<GeoCircle *>(o) || dynamic_cast<GeoFunction *>(o));
+        bool oIsCircFn = o && (dynamic_cast<GeoCircle *>(o)
+            || dynamic_cast<GeoFunction *>(o)
+            || dynamic_cast<GeoConic2 *>(o));   // 1.2.0.11 锥曲线切线
         if (pt) {
             if (toolPts_.empty()) {
                 toolPts_.push_back(pt);
@@ -16036,11 +16255,11 @@ std::string Kernel::toolTapImpl(double wx, double wy, double px, double py)
             toolObj_ = o;
             o->selected = true;
         } else {
-            return "need|切线：请点选一个点和一个圆/函数";
+            return "need|切线：请点选一个点和一个圆/函数/锥曲线";
         }
         if (toolPts_.empty() || !toolObj_) {
             return toolPts_.empty() ? "need|切线：再点选一个点"
-                                    : "need|切线：再点选圆或函数";
+                                    : "need|切线：再点选圆/函数/锥曲线";
         }
         GeoPoint *P = toolPts_[0];
         GeoElement *Q = toolObj_;
