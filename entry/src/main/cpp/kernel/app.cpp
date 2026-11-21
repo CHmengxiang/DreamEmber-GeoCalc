@@ -8477,17 +8477,32 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                 t->inputs.push_back(p);
             } else if (a[1].front() == '(' && a[1].back() == ')') {
                 const std::string inner = a[1].substr(1, a[1].size() - 2);
-                const size_t comma = inner.find(',');
-                double vx = 0, vy = 0;
-                if (comma == std::string::npos
-                    || !numArg(inner.substr(0, comma), vx)
-                    || !numArg(inner.substr(comma + 1), vy)) {
-                    lastError = "文本位置须为点或 (x,y): " + a[1];
+                // 1.2.0.10 三维字面量 (x,y,z) → 3D 标注（2 分量维持 2D）
+                std::vector<std::string> parts;
+                size_t ps2 = 0;
+                while (true) {
+                    const size_t pc2 = inner.find(',', ps2);
+                    if (pc2 == std::string::npos) {
+                        parts.push_back(inner.substr(ps2));
+                        break;
+                    }
+                    parts.push_back(inner.substr(ps2, pc2 - ps2));
+                    ps2 = pc2 + 1;
+                }
+                double vx = 0, vy = 0, vz = 0;
+                if (parts.size() < 2 || parts.size() > 3
+                    || !numArg(parts[0], vx) || !numArg(parts[1], vy)
+                    || (parts.size() == 3 && !numArg(parts[2], vz))) {
+                    lastError = "文本位置须为点或 (x,y)/(x,y,z): " + a[1];
                     made = nullptr;
                     return true;
                 }
                 t->x = vx;
                 t->y = vy;
+                if (parts.size() == 3) {
+                    t->z = vz;
+                    t->is3D = true;
+                }
             } else {
                 lastError = "未找到点 " + a[1];
                 made = nullptr;
@@ -15054,6 +15069,8 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             GeoText *s = static_cast<GeoText *>(src);
             d->x = s->x;
             d->y = s->y;
+            d->z = s->z;         // 1.2.0.10 3D 标注状态随重定义搬迁
+            d->is3D = s->is3D;
             d->text = s->text;
             d->anchor = s->anchor;
             d->segs = s->segs;
@@ -18150,6 +18167,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
         }
         case GeoType::Text: {
             GeoText *t = static_cast<GeoText *>(g.get());
+            if (t->is3D) break;   // 1.2.0.10 3D 文本只在 render3D 绘制
             DrawCmd d;
             d.op = DrawOp::Text;
             d.color = ObjectColor(t->color, darkTheme);
@@ -18465,6 +18483,10 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         // double 角点，poly 仍供 polyHit/求交）
         double dpoly[8] = {};
         const void *owner = nullptr;   // 所属对象（源实体背向面豁免用）
+        // 1.2.0.10 亚格片细化：格片四角参数（00/10/11/01 顺）——参数曲面为
+        // (u,v)、显式 z=f(x,y) 为 (x,y)；细化时参数域二分真实重采样
+        double su00 = 0, sv00 = 0, su10 = 0, sv10 = 0;
+        double su11 = 0, sv11 = 0, su01 = 0, sv01 = 0;
         // 1.1.3.21 遮挡体 2D 像素足迹包围盒（±1px 缓冲）：veil/拆段查询先
         // bbox 早退——查询投影不在足迹内则不可能遮挡。默认开区间=永不拒绝
         // （漏填安全兜底）
@@ -18608,6 +18630,28 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                 oc.dpoly[5] = pys[k11];
                 oc.dpoly[6] = pxs[k01];
                 oc.dpoly[7] = pys[k01];
+                {
+                    const double ui = sf->parametric
+                        ? sf->u0 + (sf->u1 - sf->u0) * i / N
+                        : -D + 2.0 * D * i / N;
+                    const double vi = sf->parametric
+                        ? sf->v0 + (sf->v1 - sf->v0) * j / N
+                        : -D + 2.0 * D * j / N;
+                    const double ui1 = sf->parametric
+                        ? sf->u0 + (sf->u1 - sf->u0) * (i + 1) / N
+                        : -D + 2.0 * D * (i + 1) / N;
+                    const double vi1 = sf->parametric
+                        ? sf->v0 + (sf->v1 - sf->v0) * (j + 1) / N
+                        : -D + 2.0 * D * (j + 1) / N;
+                    oc.su00 = ui;
+                    oc.sv00 = vi;
+                    oc.su10 = ui1;
+                    oc.sv10 = vi;
+                    oc.su11 = ui1;
+                    oc.sv11 = vi1;
+                    oc.su01 = ui;
+                    oc.sv01 = vi1;
+                }
                 occs.push_back(std::move(oc));
             }
         }
@@ -19099,6 +19143,9 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
         }
         return hex;
     };
+    // 1.2.0.10 亚格片细化帧级预算（真实重采样次数封顶——防长折线×密格
+    // 片爆帧；耗尽后回落原格片级求根）
+    int refineLeft = 1024;
     // 世界段拆段绘制：按遮挡体平面穿越 + 填充多边形投影边界（2D 线段求交）
     // 排序拆子段，逐子段按中点可见率出 Segment（可见率 1 用原色，否则 rgba
     // 透视）。投影对世界参量线性（正交），拆全边界后中点判类精确。
@@ -19240,6 +19287,229 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                     }
                 }
                 if (tmax > tmin) {
+                    // 1.2.0.10 亚格片遮挡细化（§62⑤ 遗留）：弦长 >4px 的
+                    // 穿格段对格片参数域二分、真实重采样（1 层 4 子片/
+                    // 2 层 16 子片；bilinear 插值只复现原模型，必须回到
+                    // 曲面求值才收敛真实深度），逐子片边交点定弦 + 对角线
+                    // 两片线性求根。预算 refineLeft 封顶；子片采样退化回
+                    // 退父片原逻辑
+                    const double chordPx = sqrt(sdx * sdx + sdy * sdy)
+                        * (tmax - tmin);
+                    GeoSurface *sfo = static_cast<GeoSurface *>(const_cast<void *>(oc.owner));
+                    int levels = 0;
+                    if (sfo != nullptr && sfo->definable() && refineLeft > 0) {
+                        if (chordPx > 24.0) levels = 2;
+                        else if (chordPx > 4.0) levels = 1;
+                    }
+                    if (levels > 0) {
+                        auto samplePt = [&](double u, double v, double &qx,
+                                            double &qy, double &qd) -> bool {
+                            double wx2, wy2, wz2;
+                            if (sfo->parametric) {
+                                sfo->evalUV(u, v, wx2, wy2, wz2);
+                            } else {
+                                wx2 = u;
+                                wy2 = v;
+                                wz2 = sfo->evalAt(u, v);
+                            }
+                            if (!std::isfinite(wz2) || !std::isfinite(wx2)
+                                || !std::isfinite(wy2)) return false;
+                            qd = proj(wx2, wy2, wz2, qx, qy);
+                            return std::isfinite(qd) && std::isfinite(qx)
+                                && std::isfinite(qy);
+                        };
+                        auto quadLocalDepth = [](const double *cx4,
+                            const double *cy4, const double *cd4,
+                            double qx, double qy) -> double {
+                            // 子四边形局部深度：对角线 (0→2) 两三角重心合成
+                            //（facetLocalDepth 同构，角点换子片四角）
+                            auto tri2 = [&](double ax, double ay, double bx,
+                                double by, double cx2, double cy2,
+                                double da, double db, double dc) -> double {
+                                const double den = (by - cy2) * (ax - cx2)
+                                    + (cx2 - bx) * (ay - cy2);
+                                if (fabs(den) < 1e-12) return NAN;
+                                const double l1 = ((by - cy2) * (qx - cx2)
+                                    + (cx2 - bx) * (qy - cy2)) / den;
+                                const double l2 = ((cy2 - ay) * (qx - cx2)
+                                    + (ax - cx2) * (qy - cy2)) / den;
+                                if (l1 < -1e-9 || l2 < -1e-9
+                                    || l1 + l2 > 1.0 + 1e-9) return NAN;
+                                return l1 * da + l2 * db
+                                    + (1.0 - l1 - l2) * dc;
+                            };
+                            double d = tri2(cx4[0], cy4[0], cx4[1], cy4[1],
+                                cx4[2], cy4[2], cd4[0], cd4[1], cd4[2]);
+                            if (std::isnan(d)) {
+                                d = tri2(cx4[0], cy4[0], cx4[2], cy4[2],
+                                    cx4[3], cy4[3], cd4[0], cd4[2], cd4[3]);
+                            }
+                            return d;
+                        };
+                        auto quadRoots = [&](const double *cx4,
+                            const double *cy4, const double *cd4,
+                            double tLo, double tHi) {
+                            double cmin = 2.0, cmax = -1.0;
+                            for (int e = 0; e < 4; ++e) {
+                                const int e2 = (e + 1) & 3;
+                                const double eex = cx4[e2] - cx4[e];
+                                const double eey = cy4[e2] - cy4[e];
+                                const double dcross = sdx * eey - sdy * eex;
+                                if (fabs(dcross) < 1e-12) continue;
+                                const double gx = cx4[e] - ppx1;
+                                const double gy = cy4[e] - ppy1;
+                                const double t = (gx * eey - gy * eex)
+                                    / dcross;
+                                const double sg2 = (gx * sdy - gy * sdx)
+                                    / dcross;
+                                if (t > 1e-9 && t < 1.0 - 1e-9
+                                    && sg2 > -1e-9 && sg2 < 1.0 + 1e-9) {
+                                    if (t < cmin) cmin = t;
+                                    if (t > cmax) cmax = t;
+                                }
+                            }
+                            cmin = std::max(cmin, tLo);
+                            cmax = std::min(cmax, tHi);
+                            if (cmax <= cmin) return;
+                            double tdiag = -1.0;
+                            {
+                                const double dgex = cx4[2] - cx4[0];
+                                const double dgey = cy4[2] - cy4[0];
+                                const double dgcr = sdx * dgey - sdy * dgex;
+                                if (fabs(dgcr) > 1e-12) {
+                                    const double ggx = cx4[0] - ppx1;
+                                    const double ggy = cy4[0] - ppy1;
+                                    const double t = (ggx * dgey - ggy * dgex)
+                                        / dgcr;
+                                    const double sg2 = (ggx * sdy - ggy * sdx)
+                                        / dgcr;
+                                    if (t > cmin + 1e-9 && t < cmax - 1e-9
+                                        && sg2 > -1e-9 && sg2 < 1.0 + 1e-9) {
+                                        tdiag = t;
+                                    }
+                                }
+                            }
+                            const double DEPS2 = 1e-9;
+                            const double bp2[2] = { tdiag > cmin ? tdiag
+                                                                : cmax, cmax };
+                            const int nbp2 = tdiag > cmin ? 2 : 1;
+                            auto deltaAt2 = [&](double t) -> double {
+                                const double px3 = ppx1 + sdx * t;
+                                const double py3 = ppy1 + sdy * t;
+                                return dep1 + (dep2 - dep1) * t
+                                    - quadLocalDepth(cx4, cy4, cd4, px3, py3);
+                            };
+                            double ta2 = cmin;
+                            double da2 = deltaAt2(ta2);
+                            for (int pc = 0; pc < nbp2; ++pc) {
+                                const double tb2 = bp2[pc];
+                                const double db2 = deltaAt2(tb2);
+                                if (std::isfinite(da2) && std::isfinite(db2)
+                                    && ((da2 < -DEPS2 && db2 > DEPS2)
+                                        || (da2 > DEPS2 && db2 < -DEPS2))) {
+                                    const double tr = ta2 + (tb2 - ta2) * da2
+                                        / (da2 - db2);
+                                    if (tr > 1e-9 && tr < 1.0 - 1e-9) {
+                                        ts.push_back(tr);
+                                    }
+                                }
+                                ta2 = tb2;
+                                da2 = db2;
+                            }
+                        };
+                        // 显式栈细分：根四边形=格片 dpoly/四角深度/参数域；
+                        // 边中点+中心参数中点真实重采样；子片退化回退父片
+                        struct SubQ {
+                            double cx[4], cy[4], cd[4];
+                            double u[4], v[4];
+                            int lvl;
+                        };
+                        SubQ rq;
+                        rq.cx[0] = oc.dpoly[0];
+                        rq.cy[0] = oc.dpoly[1];
+                        rq.cx[1] = oc.dpoly[2];
+                        rq.cy[1] = oc.dpoly[3];
+                        rq.cx[2] = oc.dpoly[4];
+                        rq.cy[2] = oc.dpoly[5];
+                        rq.cx[3] = oc.dpoly[6];
+                        rq.cy[3] = oc.dpoly[7];
+                        rq.cd[0] = oc.qd00;
+                        rq.cd[1] = oc.qd10;
+                        rq.cd[2] = oc.qd11;
+                        rq.cd[3] = oc.qd01;
+                        rq.u[0] = oc.su00;
+                        rq.v[0] = oc.sv00;
+                        rq.u[1] = oc.su10;
+                        rq.v[1] = oc.sv10;
+                        rq.u[2] = oc.su11;
+                        rq.v[2] = oc.sv11;
+                        rq.u[3] = oc.su01;
+                        rq.v[3] = oc.sv01;
+                        rq.lvl = levels;
+                        std::vector<SubQ> stk;
+                        stk.push_back(rq);
+                        while (!stk.empty()) {
+                            SubQ q = stk.back();
+                            stk.pop_back();
+                            if (q.lvl == 0 || refineLeft <= 0) {
+                                quadRoots(q.cx, q.cy, q.cd, tmin, tmax);
+                                continue;
+                            }
+                            double PX[9], PY[9], PD[9], PU[9], PV[9];
+                            for (int i2 = 0; i2 < 4; ++i2) {
+                                PX[i2] = q.cx[i2];
+                                PY[i2] = q.cy[i2];
+                                PD[i2] = q.cd[i2];
+                                PU[i2] = q.u[i2];
+                                PV[i2] = q.v[i2];
+                            }
+                            // 边中点参数（01/12/23/30）+ 中心参数中点 →
+                            // 真实曲面重采样
+                            static const int EM[4][2] = {
+                                { 0, 1 }, { 1, 2 }, { 2, 3 }, { 3, 0 } };
+                            bool good = true;
+                            for (int e = 0; e < 4 && good; ++e) {
+                                PU[4 + e] = 0.5 * (q.u[EM[e][0]]
+                                    + q.u[EM[e][1]]);
+                                PV[4 + e] = 0.5 * (q.v[EM[e][0]]
+                                    + q.v[EM[e][1]]);
+                                good = samplePt(PU[4 + e], PV[4 + e],
+                                                PX[4 + e], PY[4 + e],
+                                                PD[4 + e]);
+                            }
+                            double cu2 = 0, cv2 = 0;
+                            if (good) {
+                                cu2 = 0.25 * (q.u[0] + q.u[1] + q.u[2]
+                                    + q.u[3]);
+                                cv2 = 0.25 * (q.v[0] + q.v[1] + q.v[2]
+                                    + q.v[3]);
+                                PU[8] = cu2;
+                                PV[8] = cv2;
+                                good = samplePt(cu2, cv2, PX[8], PY[8],
+                                                PD[8]);
+                            }
+                            if (!good) {
+                                quadRoots(q.cx, q.cy, q.cd, tmin, tmax);
+                                continue;
+                            }
+                            refineLeft--;
+                            static const int CH[4][4] = { { 0, 4, 8, 7 },
+                                { 4, 1, 5, 8 }, { 8, 5, 2, 6 },
+                                { 7, 8, 6, 3 } };
+                            for (int c3 = 0; c3 < 4; ++c3) {
+                                SubQ nq;
+                                nq.lvl = q.lvl - 1;
+                                for (int i2 = 0; i2 < 4; ++i2) {
+                                    nq.cx[i2] = PX[CH[c3][i2]];
+                                    nq.cy[i2] = PY[CH[c3][i2]];
+                                    nq.cd[i2] = PD[CH[c3][i2]];
+                                    nq.u[i2] = PU[CH[c3][i2]];
+                                    nq.v[i2] = PV[CH[c3][i2]];
+                                }
+                                stk.push_back(nq);
+                            }
+                        }
+                    } else {
                     // δ 分片断点 = 像素路径与对角线（poly 顶点 0→2）交点
                     double tdiag = -1.0;
                     const double dgx0 = oc.poly[0], dgy0 = oc.poly[1];
@@ -19282,6 +19552,7 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                         ta = tb;
                         da0 = db0;
                     }
+                    }
                 }
                 continue;
             }
@@ -19321,6 +19592,9 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             proj(wx1 + t0 * dx3, wy1 + t0 * dy3, wz1 + t0 * dz3, qpx1, qpy1);
             proj(wx1 + t1 * dx3, wy1 + t1 * dy3, wz1 + t1 * dz3, qpx2, qpy2);
             if (!ClipSegRect(qpx1, qpy1, qpx2, qpy2, xmn, ymn, xmx, ymx)) continue;
+            // 1.2.0.10 视口内退化片（拆段×裁剪塌缩成零长）不发射——亚像素
+            // 片本就不可见，防零长段污染下游计数
+            if (fabs(qpx2 - qpx1) + fabs(qpy2 - qpy1) < 0.2) continue;
             DrawCmd d;
             d.op = DrawOp::Segment;
             d.color = vis > 0.999 ? col : rgbaOfHex(col, vis);
@@ -19622,6 +19896,22 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
             lb.pts = { (float)(labX + 6 * us), (float)(labY - 6 * us) };
             lb.text = cv3->label;
             labelList.push_back(lb);
+            break;
+        }
+        case GeoType::Text: {
+            // 1.2.0.10 Text 3D：Text("...", (x,y,z)) / 三维锚点 → 投影标注
+            //（labelList 末层发射，不被体填充埋没；不参与拾取——GGB 注记
+            // 同款豁免）
+            GeoText *t3 = static_cast<GeoText *>(g.get());
+            if (!t3->is3D) break;
+            double ppx3 = 0, ppy3 = 0;
+            proj(t3->x, t3->y, t3->z, ppx3, ppy3);
+            DrawCmd d3;
+            d3.op = DrawOp::Text;
+            d3.color = ObjectColor(t3->color, darkTheme);
+            d3.pts = { (float)(ppx3 + 6 * us), (float)(ppy3 - 6 * us) };
+            d3.text = t3->text;
+            labelList.push_back(d3);
             break;
         }
         case GeoType::Conic3: {

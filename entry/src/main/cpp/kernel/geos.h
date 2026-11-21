@@ -387,6 +387,8 @@ class GeoText : public GeoElement {
 public:
     GeoText() : GeoElement(GeoType::Text) { color = {0x1C, 0x1C, 0x1F}; lineThickness = 3; }
     double x = 1, y = 1;             // 世界坐标
+    double z = 0;                    // 1.2.0.10 3D 标注 z（is3D 时有效）
+    bool is3D = false;               // 1.2.0.10 三维标注（(x,y,z) 字面量/三维锚点）
     std::string text;                 // 显示内容
     GeoPoint *anchor = nullptr;       // 依附点（可空）
     std::vector<std::pair<bool, std::string>> segs;
@@ -397,6 +399,10 @@ public:
         if (anchor) {
             x = anchor->x;
             y = anchor->y;
+            if (anchor->is3D) {   // 1.2.0.10 三维锚点：标注随 z
+                z = anchor->z;
+                is3D = true;
+            }
         }
         if (!segs.empty()) {
             std::string s;
