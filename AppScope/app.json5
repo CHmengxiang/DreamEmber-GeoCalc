@@ -4,7 +4,7 @@
     "vendor": "chmx",
     "versionCode": 1000104,
     "versionName": "1.2.0.10",
-    "buildVersion": "107",
+    "buildVersion": "108",
     "icon": "$media:app_icon",
     "label": "$string:app_name"
   }

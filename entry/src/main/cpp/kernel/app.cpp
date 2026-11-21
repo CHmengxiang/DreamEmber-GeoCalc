@@ -19404,9 +19404,11 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                             for (int pc = 0; pc < nbp2; ++pc) {
                                 const double tb2 = bp2[pc];
                                 const double db2 = deltaAt2(tb2);
+                                // ≤0 口径：交点恰在子片边界/断点上时片端
+                                // δ 精确为 0，±DEPS 带判漏根（dbg_11201 实证）
                                 if (std::isfinite(da2) && std::isfinite(db2)
-                                    && ((da2 < -DEPS2 && db2 > DEPS2)
-                                        || (da2 > DEPS2 && db2 < -DEPS2))) {
+                                    && ((da2 <= 0.0 && db2 > 0.0)
+                                        || (da2 > 0.0 && db2 <= 0.0))) {
                                     const double tr = ta2 + (tb2 - ta2) * da2
                                         / (da2 - db2);
                                     if (tr > 1e-9 && tr < 1.0 - 1e-9) {
@@ -19541,8 +19543,8 @@ void Kernel::render3D(std::vector<DrawCmd> &out)
                     for (int pc = 0; pc < nbp; ++pc) {
                         const double tb = bp[pc];
                         const double db0 = deltaAt(tb);
-                        if ((da0 < -DEPS && db0 > DEPS)
-                            || (da0 > DEPS && db0 < -DEPS)) {
+                        if ((da0 <= 0.0 && db0 > 0.0)
+                            || (da0 > 0.0 && db0 <= 0.0)) {
                             const double tr = ta + (tb - ta) * da0
                                               / (da0 - db0);
                             if (tr > 1e-9 && tr < 1.0 - 1e-9) {
