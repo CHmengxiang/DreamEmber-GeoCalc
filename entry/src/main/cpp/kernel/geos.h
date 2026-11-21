@@ -12,7 +12,7 @@
 namespace dreamember {
 
 enum class GeoType { Point, Segment, Line, Ray, Vector, Circle, Conic2, Polygon, Function, Numeric, Angle, List, Text,
-                     Surface, Sphere, Cylinder, Line3, Plane, Circle3, Conic3, Cone, Solid, Curve3 };
+                     Surface, Sphere, Cylinder, Line3, Plane, Circle3, Conic3, Cone, Solid, Curve3, Locus };
 
 struct GeoColor {
     int r = 0, g = 0, b = 0;
@@ -104,6 +104,23 @@ public:
     std::vector<double> traceBuf;
 
     void update() override;
+    std::string valueText() const override;
+    std::string definitionText() const override;
+};
+
+// 142包 轨迹（Locus(P, Q)）：Q 沿路径参数全域扫掠时 P 的轨迹折线。
+// 采样在内核 updateLocus（逐采样全构造序 update，级联 P 的上游链），
+// pts 平铺 [x0,y0,x1,y1,...] 世界坐标；采样后 q->pathParam 复位。
+// 命令 Locus(P, Q) 创建；XML 经 command 重放自动重建
+class GeoLocus : public GeoElement {
+public:
+    GeoLocus() : GeoElement(GeoType::Locus) { color = {42, 108, 212}; }
+    GeoPoint *p = nullptr;   // 轨迹点（依赖 q 运动）
+    GeoPoint *q = nullptr;   // 路径点（q->path 非空）
+    std::vector<double> pts; // 平铺采样 [x,y,...]
+    // 内核重采样闭包（捕获 kernel；CopyGeoState 随重定义迁移）
+    std::function<void(GeoLocus *)> locusCalc;
+    void update() override { if (locusCalc) locusCalc(this); }
     std::string valueText() const override;
     std::string definitionText() const override;
 };

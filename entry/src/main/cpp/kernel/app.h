@@ -130,6 +130,12 @@ public:
     bool traceCarryOn_ = false;
     std::vector<double> traceCarryBuf_;
 
+    // 142包 Locus：Q 路径参数扫掠域（按路径类型取口径）与重采样引擎。
+    // sweeping_ 挡住采样中嵌套触发的 Locus update（防重入）
+    bool locusDomain(GeoElement *path, double &a, double &b);
+    void updateLocus(GeoLocus *L);
+    bool sweeping_ = false;
+
     // 命中测试：找像素 (px,py) 附近的可拖动自由点；返回 nullptr 表示无。
     // outD 非空时回写命中距离（无命中 1e9）——工具层点/对象就近比较用
     GeoPoint *pickPoint(double px, double py, double *outD = nullptr);

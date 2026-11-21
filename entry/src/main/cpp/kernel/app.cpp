@@ -3772,6 +3772,36 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         made = std::move(pp);
         return true;
     }
+    // 142包 Locus(依赖点, 路径点)：Q 沿路径全域扫掠采 P 轨迹折线
+    if (cmdLower == "locus" && a.size() == 2) {
+        GeoPoint *pp = lookupPoint(a[0]);
+        GeoPoint *qq = lookupPoint(a[1]);
+        if (!pp || !qq) {
+            lastError = "Locus 需要（依赖点, 路径点）且两对象须已存在";
+            made = nullptr;
+            return true;
+        }
+        if (!qq->path) {
+            lastError = "Locus 的第二参须为路径依附点（先让点附着到线段/直线/圆/锥曲线等）";
+            made = nullptr;
+            return true;
+        }
+        if (pp->isFree && !pp->calc) {
+            lastError = "Locus 的第一参须为依赖第二参运动的点";
+            made = nullptr;
+            return true;
+        }
+        auto lc = std::make_unique<GeoLocus>();
+        lc->p = pp;
+        lc->q = qq;
+        lc->inputs = { pp, qq };
+        lc->locusCalc = [this](GeoLocus *L) { updateLocus(L); };
+        lc->cmdName = "Locus";
+        lc->cmdArgs = { a[0], a[1] };
+        lc->update();
+        made = std::move(lc);
+        return true;
+    }
     // 1.0.8.6 Line(点, 向量) / Ray(点, 向量)（GGB Line/Ray(Point, Vector) 同
     // 口径）：过点沿方向的空间直线/射线。方向=向量对象标签端点差（image 感
     // 知）——裸元组按 GGB 口径是点（走两点直线，probe_1083 R18 口径），点标
@@ -12871,6 +12901,100 @@ void Kernel::recordTraces()
     }
 }
 
+// 142包 Locus 扫掠域：Q 路径参数全量程（按路径类型取口径——线段/向量
+// [0,1]，射线 [0,T]，直线 [−T,T]（T=可视世界对角半长），圆 [0,2π]，函数
+// [可视 x 域]，多边形 [0,顶点数]，锥曲线按 1.2.0.8 参数编码：椭圆 [0,2π]/
+// 双曲线 [−2tMax−1,2tMax]/抛物线 ±4√(pR)）
+bool Kernel::locusDomain(GeoElement *path, double &a, double &b)
+{
+    if (!path) return false;
+    const GeoType t = path->type();
+    if (t == GeoType::Segment || t == GeoType::Vector) {
+        a = 0.0;
+        b = 1.0;
+        return true;
+    }
+    const double R = 0.5 * std::sqrt(std::pow(view.xmax() - view.xmin(), 2)
+        + std::pow(view.ymax() - view.ymin(), 2));
+    if (t == GeoType::Line) {
+        a = -R;
+        b = R;
+        return true;
+    }
+    if (t == GeoType::Ray) {
+        a = 0.0;
+        b = R;
+        return true;
+    }
+    if (t == GeoType::Circle) {
+        a = 0.0;
+        b = 2.0 * M_PI;
+        return true;
+    }
+    if (t == GeoType::Function) {
+        GeoFunction *f = static_cast<GeoFunction *>(path);
+        if (!f->definable()) return false;
+        a = view.xmin();
+        b = view.xmax();
+        return true;
+    }
+    if (t == GeoType::Polygon) {
+        GeoPolygon *pg = static_cast<GeoPolygon *>(path);
+        const size_t n = pg->image ? pg->ivx.size() : pg->verts.size();
+        if (n < 2) return false;
+        a = 0.0;
+        b = (double)n;
+        return true;
+    }
+    if (t == GeoType::Conic2) {
+        GeoConic2 *cn = static_cast<GeoConic2 *>(path);
+        if (!cn->ok) return false;
+        if (cn->kind == 0) {
+            a = 0.0;
+            b = 2.0 * M_PI;
+        } else if (cn->kind == 1) {
+            const double tMax = std::acosh(50.0);
+            a = -2.0 * tMax - 1.0;
+            b = 2.0 * tMax;
+        } else {
+            if (!(cn->p > 1e-15)) return false;
+            const double ext = 4.0 * std::sqrt(cn->p * R);
+            a = -ext;
+            b = ext;
+        }
+        return true;
+    }
+    return false;
+}
+
+// 142包 Locus 重采样：Q 沿路径参数全域扫掠，逐采样全构造序 update
+//（级联 P 的上游依赖链），采 P->(x,y) 进 pts。sweeping_ 挡住采样中嵌套
+// 触发的 Locus update；复位遍跳过本 Locus（防重入采样）。Q 的 pathParam
+// 采样后复位，P 及全部依赖回到真实位置
+void Kernel::updateLocus(GeoLocus *L)
+{
+    if (sweeping_ || !L || !L->p || !L->q || !L->q->path) return;
+    double a = 0, b = 0;
+    if (!locusDomain(L->q->path, a, b)) return;
+    const int N = 128;
+    const double savedT = L->q->pathParam;
+    L->pts.clear();
+    L->pts.reserve((size_t)N * 2);
+    sweeping_ = true;
+    for (int i = 0; i < N; ++i) {
+        const double t = a + (b - a) * (double)i / (double)(N - 1);
+        L->q->pathParam = t;
+        for (auto &g : geos_) g->update();
+        L->pts.push_back(L->p->x);
+        L->pts.push_back(L->p->y);
+    }
+    L->q->pathParam = savedT;
+    sweeping_ = false;
+    for (auto &g : geos_) {
+        if (g.get() != static_cast<GeoElement *>(L)) g->update();
+    }
+}
+
 // 1.0.7.1 函数值表「显示点」叠加层：解析 "f:0,1,2;g:0,1"（列标签:x 序列）。
 // 渲染时按对象当前定义求 y——标签失效/类型变化自动跳过，宿主无需跟随重推
 void Kernel::setTablePoints(const std::string &spec)
@@ -13004,6 +13128,7 @@ void Kernel::algebraRows(std::vector<AlgebraRow> &out) const
         case GeoType::Circle3: r.type = "circle"; break;
         // 1.1.0.1 圆锥曲线独立行类型（入「圆锥曲线」分组）
         case GeoType::Conic2: r.type = "conic2"; break;   // 1.2.0.2
+        case GeoType::Locus: r.type = "locus"; break;     // 142包
         case GeoType::Curve3: r.type = "curve3"; break;   // 1.2.0.6
         case GeoType::Conic3: r.type = "conic"; break;
         case GeoType::Cone: r.type = "cone"; break;
@@ -14611,6 +14736,18 @@ GeoElement *Kernel::pickObject(double px, double py)
             double ccx = view.px(c->ccx()), ccy = view.py(c->ccy());
             double rr = c->radius * view.xscale;
             d = fabs(sqrt((px - ccx) * (px - ccx) + (py - ccy) * (py - ccy)) - rr);
+        } else if (t == GeoType::Locus) {
+            // 142包 轨迹拾取：采样折线段距（与渲染同点位）
+            GeoLocus *L = static_cast<GeoLocus *>(g.get());
+            d = 1e18;
+            if (L->pts.size() >= 4) {
+                for (size_t s = 0; s + 3 < L->pts.size(); s += 2) {
+                    double dd = PtSegDist(px, py,
+                                          view.px(L->pts[s]), view.py(L->pts[s + 1]),
+                                          view.px(L->pts[s + 2]), view.py(L->pts[s + 3]));
+                    if (dd < d) d = dd;
+                }
+            }
         } else if (t == GeoType::Conic2) {
             // 1.2.0.2 圆锥曲线拾取：参数采样折线段距（椭圆 96/双曲线两支各 48/
             // 抛物线 64，与渲染同参数化口径）
@@ -14846,6 +14983,7 @@ std::string Kernel::propsOf(const std::string &label) const
     case GeoType::Vector: ty = "vector"; break;
     case GeoType::Circle: ty = "circle"; break;
     case GeoType::Conic2: ty = "conic2"; break;   // 1.2.0.2
+    case GeoType::Locus: ty = "locus"; break;     // 142包
     case GeoType::Curve3: ty = "curve3"; break;   // 1.2.0.6
     case GeoType::Polygon: ty = "polygon"; break;
     case GeoType::Function: ty = "function"; break;
@@ -15219,6 +15357,15 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             // 141包：轨迹开关与缓冲随重定义迁移（痕迹视觉不因重定义消失）
             d->trace = s->trace;
             d->traceBuf = s->traceBuf;
+            break;
+        }
+        case GeoType::Locus: {
+            GeoLocus *d2 = static_cast<GeoLocus *>(dst);
+            GeoLocus *s2 = static_cast<GeoLocus *>(src);
+            d2->p = s2->p;
+            d2->q = s2->q;
+            d2->pts = s2->pts;
+            d2->locusCalc = s2->locusCalc;
             break;
         }
         case GeoType::Segment: {
@@ -18020,6 +18167,22 @@ void Kernel::render(std::vector<DrawCmd> &out)
             lb.pts = { (float)(cx + 4 * us), (float)(cy - 2 * p->pointSize * us - 2 * us) };
             lb.text = p->label;
             out.push_back(lb);
+            break;
+        }
+        case GeoType::Locus: {
+            // 142包 轨迹折线渲染（采样世界→像素；<2 采样不出锋）
+            GeoLocus *L = static_cast<GeoLocus *>(g.get());
+            if (L->pts.size() < 4) break;
+            DrawCmd d;
+            d.op = DrawOp::Polyline;
+            d.color = ObjectColor(L->color, darkTheme);
+            d.lineWidth = L->lineThickness / 3.0f;
+            d.pts.reserve(L->pts.size());
+            for (size_t t = 0; t + 1 < L->pts.size(); t += 2) {
+                d.pts.push_back((float)view.px(L->pts[t]));
+                d.pts.push_back((float)view.py(L->pts[t + 1]));
+            }
+            out.push_back(std::move(d));
             break;
         }
         case GeoType::Segment: {
@@ -21675,6 +21838,14 @@ std::string Kernel::getXml() const
             AppendCommandXml(o, *s);
             AppendElementHead(o, *s, "segment");
             AppendLineStyle(o, s->lineThickness);
+            break;
+        }
+        case GeoType::Locus: {
+            // 142包：command 重放自动重建（Locus(P,Q)），element 只带样式
+            GeoLocus *L = static_cast<GeoLocus *>(g);
+            AppendCommandXml(o, *L);
+            AppendElementHead(o, *L, "locus");
+            AppendLineStyle(o, L->lineThickness);
             break;
         }
         case GeoType::Line: {

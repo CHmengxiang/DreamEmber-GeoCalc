@@ -82,6 +82,18 @@ void GeoPoint::update()
     }
 }
 
+std::string GeoLocus::valueText() const
+{
+    // 值列：采样数摘要（曲线本身无闭式方程，GGB 同为图形对象）
+    const size_t n = pts.size() / 2;
+    return n > 0 ? "轨迹曲线（" + std::to_string(n) + " 采样）" : "轨迹曲线（未定义）";
+}
+
+std::string GeoLocus::definitionText() const
+{
+    return cmdDefText();
+}
+
 std::string GeoPoint::valueText() const
 {
     if (is3D) return "(" + FormatNum(x) + ", " + FormatNum(y) + ", " + FormatNum(z) + ")";
