@@ -541,6 +541,10 @@ struct Index {
             this.menuOpen = false;
             this.fireEvt('evt.copyGgb');
           })
+          this.MenuRow('构造步骤', '构造序逐步回看与步进导航', () => {
+            this.menuOpen = false;
+            this.fireEvt('evt.openSteps');
+          })
 
           Divider().color(this.cDivider())
 

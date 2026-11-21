@@ -148,6 +148,7 @@ import { DataAnalysisPanel } from './DataPanel';
 import { TablePanel, genXs } from './TablePanel';
 import { RegPanel } from './RegPanel';
 import { CasPanel } from './CasPanel';
+import { StepsPanel } from './StepsPanel';   // 144包 构造步骤视图
 import { BottomTabs, TABS, TabDef } from './BottomTabs';
 import { MathKeyboard, MathKbHooks, MATH_KB_HEIGHT, KB_WIDE_MAX_WIDTH } from './MathKeyboard';
 // 六十八包②：指令面板数据源（GGB 式 ••• 全屏搜索页）
@@ -247,6 +248,8 @@ export struct CanvasView {
   @StorageProp('evt.copyGgb') @Watch('onCopyGgbEvt') private copyGgbTick: number = 0;
   // 第五包：CAS 视图（☰ 菜单"视图"分组发起，上游经典版 同位）
   @StorageProp('evt.openCas') @Watch('onOpenCasEvt') private openCasTick: number = 0;
+  // 144包 构造步骤视图（☰ 菜单打开，虚拟 Tab 同 CAS 口径）
+  @StorageProp('evt.openSteps') @Watch('onOpenStepsEvt') private openStepsTick: number = 0;
   // 1.0.8.1 3D 视图开关（☰ 菜单"视图"分组切换；true = 画布区挂 View3D）
   @StorageProp('view3dOn') @Watch('onView3dToggle') private view3dOn: boolean = false;
   // 六十八包④（真机反馈⑤）：面板浮层的系统返回拦截信号（Index.onBackPress
@@ -1691,6 +1694,16 @@ export struct CanvasView {
   // 第五包：☰ 菜单"视图"→ CAS 视图（上游经典版 同位）：非代数视图
   // 打开时收键盘；抽屉开合动画与 openTab 一致。CAS 不在底部四 Tab 内
   //（上游 中它也不是 Tab，是独立视图），打开时四 Tab 无高亮属预期
+  // 144包 构造步骤视图打开（同 CAS 抽屉口径）
+  private onOpenStepsEvt(): void {
+    this.commitPending();
+    this.dismissKeyboard();
+    this.getUIContext().animateTo({ duration: 260, curve: Curve.EaseInOut }, () => {
+      this.showPanel = true;
+      this.panelTab = 'steps';
+    });
+  }
+
   private onOpenCasEvt(): void {
     this.commitPending();
     this.dismissKeyboard();
@@ -3888,6 +3901,14 @@ export struct CanvasView {
       // 第五包：CAS 视图（☰ 菜单"视图"打开，不在底部四 Tab 内）
       CasPanel({
         dark: this.dark,
+        onClose: (): void => this.setPanelVisible(false)
+      })
+    } else if (this.panelTab === 'steps') {
+      // 144包：构造步骤视图（☰ 菜单打开；行点选=画布选中，同代数区口径）
+      StepsPanel({
+        algebra: this.algebra,
+        dark: this.dark,
+        onSelect: (l: string): void => this.toggleRowSelect(l),
         onClose: (): void => this.setPanelVisible(false)
       })
     } else if (this.panelTab === 'analysis') {
