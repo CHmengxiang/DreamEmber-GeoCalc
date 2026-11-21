@@ -130,7 +130,11 @@
 // 内修）。
 import dreamemberKernel from 'libdreamember.so';
 import { inputMethod } from '@kit.IMEKit';
-import { fileIo as fs, picker } from '@kit.CoreFileKit';
+import { fileIo as fs, fileUri, picker } from '@kit.CoreFileKit';
+import { common } from '@kit.AbilityKit';
+import { image } from '@kit.ImageKit';
+import { photoAccessHelper } from '@kit.MediaLibraryKit';
+import { pasteboard } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { componentUtils } from '@kit.ArkUI';
 import { AlgebraEntry, parseAlgebra } from '../model/GeoTypes';
@@ -238,6 +242,9 @@ export struct CanvasView {
   // N4 文件菜单事件（打开/保存 .ggb）
   @StorageProp('evt.openGgb') @Watch('onOpenGgbEvt') private openGgbTick: number = 0;
   @StorageProp('evt.saveGgb') @Watch('onSaveGgbEvt') private saveGgbTick: number = 0;
+  // 1.2.0.12 导出图片 / 复制构图事件（Index ☰ 菜单触发）
+  @StorageProp('evt.exportPng') @Watch('onExportPngEvt') private exportPngTick: number = 0;
+  @StorageProp('evt.copyGgb') @Watch('onCopyGgbEvt') private copyGgbTick: number = 0;
   // 第五包：CAS 视图（☰ 菜单"视图"分组发起，上游经典版 同位）
   @StorageProp('evt.openCas') @Watch('onOpenCasEvt') private openCasTick: number = 0;
   // 1.0.8.1 3D 视图开关（☰ 菜单"视图"分组切换；true = 画布区挂 View3D）
@@ -1824,6 +1831,61 @@ export struct CanvasView {
     }).catch(() => {
       // 取消：静默
     });
+  }
+
+  // 1.2.0.12 复制构图：kernelGetGgb 文本进系统剪贴板（About 页同机制），
+  // 接收端经「打开」选择器粘贴/文件管理可回灌
+  private onCopyGgbEvt(): void {
+    const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN,
+      dreamemberKernel.kernelGetGgb());
+    pasteboard.getSystemPasteboard().setData(data).then(() => {
+      this.alertBox('已复制', '当前构图 .ggb 文本已进剪贴板');
+    }).catch(() => {
+      this.alertBox('复制失败', '剪贴板写入未成功');
+    });
+  }
+
+  // 1.2.0.12 导出 PNG：componentSnapshot 截当前活动画布（2D/3D）→ PNG 落
+  // 缓存 → showAssetsCreationDialog 用户确认落图库（saveButton 安全组件
+  // 已在菜单点击时授权，全程零权限申请）
+  private async onExportPngEvt(): Promise<void> {
+    const is3d = (AppStorage.get<boolean>('view3dOn') ?? false);
+    const compId = is3d ? 'geo3dView' : 'geo2dStage';
+    try {
+      const snap = await this.getUIContext().getComponentSnapshot()
+        .get(compId);
+      const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const path = ctx.cacheDir + '/dreamember_export.png';
+      const file = fs.openSync(path,
+        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      try {
+        const packer = image.createImagePacker();
+        await packer.packToFile(snap, file.fd,
+          { format: 'image/png', quality: 100 });
+        packer.release();
+      } finally {
+        fs.closeSync(file);
+      }
+      const ph = photoAccessHelper.getPhotoAccessHelper(ctx);
+      const now = new Date();
+      const pad = (v: number): string =>
+        (v < 10 ? '0' : '') + v.toString();
+      const title = '梦烬几何_' + now.getFullYear() + pad(now.getMonth() + 1)
+        + pad(now.getDate()) + '_' + pad(now.getHours()) + pad(now.getMinutes())
+        + '.png';
+      const infos: Array<photoAccessHelper.PhotoCreationConfig> = [
+        { title: title, fileNameExtension: 'png',
+          photoType: photoAccessHelper.PhotoType.IMAGE }
+      ];
+      const created = await ph.showAssetsCreationDialog(
+        [fileUri.getUriFromPath(path)], infos);
+      if (created.length > 0) {
+        this.alertBox('导出成功', title + ' 已存入图库');
+      }
+    } catch (e) {
+      // 用户取消对话框返回空数组不报错；其余失败提示
+      this.alertBox('导出失败', '画布截图未成功，请重试');
+    }
   }
 
   // 收回键盘（上游 行为：点画布/打开菜单即收起）：结束编辑会话 + 清焦点，

@@ -408,6 +408,7 @@ export struct CanvasStage {
     // 画布 Stack 占满本组件（工具栏由宿主排在组件上方，见 CanvasView）
     Stack({ alignContent: Alignment.TopStart }) {
       Canvas(this.ctx)
+        .id('geo2dStage')   // 1.2.0.12 导出 PNG 快照定位
         .width('100%')
         .height('100%')
         .backgroundColor(Theme.canvas(this.dark))

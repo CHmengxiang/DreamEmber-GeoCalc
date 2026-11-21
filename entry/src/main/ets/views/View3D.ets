@@ -479,6 +479,7 @@ export struct View3D {
   build() {
     Stack({ alignContent: Alignment.TopStart }) {
       Canvas(this.ctx)
+        .id('geo3dView')   // 1.2.0.12 导出 PNG 快照定位
         .width('100%')
         .height('100%')
         .backgroundColor(Theme.canvas(this.dark))

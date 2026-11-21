@@ -506,6 +506,41 @@ struct Index {
             this.menuOpen = false;
             this.fireEvt('evt.saveGgb');
           })
+          // 1.2.0.12 导出 PNG：saveButton 安全组件包一层（零权限——点击
+          // 成功即获临时授权窗口，showAssetsCreationDialog 由用户确认落图库，
+          // 避免 photoAccessHelper 权限弹窗审核风险）
+          Row() {
+            Column() {
+              SaveButton({
+                icon: SaveIconStyle.FULL_FILLED,
+                text: SaveDescription.SAVE_IMAGE,
+                buttonType: ButtonType.Capsule
+              })
+                .backgroundColor(this.dark ? '#33363B' : '#E9EBF2')
+                .fontColor(this.cText())
+                .width(120)
+                .height(30)
+                .onClick((event: ClickEvent, result: SaveButtonOnClickResult) => {
+                  if (result === SaveButtonOnClickResult.SUCCESS) {
+                    this.menuOpen = false;
+                    this.fireEvt('evt.exportPng');
+                  }
+                })
+              Text('导出图片')
+                .fontSize(16)
+                .fontColor(this.cText())
+                .margin({ top: 4 })
+            }
+            .alignItems(HorizontalAlign.Start)
+            .layoutWeight(1)
+          }
+          .width('100%')
+          .height(64)
+          .padding({ left: 20, right: 16 })
+          this.MenuRow('复制构图', '当前构图 .ggb 文本进剪贴板', () => {
+            this.menuOpen = false;
+            this.fireEvt('evt.copyGgb');
+          })
 
           Divider().color(this.cDivider())
 
