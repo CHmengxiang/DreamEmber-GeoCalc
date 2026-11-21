@@ -344,6 +344,12 @@ export struct RatexView {
   private fontsReady: boolean = false;
   private lay: RatexLayoutResult | null = null;
   private den: number = canvasDensity();
+  // 1.2.0.7 风暴治理：排版缓存键（raw+色+字号+字体就绪位）——键命中复用
+  // 缓存 DisplayList，免重复原生 convert+layout+JSON 解析；lastEvW/H 记
+  // 最近一次 area 事件尺寸，同尺寸连续事件=滚动位移型，跳过整帧重绘
+  private layKey: string = '\u0000';
+  private lastEvW: number = -1;
+  private lastEvH: number = -1;
 
   aboutToAppear(): void {
     registerKatexFonts(() => {
@@ -360,6 +366,24 @@ export struct RatexView {
     if (this.ready) {
       this.paint();
     }
+  }
+
+  // 1.2.0.7 风暴治理：同尺寸连续 area 事件（代数区滚动位移、同帧重复
+  // 派发）且排版键未变 → 跳过整帧重绘。尺寸变化的首个事件仍全量重绘
+  //（缓冲重分配后内容需重建）。§92 APP_INPUT_BLOCK 根因即每个位移事件
+  // 都做原生排版+JSON 解析+全量字形绘制
+  private repaintOnArea(w: number, h: number): void {
+    const same = w === this.lastEvW && h === this.lastEvH;
+    this.lastEvW = w;
+    this.lastEvH = h;
+    const fs = this.fontSize * RATEX_FONT_SCALE * mathFontScale(this.isWide);
+    const key = this.raw + '\u0002' + this.color + '\u0002' + fs.toFixed(3)
+      + (this.fontsReady ? 'F' : '');
+    if (same && key === this.layKey && this.lay !== null) {
+      this.onResult(true);
+      return;
+    }
+    this.repaint();
   }
 
   // 线性串 → LaTeX → 排版 → 几何就绪；任一步失败返回 false（宿主回退）
@@ -379,14 +403,20 @@ export struct RatexView {
   }
 
   private paint(): void {
-    if (!this.layout()) {
-      this.onResult(false);
-      return;
-    }
-    const lay = this.lay as RatexLayoutResult;
     // 五十八包①：字号视觉补偿（KaTeX 同标称字号偏小一档）；六十六包①：
     // 宽窗再乘 1.35（PC/平板观看距离补偿，窄窗恒 1 与手机一致）
     const fs = this.fontSize * RATEX_FONT_SCALE * mathFontScale(this.isWide);
+    // 1.2.0.7 风暴治理：排版键未变时复用缓存 DisplayList（只重绘不重排）
+    const key = this.raw + '\u0002' + this.color + '\u0002' + fs.toFixed(3)
+      + (this.fontsReady ? 'F' : '');
+    if (key !== this.layKey || this.lay === null) {
+      if (!this.layout()) {
+        this.onResult(false);
+        return;
+      }
+      this.layKey = key;
+    }
+    const lay = this.lay as RatexLayoutResult;
     // em → vp：坐标全 em × fontSize；Canvas 坐标 vp 口径（第十五包③终案）。
     // 五十四包③修正：item.y 为盒顶起算（基线在 y=height），直接绘制，
     // 只加 pad 顶边距——不再叠加基线偏移（旧码整体下移一个 ascent 被裁）
@@ -432,6 +462,7 @@ export struct RatexView {
         this.ready = true;
         this.paint();
       })
-      .onAreaChange(() => this.repaint())
+      .onAreaChange((_o: Area, n: Area) => this.repaintOnArea(
+        Number(n.width), Number(n.height)))
   }
 }

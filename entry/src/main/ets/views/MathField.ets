@@ -1902,6 +1902,13 @@ export struct MathText {
   private ctx: CanvasRenderingContext2D = new CanvasRenderingContext2D(this.settings);
   private ready: boolean = false;
   private den: number = canvasDensity();
+  // 1.2.0.7 风暴治理：RaTeX 判定缓存键 + 行级重绘去重记账（同尺寸连续
+  // area 事件=滚动位移型，键未变跳过整帧重绘）
+  private mtKey: string = '\u0000';
+  private mtOk: boolean = false;
+  private fbKey: string = '\u0000';
+  private lastEvW: number = -1;
+  private lastEvH: number = -1;
 
   // RaTeX 链路快速判定（零渲染）：线性串可完整转 LaTeX 且排版出有效
   // DisplayList 才走 RaTeX；结果缓存避免 build 与 paint 双重排版开销。
@@ -1911,15 +1918,23 @@ export struct MathText {
     if (!this.useRatex) {
       return false;
     }
+    // 1.2.0.7 风暴治理：键命中直接复用判定结果（免重复原生 convert+layout）
+    const key = this.raw + '\u0002' + this.color;
+    if (key === this.mtKey) {
+      return this.mtOk;
+    }
+    this.mtKey = key;
     const latex = ratexConvertLinear(this.raw);
     if (latex === null) {
       console.warn(`[ratex-mt] convert FAIL raw=${JSON.stringify(this.raw)}`);
+      this.mtOk = false;
       this.useRatex = false;
       return false;
     }
     const lay = ratexLayoutLatex(latex, this.color);
     if (lay === null) {
       console.warn(`[ratex-mt] layout FAIL latex=${latex}`);
+      this.mtOk = false;
       this.useRatex = false;
       return false;
     }
@@ -1934,6 +1949,7 @@ export struct MathText {
         `items=${lay.items.length}`);
     }
     this.lay = lay;
+    this.mtOk = true;
     return true;
   }
 
@@ -1947,6 +1963,20 @@ export struct MathText {
     if (this.ready) {
       this.paint();
     }
+  }
+
+  // 1.2.0.7 风暴治理：同尺寸连续 area 事件且回退场键未变 → 跳过整帧
+  // 重绘（位移型事件不再触发 parseDisplayAtoms+mathLayout+mathDraw）
+  private repaintOnArea(w: number, h: number): void {
+    const same = w === this.lastEvW && h === this.lastEvH;
+    this.lastEvW = w;
+    this.lastEvH = h;
+    const fk = this.raw + '\u0002' + this.dark + '\u0002' + this.fontSize
+      + '\u0002' + this.color + '\u0002' + this.den;
+    if (same && fk === this.fbKey) {
+      return;
+    }
+    this.repaint();
   }
 
   private paint(): void {
@@ -1974,6 +2004,8 @@ export struct MathText {
     }
     mathDraw(this.ctx, lay.pieces, baseY, this.color, Theme.faint(this.dark),
       Theme.accent(this.dark), false, hookW, k);
+    this.fbKey = this.raw + '\u0002' + this.dark + '\u0002' + this.fontSize
+      + '\u0002' + this.color + '\u0002' + this.den;
   }
 
   build() {
@@ -1995,7 +2027,8 @@ export struct MathText {
           this.ready = true;
           this.paint();
         })
-        .onAreaChange(() => this.repaint())
+        .onAreaChange((_o: Area, n: Area) => this.repaintOnArea(
+          Number(n.width), Number(n.height)))
     }
   }
 }
@@ -2041,6 +2074,11 @@ export struct MathField {
   // scrollTo 按旧内容宽被 clamp 回 0。目标挂起，Canvas onAreaChange（新宽
   // 已布局）时补滚
   private pendingScroll: number = -1;
+  // 1.2.0.7 风暴治理：帧键记账 + 最近 area 事件尺寸——同尺寸连续事件
+  //（输入行随面板滚动位移）且帧内容未变时跳过整帧重绘
+  private mfKey: string = '\u0000';
+  private mfEvW: number = -1;
+  private mfEvH: number = -1;
 
   // 1.2.0.1④ 光标跟随滚动：光标出视口（左右缘 ±8px 缓冲）时以最小滚动量
   // 入视（键入续尾=右跟、点按回跳=左跟、内容短于视口=不滚）。仅本组件
@@ -2065,6 +2103,9 @@ export struct MathField {
     }
     if (Math.abs(target - cur) > 0.5) {
       this.pendingScroll = target;
+      // 1.2.0.7 兜底补滚：中段输入/点按回跳等无后续 area 事件的跟滚场景
+      // 也要入视——双帧后布局必已同步，与布局后补滚幂等（先到先消费）
+      setTimeout(() => this.flushPendingScroll(), 33);
     }
   }
 
@@ -2075,6 +2116,26 @@ export struct MathField {
       this.pendingScroll = -1;
       this.fieldScroller.scrollTo({ xOffset: t, yOffset: 0, animation: false });
     }
+  }
+
+  // 1.2.0.7 帧键：内容+光标+闪烁相位+几何——位移型 area 事件去重依据
+  private frameKey(): string {
+    return this.raw + '\u0002' + this.focused + this.caret
+      + (this.caretScript ? 's' : '') + (this.blink ? 'B' : 'b')
+      + this.dark + '\u0002' + this.contentW + 'x' + this.canvasH
+      + '\u0002' + this.rtxFs;
+  }
+
+  private repaintOnArea(w: number, h: number): void {
+    const same = w === this.mfEvW && h === this.mfEvH;
+    this.mfEvW = w;
+    this.mfEvH = h;
+    const fk = this.frameKey();
+    if (same && fk === this.mfKey) {
+      return;
+    }
+    this.mfKey = fk;
+    this.repaint();
   }
   // ---- 五十八包 RaTeX 编辑行状态 ----
   private rtxLay: RatexLayoutResult | null = null;   // 完整原文排版结果
@@ -2516,6 +2577,7 @@ export struct MathField {
 
   private paint(): void {
     if (this.paintRatex()) {
+      this.mfKey = this.frameKey();
       return;
     }
     if (this.canvasH !== 30) {
@@ -2545,6 +2607,7 @@ export struct MathField {
     mathDraw(this.ctx, lay.pieces, 22, Theme.text(this.dark),
       Theme.faint(this.dark), Theme.accent(this.dark),
       this.focused && this.blink, 9, k);
+    this.mfKey = this.frameKey();
   }
 
   build() {
@@ -2564,9 +2627,9 @@ export struct MathField {
             this.ready = true;
             this.paint();
           })
-          .onAreaChange(() => {
-            this.repaint();
-            this.flushPendingScroll();   // 1.2.0.1④ 新内容宽布局后补滚
+          .onAreaChange((_o: Area, n: Area) => {
+            this.flushPendingScroll();   // 1.2.0.1④ 新内容宽布局后补滚（恒执行，廉价）
+            this.repaintOnArea(Number(n.width), Number(n.height));
           })
       }
       .scrollable(ScrollDirection.Horizontal)
