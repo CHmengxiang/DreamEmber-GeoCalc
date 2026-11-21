@@ -1751,10 +1751,13 @@ bool Kernel::inputImpl(const std::string &srcRaw)
             if (!isalnum((unsigned char)c) && c != '_') { cmdIsName = false; break; }
         }
         // f(x)= 这类左部已在 hasAssign 处理，rhs 不含 "(x)" 前缀；
-        // "(x)" 检查避开引号区（Text("(x)") 的文本内容）
+        // "(x)" 检查避开引号区（Text("(x)") 的文本内容）。149包：实参区
+        // 内的 "(x)"（ComplexRoots(sin(x)) 类）不再整体拦进表达式路径——
+        // 仅命令名区/引号前置豁免，实参交各命令分支自 parse
         size_t qx = rhs.find("(x)");
         size_t q1 = rhs.find('"');
-        if (cmdIsName && (qx == std::string::npos || (q1 != std::string::npos && q1 < qx))) {
+        if (cmdIsName && (qx == std::string::npos || qx > pOpen
+            || (q1 != std::string::npos && q1 < qx))) {
             std::string args = rhs.substr(pOpen + 1, rhs.size() - pOpen - 2);
             if (tryCommand(ToLower(cmd), args, name, made)) {
                 if (!made) {
@@ -3302,6 +3305,122 @@ static bool InvertMatrix(std::vector<std::vector<double>> A,
         }
     }
     return true;
+}
+
+// ---------- 149包 复数二期下：实系数多项式复根（原生 Durand-Kerner） ----------
+// 系数提取：采样 f(0..d) 解 Vandermonde（部分主元高斯），未采样实点
+// d+1..d+6 相对 1e-6 复核，取最小拟合次数（d≤8，次数更高条件数恶化）。
+// 非多项式（sin/exp/含未解析引用…）返回 false，调用方给文案
+static bool SolveVandermonde(const std::vector<double> &xs,
+                             const std::vector<double> &ys,
+                             std::vector<double> &c)
+{
+    const int n = (int)xs.size();
+    std::vector<std::vector<double>> A(n, std::vector<double>(n + 1));
+    for (int r = 0; r < n; ++r) {
+        double pw = 1;
+        for (int k = 0; k < n; ++k) { A[r][k] = pw; pw *= xs[r]; }
+        A[r][n] = ys[r];
+    }
+    for (int col = 0; col < n; ++col) {
+        int piv = col;
+        for (int r = col + 1; r < n; ++r) {
+            if (std::fabs(A[r][col]) > std::fabs(A[piv][col])) piv = r;
+        }
+        if (std::fabs(A[piv][col]) < 1e-12) return false;
+        std::swap(A[col], A[piv]);
+        for (int r = col + 1; r < n; ++r) {
+            const double fr = A[r][col] / A[col][col];
+            for (int k = col; k <= n; ++k) A[r][k] -= fr * A[col][k];
+        }
+    }
+    c.assign(n, 0);
+    for (int r = n - 1; r >= 0; --r) {
+        double s = A[r][n];
+        for (int k = r + 1; k < n; ++k) s -= A[r][k] * c[k];
+        c[r] = s / A[r][r];
+    }
+    return true;
+}
+
+// 多项式复求值（Horner，CxVal 复乘）
+static CxVal PolyEvalCx(const std::vector<double> &c, const CxVal &z)
+{
+    CxVal r{c.back(), 0.0};
+    for (int i = (int)c.size() - 2; i >= 0; --i) {
+        r = CxVal{r.re * z.re - r.im * z.im + c[i],
+                  r.re * z.im + r.im * z.re};
+    }
+    return r;
+}
+
+// 实系数多项式全部复根：Durand-Kerner 同时迭代（种子 (0.4+0.9i)^i，
+// 400 轮，步长 1e-14 收敛）。多重根收敛线性、精度弱化（记录口径）
+static bool PolyRootsDK(const std::vector<double> &c, std::vector<CxVal> &roots)
+{
+    const int d = (int)c.size() - 1;
+    if (d < 1 || std::fabs(c.back()) < 1e-12) return false;
+    std::vector<CxVal> z(d);
+    CxVal seed{0.4, 0.9};
+    z[0] = CxVal{1.0, 0.0};
+    for (int i = 1; i < d; ++i) {
+        z[i] = CxVal{z[i - 1].re * seed.re - z[i - 1].im * seed.im,
+                     z[i - 1].re * seed.im + z[i - 1].im * seed.re};
+    }
+    for (int it = 0; it < 400; ++it) {
+        double maxDelta = 0;
+        for (int i = 0; i < d; ++i) {
+            const CxVal pv = PolyEvalCx(c, z[i]);
+            CxVal den{1.0, 0.0};
+            for (int j = 0; j < d; ++j) {
+                if (j == i) continue;
+                const CxVal df{z[i].re - z[j].re, z[i].im - z[j].im};
+                den = CxVal{den.re * df.re - den.im * df.im,
+                            den.re * df.im + den.im * df.re};
+            }
+            const double ddm = den.re * den.re + den.im * den.im;
+            if (ddm < 1e-30) continue;   // 种子碰撞，本轮跳过
+            const double sr = (pv.re * den.re + pv.im * den.im) / ddm;
+            const double si = (pv.im * den.re - pv.re * den.im) / ddm;
+            z[i].re -= sr;
+            z[i].im -= si;
+            const double mag = std::sqrt(sr * sr + si * si);
+            if (mag > maxDelta) maxDelta = mag;
+        }
+        if (maxDelta < 1e-14) break;
+    }
+    roots = z;
+    return true;
+}
+
+// f → 实系数（最小拟合次数）；非多项式/零函数返回 false
+static bool PolyCoeffsFromFn(GeoFunction *f, std::vector<double> &c)
+{
+    const int maxDeg = 8;
+    for (int d = 0; d <= maxDeg; ++d) {
+        std::vector<double> xs, ys;
+        xs.reserve(d + 1);
+        ys.reserve(d + 1);
+        for (int j = 0; j <= d; ++j) {
+            const double v = f->evalAt((double)j);
+            if (!std::isfinite(v)) return false;
+            xs.push_back((double)j);
+            ys.push_back(v);
+        }
+        std::vector<double> cd;
+        if (!SolveVandermonde(xs, ys, cd)) continue;
+        bool fits = true;
+        for (int j = d + 1; j <= d + 6 && fits; ++j) {
+            const double v = f->evalAt((double)j);
+            const double pv = PolyEvalCx(cd, CxVal{(double)j, 0.0}).re;
+            if (std::fabs(v - pv) > 1e-6 * (1.0 + std::fabs(v))) fits = false;
+        }
+        if (fits) {
+            c = cd;
+            return true;
+        }
+    }
+    return false;
 }
 
 // 内核源文 → giac 求值串：mod(A,B) 翻译为 (A-B*floor(A/B))（欧几里得余，
@@ -8554,6 +8673,54 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         if (aNum) t->inputs.push_back(aNum);
         t->update();
         made = std::move(t);
+        return true;
+    }
+    // ---------- 149包 复数二期下：ComplexRoots(f) / CSolve(f[, x]) ----------
+    // 实系数多项式全部复根 → 点列表（isComplex 点，值列 a+bi；实根 y=0，
+    // 排序虚部降序实部升序）。calc 每次现采样提取系数重解（f 含滑条
+    // 系数随动）；创建期预检非多项式给文案（超越方程复域求解留三期）
+    if ((cmdLower == "complexroots" || cmdLower == "csolve")
+        && (a.size() == 1 || a.size() == 2)) {
+        GeoFunction *f = resolveFunctionArg(a[0]);
+        if (!f) { made = nullptr; return true; }   // lastError 已填
+        std::vector<double> c0;
+        if (!PolyCoeffsFromFn(f, c0)) {
+            lastError = cmdLower == "complexroots"
+                ? "ComplexRoots 需要实系数多项式函数（超越方程复域求解暂不支持）"
+                : "CSolve 一期仅支持实系数多项式（超越方程复域求解暂不支持）";
+            made = nullptr;
+            return true;
+        }
+        const std::string disp = cmdLower == "complexroots" ? "ComplexRoots" : "CSolve";
+        auto out = std::make_unique<GeoList>();
+        GeoFunction *src = f;
+        out->calc = [src](GeoList *g) {
+            std::vector<double> c;
+            std::vector<CxVal> roots;
+            if (PolyCoeffsFromFn(src, c) && PolyRootsDK(c, roots)) {
+                std::sort(roots.begin(), roots.end(),
+                          [](const CxVal &A, const CxVal &B) {
+                              if (std::fabs(A.im - B.im) > 1e-9) return A.im > B.im;
+                              return A.re < B.re;
+                          });
+                g->points.clear();
+                g->pointRefs.clear();
+                for (const CxVal &r : roots) {
+                    g->points.emplace_back(
+                        std::isfinite(r.re) ? r.re : 0.0,
+                        std::isfinite(r.im) ? r.im : 0.0);
+                }
+            } else {
+                g->points.clear();
+                g->pointRefs.clear();
+            }
+        };
+        out->update();
+        out->cmdName = disp;
+        out->cmdArgs = { a[0] };
+        if (a.size() == 2) out->cmdArgs.push_back(a[1]);
+        out->inputs = { f };
+        made = std::move(out);
         return true;
     }
     // NthRoot(x, n)：n 次方根（上游 f(x) 页 ⁿ√□ 模板键）。负底奇数次取实根

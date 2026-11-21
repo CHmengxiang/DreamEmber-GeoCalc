@@ -313,6 +313,7 @@ bool IsCommandCallName(const std::string &n)
         "curve",   // 1.2.0.6 空间参数曲线（防快捷建点劫持）
         "taylor",   // 1.2.0.9 泰勒多项式（防快捷建点劫持）
         "locus",    // 1.2.0.14 轨迹（防快捷建点劫持）
+        "complexroots", "csolve",   // 1.4.0.3 复根（防快捷建点劫持）
         "complex", "re", "im", "absc", "arg", "conjugate", "sqrtc",
         "mulc", "divc", "addc", "subc",   // 1.2.0.15 复数族（防劫持）
         "plane", "surface",     // 1.0.8.2 三维命令（Plane(1,2,3)/参数曲面同防）
