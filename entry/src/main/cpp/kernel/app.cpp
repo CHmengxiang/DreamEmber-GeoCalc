@@ -226,6 +226,10 @@ bool IsPathType(GeoElement *e)
         || t == GeoType::Ray || t == GeoType::Circle || t == GeoType::Polygon) {
         return true;
     }
+    if (t == GeoType::Conic2) {   // 1.2.0.8 锥曲线动点附着（动点题型：P 在
+        GeoConic2 *cn = static_cast<GeoConic2 *>(e);   // 椭圆/双曲线/抛物线上）
+        return cn->ok;
+    }
     if (t == GeoType::Function) {
         GeoFunction *f = static_cast<GeoFunction *>(e);
         return !f->ineqOp && !f->ineqTwoVar && f->ineqChain.empty()
@@ -318,6 +322,39 @@ bool PathPointAt(GeoElement *e, double param, double &x, double &y)
         if (!PolyVert(pg, (static_cast<size_t>(i) + 1) % n, bx, by)) return false;
         x = ax + t * (bx - ax);
         y = ay + t * (by - ay);
+        return true;
+    }
+    case GeoType::Conic2: {
+        // 1.2.0.8 锥曲线路径取点（参数口径与 appendConic2Plot 渲染采样一致）：
+        //   椭圆 param=角 θ（弧度，圆同口径）P=c+a·cosθ·u+b·sinθ·v；
+        //   双曲线区间平移双射（两支区间不相交）：右支 param=tt+tMax∈
+        //  [0,2tMax]、左支 param=tt−tMax−1∈[−2tMax−1,−1]，tt 钳 [−tMax,
+        //  tMax]（tMax=acosh(50) 渲染同款）P=c+s·(cosh tt·a·u+sinh tt·b·v)；
+        //   抛物线 param=s（带号，沿共轭轴 v）P=c+s·v+s²/(4p)·u
+        GeoConic2 *cn = static_cast<GeoConic2 *>(e);
+        if (!cn->ok) return false;
+        if (cn->kind == 0) {
+            x = cn->cx + cn->a * std::cos(param) * cn->ux
+                + cn->b * std::sin(param) * cn->vx;
+            y = cn->cy + cn->a * std::cos(param) * cn->uy
+                + cn->b * std::sin(param) * cn->vy;
+            return true;
+        }
+        if (cn->kind == 1) {
+            // 区间平移双射编码（两支区间不相交）：右支 param=tt+tMax∈
+            // [0,2tMax]，左支 param=tt−tMax−1∈[−2tMax−1,−1]；tMax=acosh(50)
+            const double tMax = std::acosh(50.0);
+            const double sg = param >= 0.0 ? 1.0 : -1.0;
+            double tt = param >= 0.0 ? param - tMax : param + tMax + 1.0;
+            tt = std::max(-tMax, std::min(tMax, tt));
+            const double ch = std::cosh(tt), sh = std::sinh(tt);
+            x = cn->cx + sg * (cn->a * ch * cn->ux + cn->b * sh * cn->vx);
+            y = cn->cy + sg * (cn->a * ch * cn->uy + cn->b * sh * cn->vy);
+            return true;
+        }
+        if (!(cn->p > 1e-15)) return false;
+        x = cn->cx + param * cn->vx + (param * param / (4.0 * cn->p)) * cn->ux;
+        y = cn->cy + param * cn->vy + (param * param / (4.0 * cn->p)) * cn->uy;
         return true;
     }
     default:
@@ -425,6 +462,64 @@ bool PathProject(GeoElement *e, double wx, double wy, double prev,
             }
         }
         param = static_cast<double>(bestI) + bestT;
+        double px, py;
+        if (!PathPointAt(e, param, px, py)) return false;
+        x = px;
+        y = py;
+        return true;
+    }
+    case GeoType::Conic2: {
+        // 1.2.0.8 锥曲线投影：
+        //   椭圆——归一化空间 atan2 得角，[0,2π) 归一 + prev unwrap（圆同口径）；
+        //   双曲线——s=支号（X 符号；gap 内 |X|<1 取 prev 支），tt=sign(Y)·
+        //   min(acosh(|X|), tMax)，param=s·(tMax+tt)；落点由 PathPointAt 复算；
+        //   抛物线——沿 v 取初值 + Newton 3 步（g(s)=dot(P(s)−P, P'(s))，
+        //   g'=|P'|²+dot(P(s)−P, P'')，P''=u/(2p)）
+        GeoConic2 *cn = static_cast<GeoConic2 *>(e);
+        if (!cn->ok) return false;
+        if (cn->kind == 0) {
+            const double Xn = ((wx - cn->cx) * cn->ux + (wy - cn->cy) * cn->uy)
+                / cn->a;
+            const double Yn = ((wx - cn->cx) * cn->vx + (wy - cn->cy) * cn->vy)
+                / cn->b;
+            double th = std::atan2(Yn, Xn);
+            if (th < 0) th += 2.0 * M_PI;
+            if (prev < 1e17) {
+                th += 2.0 * M_PI * std::round((prev - th) / (2.0 * M_PI));
+            }
+            param = th;
+        } else if (cn->kind == 1) {
+            const double tMax = std::acosh(50.0);
+            const double Xa = ((wx - cn->cx) * cn->ux + (wy - cn->cy) * cn->uy)
+                / cn->a;
+            const double Ya = ((wx - cn->cx) * cn->vx + (wy - cn->cy) * cn->vy)
+                / cn->b;
+            double sg = Xa >= 0.0 ? 1.0 : -1.0;
+            if (prev < 1e17 && std::fabs(Xa) < 1.0) {
+                sg = prev >= 0.0 ? 1.0 : -1.0;   // gap 内沿当前支不跳支（支号
+            }                                     // = param 符号）
+            const double u = std::acosh(std::max(std::fabs(Xa), 1.0));
+            // Y'=s·sinh(tt) → sign(tt)=s·sign(Y')：还原须乘支号
+            const double tt = sg * (Ya >= 0.0 ? 1.0 : -1.0) * std::min(u, tMax);
+            param = sg > 0.0 ? tt + tMax : tt - tMax - 1.0;
+        } else {
+            if (!(cn->p > 1e-15)) return false;
+            const double rx = wx - cn->cx, ry = wy - cn->cy;
+            double ss = rx * cn->vx + ry * cn->vy;
+            for (int it = 0; it < 3; ++it) {
+                const double qx = ss * cn->vx + (ss * ss / (4.0 * cn->p)) * cn->ux;
+                const double qy = ss * cn->vy + (ss * ss / (4.0 * cn->p)) * cn->uy;
+                const double dxv = cn->vx + (ss / (2.0 * cn->p)) * cn->ux;
+                const double dyv = cn->vy + (ss / (2.0 * cn->p)) * cn->uy;
+                const double gx = qx - rx, gy = qy - ry;
+                const double g = gx * dxv + gy * dyv;
+                const double gp = dxv * dxv + dyv * dyv
+                    + (gx * cn->ux + gy * cn->uy) / (2.0 * cn->p);
+                if (std::fabs(gp) < 1e-18) break;
+                ss -= g / gp;
+            }
+            param = ss;
+        }
         double px, py;
         if (!PathPointAt(e, param, px, py)) return false;
         x = px;
@@ -3546,7 +3641,7 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
     if (cmdLower == "point" && (a.size() == 1 || a.size() == 2)) {
         GeoElement *path = lookup(a[0]);
         if (!IsPathType(path)) {
-            lastError = "Point 需要路径参数（线段/直线/射线/向量/圆/多边形/函数）";
+            lastError = "Point 需要路径参数（线段/直线/射线/向量/圆/锥曲线/多边形/函数）";
             made = nullptr;
             return true;
         }
@@ -3555,6 +3650,14 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             lastError = "Point 第二参数须为数值";
             made = nullptr;
             return true;
+        }
+        if (a.size() == 1) {
+            // 1.2.0.8 锥曲线单参默认取特征点（椭圆/抛物线顶点、双曲线右支
+            // 顶点）——通用 0.5 默认在双曲线上落在 cosh(4.1)≈30a 远臂屏外
+            GeoConic2 *cnD = dynamic_cast<GeoConic2 *>(path);
+            if (cnD && cnD->ok) {
+                param = cnD->kind == 1 ? std::acosh(50.0) : 0.0;
+            }
         }
         auto pp = std::make_unique<GeoPoint>();
         pp->path = path;
@@ -13689,7 +13792,7 @@ bool Kernel::attachPoint(GeoPoint *p, GeoElement *path, double wx, double wy)
 {
     if (!p || !path || p->path == path) return false;
     if (!IsPathType(path)) {
-        lastError = "该对象不能作为路径（可附着：线段/直线/射线/向量/圆/多边形/函数图像）";
+        lastError = "该对象不能作为路径（可附着：线段/直线/射线/向量/圆/锥曲线/多边形/函数图像）";
         return false;
     }
     if (!toolListed(p) || !toolListed(path)) {
@@ -13870,6 +13973,91 @@ bool Kernel::intersectAll(GeoElement *o1, GeoElement *o2,
             const double t2 = (-B + sq) / (2.0 * A);
             pushBounded(x1 + t1 * dx, y1 + t1 * dy);
             if (sq > 1e-12) pushBounded(x1 + t2 * dx, y1 + t2 * dy);
+            return !pts.empty();
+        }
+    }
+    // 1.2.0.8 锥曲线 × 锥曲线：隐式残差横竖双网格扫描 + 二分 refine，
+    // 交点判据 |resid_b| < 1e-6（残差按 O(1) 归一：椭圆/双曲线 X²/a²±Y²/b²−1、
+    // 抛物线 (Y²−4pX)/(4p²)）。扫描盒取两锥曲线特征尺度盒（与视野无关——
+    // 视野内相交只是子集）；相切重根无符号变号不收（数值口径，GGB 同限）
+    {
+        GeoConic2 *ka = dynamic_cast<GeoConic2 *>(o1);
+        if (!ka) ka = dynamic_cast<GeoConic2 *>(o2);
+        GeoConic2 *kb = nullptr;
+        if (ka) kb = ka == o1 ? dynamic_cast<GeoConic2 *>(o2)
+                              : dynamic_cast<GeoConic2 *>(o1);
+        if (ka && kb && ka->ok && kb->ok) {
+            // 沿 A 的路径参数扫 B 的隐式残差 f_b(P_A(t)) 符号变号 + 二分：
+            // 落点恒在 A 上（resid_a≡0），f_b 二分至 1e-12；固定网格线扫
+            // 不过真交点（AD 探针实证）故弃。参数域三种：
+            //   椭圆 θ∈[0,2π]；双曲线 [−2tMax−1, 2tMax]（左右支+gap 钳端）；
+            //   抛物线 |s|≤4√(pR)（R 为两锥特征尺度盒，覆盖盒内全部交点）。
+            // 相切重根无符号变号不收（数值口径，GGB 同限）
+            auto resid = [](GeoConic2 *k, double x, double y) {
+                const double X = (x - k->cx) * k->ux + (y - k->cy) * k->uy;
+                const double Y = (x - k->cx) * k->vx + (y - k->cy) * k->vy;
+                if (k->kind == 0) {
+                    return X * X / (k->a * k->a) + Y * Y / (k->b * k->b) - 1.0;
+                }
+                if (k->kind == 1) {
+                    return X * X / (k->a * k->a) - Y * Y / (k->b * k->b) - 1.0;
+                }
+                const double p4 = 4.0 * k->p;
+                return p4 > 1e-18 ? (Y * Y - p4 * X) / (p4 * k->p) : 1e18;
+            };
+            const double chrA = ka->kind == 2 ? ka->p : std::max(ka->a, ka->b);
+            const double chrB = kb->kind == 2 ? kb->p : std::max(kb->a, kb->b);
+            const double R = 6.0 * std::max(std::max(chrA, chrB), 1e-9)
+                + 2.0 * (fabs(ka->cx - kb->cx) + fabs(ka->cy - kb->cy)) + 1.0;
+            double p0 = 0.0, p1 = 2.0 * M_PI;
+            if (ka->kind == 1) {
+                p0 = -2.0 * std::acosh(50.0) - 1.0;
+                p1 = 2.0 * std::acosh(50.0);
+            } else if (ka->kind == 2) {
+                p1 = 4.0 * sqrt(std::max(ka->p * R, 1e-18));
+                p0 = -p1;
+            }
+            auto dedup = [&](double qx, double qy) {
+                for (const auto &q : pts) {
+                    if (fabs(q.first - qx) + fabs(q.second - qy) < 1e-6 * R) return;
+                }
+                pushBounded(qx, qy);
+            };
+            const int NS = 1024;
+            double px0 = 0, py0 = 0, px1 = 0, py1 = 0;
+            bool have0 = PathPointAt(ka, p0, px0, py0);
+            double f0 = have0 ? resid(kb, px0, py0) : 0.0;
+            for (int i = 1; i <= NS; ++i) {
+                const double tv = p0 + (p1 - p0) * i / NS;
+                double pxv = 0, pyv = 0;
+                if (!PathPointAt(ka, tv, pxv, pyv)) { have0 = false; continue; }
+                const double fv = resid(kb, pxv, pyv);
+                if (have0 && std::isfinite(f0) && std::isfinite(fv)
+                    && (f0 <= 0.0) != (fv <= 0.0)) {
+                    double lo = p0 + (p1 - p0) * (i - 1) / NS;
+                    double hi = tv;
+                    double flo = f0;
+                    for (int it = 0; it < 60; ++it) {
+                        const double mid = 0.5 * (lo + hi);
+                        double qx = 0, qy = 0;
+                        if (!PathPointAt(ka, mid, qx, qy)) break;
+                        const double fm = resid(kb, qx, qy);
+                        if ((fm <= 0.0) != (flo <= 0.0)) hi = mid;
+                        else { lo = mid; flo = fm; }
+                    }
+                    double zx = 0, zy = 0;
+                    if (PathPointAt(ka, 0.5 * (lo + hi), zx, zy)) {
+                        const double rb = resid(kb, zx, zy);
+                        if (std::isfinite(rb) && fabs(rb) < 1e-6) dedup(zx, zy);
+                    }
+                }
+                px0 = px1;
+                py0 = py1;
+                px1 = pxv;
+                py1 = pyv;
+                f0 = fv;
+                have0 = true;
+            }
             return !pts.empty();
         }
     }
@@ -15774,7 +15962,7 @@ std::string Kernel::toolTapImpl(double wx, double wy, double px, double py)
                 return "need|" + hit->label + " 在 " + hit->path->label
                     + " 上：点画布任意处脱离";
             }
-            return "need|附着：再点选路径（线段/直线/射线/向量/圆/多边形/函数）";
+            return "need|附着：再点选路径（线段/直线/射线/向量/圆/锥曲线/多边形/函数）";
         }
         GeoPoint *pt = static_cast<GeoPoint *>(toolObj_);
         if (pt->path) {
@@ -15787,7 +15975,7 @@ std::string Kernel::toolTapImpl(double wx, double wy, double px, double py)
                     return "need|" + hit->label + " 在 " + hit->path->label
                         + " 上：点画布任意处脱离";
                 }
-                return "need|附着：再点选路径（线段/直线/射线/向量/圆/多边形/函数）";
+                return "need|附着：再点选路径（线段/直线/射线/向量/圆/锥曲线/多边形/函数）";
             }
             const std::string pre = getXml();
             toolObj_ = nullptr;
@@ -15806,11 +15994,11 @@ std::string Kernel::toolTapImpl(double wx, double wy, double px, double py)
                 return "need|" + hit->label + " 在 " + hit->path->label
                     + " 上：点画布任意处脱离";
             }
-            return "need|附着：再点选路径（线段/直线/射线/向量/圆/多边形/函数）";
+            return "need|附着：再点选路径（线段/直线/射线/向量/圆/锥曲线/多边形/函数）";
         }
         GeoElement *o = pickObject(px, py);
         if (!o) {
-            return "need|附着：再点选路径（线段/直线/射线/向量/圆/多边形/函数）";
+            return "need|附着：再点选路径（线段/直线/射线/向量/圆/锥曲线/多边形/函数）";
         }
         const std::string pre = getXml();
         toolObj_ = nullptr;
