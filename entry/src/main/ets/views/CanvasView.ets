@@ -3352,6 +3352,48 @@ export struct CanvasView {
   // 点代数区整行 ⇄ 画布选中特效（再点一次取消）；行高亮由内核 sel 列回传。
   // 三十二包③：点其他行 = 点别处，滑动条行内编辑区一并收起（ArkUI 点击
   // 子组件优先消费，行根 onClick 吃掉事件、列表层点按收不到，此处兜底）
+  // 151包 构造步骤逐步隐藏：进入步进时快照全对象可见性；步进/行点选
+  // 只显 ≤当前步 的对象（GGB 导航口径），「全部」/✕ 按快照恢复
+  private stepsActive: boolean = false;
+  private stepsSnap: Map<string, string> = new Map();
+
+  private stepsSelect(label: string, idx: number): void {
+    this.commitPending();
+    if (this.slideEditLabel.length > 0) {
+      this.closeSlideEdit(false);
+    }
+    if (!this.stepsActive) {
+      this.stepsActive = true;
+      this.stepsSnap = new Map();
+      for (const e of this.algebra) {
+        this.stepsSnap.set(e.label, e.vis);
+      }
+    }
+    for (let i = 0; i < this.algebra.length; ++i) {
+      const e = this.algebra[i];
+      const target = i <= idx ? (this.stepsSnap.has(e.label)
+        ? this.stepsSnap.get(e.label) : '1') : '0';
+      dreamemberKernel.kernelSetProp(e.label, 'vis', target);
+    }
+    this.canvasSelect(label);
+    this.syncAlgebra(dreamemberKernel.kernelAlgebra());
+    this.refresh();
+  }
+
+  private stepsShowAll(): void {
+    if (!this.stepsActive) {
+      return;
+    }
+    for (const e of this.algebra) {
+      const v = this.stepsSnap.has(e.label) ? this.stepsSnap.get(e.label) : '1';
+      dreamemberKernel.kernelSetProp(e.label, 'vis', v);
+    }
+    this.stepsActive = false;
+    this.stepsSnap = new Map();
+    this.syncAlgebra(dreamemberKernel.kernelAlgebra());
+    this.refresh();
+  }
+
   private toggleRowSelect(label: string): void {
     this.commitPending();
     if (this.slideEditLabel.length > 0) {
@@ -3990,11 +4032,16 @@ export struct CanvasView {
       })
     } else if (this.panelTab === 'steps') {
       // 144包：构造步骤视图（☰ 菜单打开；行点选=画布选中，同代数区口径）
+      // 151包 逐步隐藏：步进/行点选按构造序裁剪可见性，「全部」/✕ 恢复
       StepsPanel({
         algebra: this.algebra,
         dark: this.dark,
-        onSelect: (l: string): void => this.toggleRowSelect(l),
-        onClose: (): void => this.setPanelVisible(false)
+        onSelect: (l: string, idx: number): void => this.stepsSelect(l, idx),
+        onShowAll: (): void => this.stepsShowAll(),
+        onClose: (): void => {
+          this.stepsShowAll();
+          this.setPanelVisible(false);
+        }
       })
     } else if (this.panelTab === 'analysis') {
       // 第二十三包②：数据分析虚拟 Tab（不在底栏 TABS 内，数据区 📊 打开；

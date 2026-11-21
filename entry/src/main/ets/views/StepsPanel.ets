@@ -11,7 +11,9 @@ export struct StepsPanel {
   @Prop algebra: AlgebraEntry[] = [];
   @Prop dark: boolean = false;
   @State private cur: number = -1;   // 当前步下标（-1 = 未步进）
-  onSelect: (label: string) => void = (_l: string) => {};
+  // 151包 逐步隐藏：idx 供宿主按构造序裁剪画布可见性（GGB 导航口径）
+  onSelect: (label: string, idx: number) => void = (_l: string, _i: number) => {};
+  onShowAll: () => void = () => {};   // 「全部」退出逐步模式恢复全显
   onClose: () => void = () => {};
 
   // ◀ ▶ 步进：夹在 [0, n-1]，选中当前步对象（GGB 步进导航同语义；
@@ -28,7 +30,12 @@ export struct StepsPanel {
       next = 0;
     }
     this.cur = next;
-    this.onSelect(this.algebra[next].label);
+    this.onSelect(this.algebra[next].label, next);
+  }
+
+  private showAll(): void {
+    this.cur = -1;
+    this.onShowAll();
   }
 
   build() {
@@ -57,6 +64,13 @@ export struct StepsPanel {
           .height(30)
           .textAlign(TextAlign.Center)
           .onClick(() => this.step(1))
+        Text('全部')
+          .fontSize(12)
+          .fontColor(Theme.accent(this.dark))
+          .height(30)
+          .padding({ left: 6, right: 6 })
+          .textAlign(TextAlign.Center)
+          .onClick(() => this.showAll())
         Text('✕')
           .fontSize(14)
           .fontColor(Theme.sub(this.dark))
@@ -100,7 +114,7 @@ export struct StepsPanel {
             : Color.Transparent, radius: 6 })
           .onClick(() => {
             this.cur = idx;
-            this.onSelect(e.label);
+            this.onSelect(e.label, idx);
           })
           }
         }, (e: AlgebraEntry): string => e.label)
