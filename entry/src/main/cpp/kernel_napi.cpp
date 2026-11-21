@@ -927,6 +927,14 @@ napi_value KernelGetGgb(napi_env env, napi_callback_info)
     return ab;
 }
 
+// kernelGetXmlText(): string — 当前构造序列化 XML 纯文本（1.2.0.12 复制
+// 构图剪贴板链路用；kernelGetGgb 是 zip 容器 ArrayBuffer，pasteboard 文本
+// MIME 收 string——首次实现传 ArrayBuffer 即 jscrash 401 的根因）
+napi_value KernelGetXmlText(napi_env env, napi_callback_info)
+{
+    return ToNapi(env, g_kernel.getXml());
+}
+
 // kernelLoadGgb(data: ArrayBuffer): string — 打开 .ggb（zip+XML 重建构造列表）。
 // 成功返回对象列表（warn: 前缀行携带跳过提示），失败返回 "error: ..."
 napi_value KernelLoadGgb(napi_env env, napi_callback_info info)
@@ -992,6 +1000,7 @@ void DreamemberRegisterKernelApis(napi_env env, napi_value exports)
         { "kernelResetView", nullptr, KernelResetView, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelClearAll", nullptr, KernelClearAll, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelGetGgb", nullptr, KernelGetGgb, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelGetXmlText", nullptr, KernelGetXmlText, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelLoadGgb", nullptr, KernelLoadGgb, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelTool", nullptr, KernelTool, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelToolTap", nullptr, KernelToolTap, nullptr, nullptr, nullptr, napi_default, nullptr },

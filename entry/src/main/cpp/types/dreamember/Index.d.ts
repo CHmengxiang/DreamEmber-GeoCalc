@@ -38,6 +38,7 @@ export const kernelClearAll: () => string;
 
 // N4 .ggb 文件读写（zip 容器 + GeoGebra 兼容 XML）
 export const kernelGetGgb: () => ArrayBuffer;
+export const kernelGetXmlText: () => string;
 export const kernelLoadGgb: (data: ArrayBuffer) => string;
 
 // N5 点选式工具栏 / 对象拾取 / 滑动条与动画

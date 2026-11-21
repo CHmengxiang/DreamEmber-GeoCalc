@@ -1837,7 +1837,7 @@ export struct CanvasView {
   // 接收端经「打开」选择器粘贴/文件管理可回灌
   private onCopyGgbEvt(): void {
     const data = pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN,
-      dreamemberKernel.kernelGetGgb());
+      dreamemberKernel.kernelGetXmlText());
     pasteboard.getSystemPasteboard().setData(data).then(() => {
       this.alertBox('已复制', '当前构图 .ggb 文本已进剪贴板');
     }).catch(() => {
