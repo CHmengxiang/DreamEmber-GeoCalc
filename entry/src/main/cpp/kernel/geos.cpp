@@ -122,6 +122,8 @@ std::string GeoPoint::definitionText() const
 {
     std::string d = cmdDefText();
     if (!d.empty()) return d;
+    if (!src.empty()) return src;   // 148包 表达式复数点定义列
+
     if (inputs.size() == 2) {
         return "Midpoint(" + inputs[0]->label + ", " + inputs[1]->label + ")";
     }

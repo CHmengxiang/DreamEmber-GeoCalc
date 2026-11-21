@@ -1285,6 +1285,108 @@ bool Expr::evalVal(const ValResolve &resolve, ExprVal &out) const
     return true;
 }
 
+// 148包 复数通道走树：镜像 EvalNodeVal。仅 Num/Ref/Bin(+ − * / ^) 放行；
+// 函数调用/比较逻辑/If/含 x/y/Param/后缀算符一律 false（调用方给专用
+// 文案）。一元负沿用解析器 0−X 树形自然命中。^ 整数指数（|k|≤32）走
+// 复乘平方快速幂（精确），其余极坐标主值；除零口径与 DivC 一致 (0,0)
+static bool EvalNodeCx(const Expr::Node *n, const CxResolve *resolve, CxVal &out)
+{
+    switch (n->kind) {
+    case Expr::Node::Kind::Num:
+        out.re = n->num;
+        out.im = 0.0;
+        return true;
+    case Expr::Node::Kind::Var:
+    case Expr::Node::Kind::YVar:
+    case Expr::Node::Kind::Param:
+        return false;
+    case Expr::Node::Kind::Ref:
+        return resolve != nullptr && (*resolve)(n->name, out);
+    case Expr::Node::Kind::Call:
+    case Expr::Node::Kind::If:
+        return false;
+    case Expr::Node::Kind::Bin: {
+        if (n->op == '!' || n->op == '%' || n->op == (char)0xB0 || !n->r) {
+            return false;
+        }
+        CxVal a;
+        if (!EvalNodeCx(n->l.get(), resolve, a)) return false;
+        CxVal b;
+        if (!EvalNodeCx(n->r.get(), resolve, b)) return false;
+        switch (n->op) {
+        case '+':
+            out.re = a.re + b.re;
+            out.im = a.im + b.im;
+            return true;
+        case '-':
+            out.re = a.re - b.re;
+            out.im = a.im - b.im;
+            return true;
+        case '*':
+            out.re = a.re * b.re - a.im * b.im;
+            out.im = a.re * b.im + a.im * b.re;
+            return true;
+        case '/': {
+            const double dd = b.re * b.re + b.im * b.im;
+            if (dd < 1e-15) { out.re = 0; out.im = 0; return true; }
+            out.re = (a.re * b.re + a.im * b.im) / dd;
+            out.im = (a.im * b.re - a.re * b.im) / dd;
+            return true;
+        }
+        case '^': {
+            const bool intExp = std::fabs(b.im) < 1e-12
+                && std::fabs(b.re - llround(b.re)) < 1e-12
+                && std::fabs(b.re) <= 32;
+            if (intExp) {
+                long long k = llround(b.re);
+                CxVal base = a;
+                if (k < 0) {
+                    const double dd = a.re * a.re + a.im * a.im;
+                    if (dd < 1e-15) { out.re = 0; out.im = 0; return true; }
+                    base = CxVal{a.re / dd, -a.im / dd};
+                    k = -k;
+                }
+                CxVal r2{1.0, 0.0};
+                while (k > 0) {
+                    if (k & 1) {
+                        r2 = CxVal{r2.re * base.re - r2.im * base.im,
+                                   r2.re * base.im + r2.im * base.re};
+                    }
+                    k >>= 1;
+                    if (k > 0) {
+                        base = CxVal{base.re * base.re - base.im * base.im,
+                                     2 * base.re * base.im};
+                    }
+                }
+                out = r2;
+                return true;
+            }
+            const double r = std::hypot(a.re, a.im);
+            if (r < 1e-300) { out.re = 0; out.im = 0; return true; }
+            const double th = std::atan2(a.im, a.re);
+            const double m = std::pow(r, b.re) * std::exp(-b.im * th);
+            const double ang = b.re * th + b.im * std::log(r);
+            out.re = m * std::cos(ang);
+            out.im = m * std::sin(ang);
+            return true;
+        }
+        default:
+            return false;
+        }
+    }
+    }
+    return false;
+}
+
+bool Expr::evalCx(const CxResolve &resolve, CxVal &out) const
+{
+    if (!root_) return false;
+    CxVal v;
+    if (!EvalNodeCx(root_.get(), &resolve, v)) return false;
+    out = v;
+    return true;
+}
+
 // 递归判定子树是否为一次式 k*x+m；常数式 k=0 也算。
 // 仅放行 Num / Var / 加减 / 数乘 / 除常数——含任何函数调用、x^2、x*x 等直接判否。
 static bool LinearCoefNode(const Expr::Node *n, double &k, double &m)

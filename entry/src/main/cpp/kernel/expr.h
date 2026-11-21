@@ -21,6 +21,13 @@ struct ExprVal {
 };
 using ValResolve = std::function<bool(const std::string &, ExprVal &)>;
 
+// 148包 复数通道（复数二期上）：复求值结果 {re,im}。resolve 按名回填
+//（复数点/数值引用、i 虚数单位；查不到返回 false）
+struct CxVal {
+    double re = 0, im = 0;
+};
+using CxResolve = std::function<bool(const std::string &, CxVal &)>;
+
 // 支持 + - * / ^、一元正负、隐式乘法（2x、2sin(x)、(1+x)(2-x)）、
 // 常用一元函数与常量 pi/π/e。NaN/Inf 由 double 运算自然产生，
 // 供绘图断点（渐近线/间断）检测使用。
@@ -53,6 +60,10 @@ public:
     // 一元负、方阵非负整数次幂；函数实参遇矩阵或其余组合返回 false
     //（调用方给文案）。表达式须不含 x/y（调用侧 containsX/Y 把关）
     bool evalVal(const ValResolve &resolve, ExprVal &out) const;
+    // 148包 复数通道求值：镜像 evalVal 走树，复域 + − × ÷ ^；函数调用/
+    // 比较/If/含 x/y/Param 一律 false（调用方给专用文案）。^ 整数指数走
+    // 复乘平方快速幂（精确），其余极坐标主值；除零口径与 DivC 一致 (0,0)
+    bool evalCx(const CxResolve &resolve, CxVal &out) const;
     bool containsX() const { return hasX_; }
     bool containsY() const { return hasY_; }
     bool empty() const { return !root_; }

@@ -1718,6 +1718,8 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                 // 轮 D：依随表达式数值（B1=A1+1）无依赖者时允许输入行重建
                 //（上游 单元格重输语义；重定义入口本就放行）
                 || (on && on->calc && on->cmdName.empty())
+                // 148包 表达式复数点（w=z1*z2）同口径放行重建
+                || (op && op->calc && op->cmdName.empty() && !op->src.empty())
                 // 1.0.6.1：矩阵依随产物（Transpose/Invert 等）同理放行——
                 // 上游 M={{…}} 重输即重建，Transpose(M) 的依赖者一并级联
                 || (ol != nullptr && ol->calc);
@@ -2380,6 +2382,16 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                 Expr t;
                 if (t.parse(norm, err, std::string(), true) && !t.containsX()
                     && !t.containsY() && !surfaceForm && name != "z") {
+                    // 148包 复数通道触发判定：rhs 含 i 字面量或复数点引用
+                    // → 走复域建 isComplex 点（下方分支）。标签优先于单位：
+                    // 名为 i 的对象按标签解析
+                    bool cxTrigger = false;
+                    for (const std::string &rn : t.refs()) {
+                        if (rn == "i") { cxTrigger = true; break; }
+                        GeoPoint *gp = dynamic_cast<GeoPoint *>(lookup(rn));
+                        if (gp != nullptr && gp->isComplex) { cxTrigger = true; break; }
+                    }
+                    std::vector<std::pair<std::string, GeoElement *>> cdeps;
                     const std::vector<std::string> &refs = t.refs();
                     std::vector<std::pair<std::string, GeoNumeric *>> deps;
                     std::vector<std::pair<std::string, GeoList *>> matDeps;
@@ -2387,6 +2399,17 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                     for (const std::string &rn : refs) {
                         GeoElement *ge = lookup(rn);
                         GeoNumeric *dn = dynamic_cast<GeoNumeric *>(ge);
+                        if (cxTrigger) {
+                            // 148包：i 虚数单位非对象跳过；复数点引用进复
+                            // 通道依赖（数值引用已在 deps）；非复数点照旧
+                            // 走不可解回落
+                            if (rn == "i") continue;
+                            GeoPoint *gp = dynamic_cast<GeoPoint *>(ge);
+                            if (gp != nullptr && gp->isComplex) {
+                                cdeps.emplace_back(rn, ge);
+                                continue;
+                            }
+                        }
                         if (dn == nullptr) {
                             // 1.0.6.2：矩阵引用参与表达式算术（A+B、2A、AB、
                             // A/2、-A、A^k）——收为矩阵依赖，定型走 evalVal
@@ -2420,7 +2443,67 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                             --autoCells_;
                         }
                     }
-                    if (!unresolvable && !matDeps.empty()) {
+                    if (cxTrigger && !unresolvable) {
+                        // 148包 复数点：解析期求值定型；有依赖时 calc 复算
+                        //（AST 共享捕获，update 随动）。evalCx 拒写法给专用
+                        // 文案（一期仅 + − × ÷ ^ 与括号）
+                        auto cxRes = [&deps, &cdeps](const std::string &nm,
+                                                     CxVal &o) -> bool {
+                            if (nm == "i") { o = CxVal{0.0, 1.0}; return true; }
+                            for (const auto &d : cdeps) {
+                                if (d.first == nm) {
+                                    GeoPoint *gp = dynamic_cast<GeoPoint *>(d.second);
+                                    if (gp != nullptr) { o = CxVal{gp->x, gp->y}; return true; }
+                                }
+                            }
+                            for (const auto &d : deps) {
+                                if (d.first == nm) { o = CxVal{d.second->value, 0.0}; return true; }
+                            }
+                            return false;
+                        };
+                        CxVal cv;
+                        if (!t.evalCx(cxRes, cv) || !std::isfinite(cv.re)
+                            || !std::isfinite(cv.im)) {
+                            lastError = "复数表达式暂不支持该写法（一期仅 + − × ÷ ^ 与括号）";
+                            return false;
+                        }
+                        auto pp = std::make_unique<GeoPoint>();
+                        pp->isComplex = true;
+                        pp->pointSize = 4;
+                        pp->x = cv.re;
+                        pp->y = cv.im;
+                        pp->src = name.empty() ? norm : name + "=" + norm;
+                        if (!cdeps.empty() || !deps.empty()) {
+                            pp->isFree = false;
+                            Expr astC = t;   // shared_ptr 共享 AST
+                            auto depsC = deps;
+                            auto cdepsC = cdeps;
+                            pp->calc = [astC, depsC, cdepsC](GeoPoint *q) {
+                                auto res = [&depsC, &cdepsC](const std::string &nm,
+                                                             CxVal &o) -> bool {
+                                    if (nm == "i") { o = CxVal{0.0, 1.0}; return true; }
+                                    for (const auto &d : cdepsC) {
+                                        if (d.first == nm) {
+                                            GeoPoint *gp = dynamic_cast<GeoPoint *>(d.second);
+                                            if (gp != nullptr) { o = CxVal{gp->x, gp->y}; return true; }
+                                        }
+                                    }
+                                    for (const auto &d : depsC) {
+                                        if (d.first == nm) { o = CxVal{d.second->value, 0.0}; return true; }
+                                    }
+                                    return false;
+                                };
+                                CxVal v;
+                                if (!astC.evalCx(res, v) || !std::isfinite(v.re)
+                                    || !std::isfinite(v.im)) return;
+                                q->x = v.re;
+                                q->y = v.im;
+                            };
+                            for (const auto &d : cdeps) pp->inputs.push_back(d.second);
+                            for (const auto &d : deps) pp->inputs.push_back(d.second);
+                        }
+                        made = std::move(pp);
+                    } else if (!unresolvable && !matDeps.empty()) {
                         // 矩阵算术（1.0.6.2）：一次性求值定型（结果须为矩阵；
                         // 不成立给运算规则文案）。src 记原式，getXml 按
                         // exp="C=A+B" 表达式重放往返；calc 闭包重走 evalVal
@@ -15526,6 +15609,7 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->calc = s->calc;
             d->pointSize = s->pointSize;
             d->isComplex = s->isComplex;   // 143包 复数标记随重定义迁移
+            d->src = s->src;               // 148包 表达式复数点原文迁移
             // 四十五包：路径依附状态随重定义迁移（重定义为坐标=脱离，
             // 重定义为 Point(path)=换路径/附着）
             d->path = s->path;
@@ -21992,6 +22076,12 @@ std::string Kernel::getXml() const
         case GeoType::Point: {
             GeoPoint *p = static_cast<GeoPoint *>(g);
             AppendCommandXml(o, *p);   // Midpoint/Intersect/变换像等依随点
+            if (p->cmdName.empty() && !p->src.empty()) {
+                // 148包 表达式复数点：exp 原文重放（复通道自动重建），
+                // element 仅样式（xmlElement 已存在标签只刷样式）
+                o += "<expression label=\"" + XmlEsc(p->label) + "\" exp=\""
+                   + XmlEsc(p->src) + "\"/>\n";
+            }
             AppendElementHead(o, *p, "point");
             // 1.0.8.1 三维点 z 实存（官方 GGB 同位：2D 点 z=1 齐次权，z≠1 即
             // 三维）。1.0.8.2 z 恰为 1 的三维点补 is3D 标记（官方文件无此

@@ -107,6 +107,9 @@ public:
     // 143包 复数标记：true 时值列 a+bi 显示（几何仍为 2D 点；拖动/附着
     // 不变）。Complex 命令建自由复数点，复运算命令产物 calc 依赖置位
     bool isComplex = false;
+    // 148包 表达式复数点定义原文（w=z1*z2 全式；exp="…" 重放复通道重建，
+    // 自由复数点为空走 coords+complex attr 往返）
+    std::string src;
 
     void update() override;
     std::string valueText() const override;
