@@ -8013,12 +8013,13 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                 else if (order == 3) { co = c3; m = 2; }
                 else if (order == 4) { co = c4; m = 2; }
                 else { co = c5; m = 3; }
-                double fact = 1;
-                for (int i = 2; i <= order; ++i) fact *= i;
                 for (int i = -m; i <= m; ++i) {
                     sum += co[i + m] * src->evalAt(x + i * eps);
                 }
-                return sum / (fact * pow(eps, order));
+                // 1.2.0.9 修正：系数表为裸 n 阶中心差分（和 = f⁽ⁿ⁾·epsⁿ），
+                // 除 epsⁿ 即得 f⁽ⁿ⁾——旧码多除 n!（x³ 二阶导报 3 应 6，
+                // probe_12009 AA6 实证）
+                return sum / pow(eps, order);
             };
         }
         d->src = "Derivative(" + a[0] + (a.size() == 2 ? ", " + a[1] : "") + ")";
@@ -8028,6 +8029,99 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         d->inputs = { f };
         d->update();
         made = std::move(d);
+        return true;
+    }
+    // 1.2.0.9 Taylor(f, a[, n])：泰勒多项式 T(x)=Σ f⁽ᵏ⁾(a)/k!·(x−a)^k
+    //（GGB TaylorPolynomial 口径）。内核导数积木是数值中心差分（无符号
+    // 导数链），故系数走差分：每阶独立步长 eps_k=(1e-13)^(1/(k+2))·scale
+    //（高阶噪声最优，k=5 时 0.037——固定 1e-4 会爆 1e5 放大）。展开点 a
+    // 收数值对象引用（滑条随动）或字面量；系数缓存按 a 现值指纹，拖滑条
+    // 只在变化后首算重算。产物 alt 闭包函数（Derivative 同款），n 阶 0..5
+    if (cmdLower == "taylor" && (a.size() == 2 || a.size() == 3)) {
+        GeoFunction *f = resolveFunctionArg(a[0]);
+        if (!f) { lastError = "Taylor 需要（函数, 展开点[, 阶数]）"; made = nullptr; return true; }
+        GeoNumeric *aNum = dynamic_cast<GeoNumeric *>(lookup(a[1]));
+        double aLit = 0;
+        if (!aNum && !numArg(a[1], aLit)) {
+            lastError = "展开点须为数值或数值对象: " + a[1];
+            made = nullptr;
+            return true;
+        }
+        int n = 4;
+        if (a.size() == 3) {
+            double nv = 0;
+            if (!numArg(a[2], nv) || nv < 0 || nv > 5) {
+                lastError = "泰勒阶数须为 0..5 的数: " + a[2];
+                made = nullptr;
+                return true;
+            }
+            n = (int)nv;
+        }
+        auto t = std::make_unique<GeoFunction>();
+        t->color = {0x8B, 0x45, 0x13};
+        GeoFunction *SRC = f;
+        GeoNumeric *AN = aNum;
+        const double ALIT = aLit;
+        const int ORD = n;
+        // 系数缓存（shared_ptr 进闭包；a 现值指纹不变不重算）
+        struct TaylorCoef {
+            double aUsed = NAN;
+            double c[6] = { 0, 0, 0, 0, 0, 0 };
+        };
+        auto tc = std::make_shared<TaylorCoef>();
+        t->alt = [SRC, AN, ALIT, ORD, tc](double x) {
+            const double av = AN ? AN->value : ALIT;
+            if (!(tc->aUsed == av) || !std::isfinite(tc->c[0])) {
+                tc->aUsed = av;
+                double fact = 1.0;
+                for (int k = 0; k <= ORD; ++k) {
+                    if (k == 0) {
+                        tc->c[0] = SRC->evalAt(av);
+                        continue;
+                    }
+                    fact *= k;
+                    const double eps = std::max(1e-6,
+                        std::pow(1e-13, 1.0 / (k + 2)))
+                        * std::max(1.0, fabs(av));
+                    static const double c2[3] = { 1, -2, 1 };
+                    static const double c3[5] = { -0.5, 1, 0, -1, 0.5 };
+                    static const double c4[5] = { 1, -4, 6, -4, 1 };
+                    static const double c5[7] = { -0.5, 2, -2.5, 0, 2.5, -2, 0.5 };
+                    const double *co = nullptr;
+                    int m = 0;
+                    if (k == 2) { co = c2; m = 1; }
+                    else if (k == 3) { co = c3; m = 2; }
+                    else if (k == 4) { co = c4; m = 2; }
+                    else if (k == 5) { co = c5; m = 3; }
+                    else { co = c3; m = 2; }   // k==1 两点差分单独处理，不达
+                    if (k == 1) {
+                        tc->c[1] = (SRC->evalAt(av + eps)
+                            - SRC->evalAt(av - eps)) / (2.0 * eps);
+                        continue;
+                    }
+                    double sum = 0;
+                    for (int i = -m; i <= m; ++i) {
+                        sum += co[i + m] * SRC->evalAt(av + i * eps);
+                    }
+                    tc->c[k] = sum / (fact * std::pow(eps, k));
+                }
+            }
+            const double d = x - av;
+            double r = 0;
+            for (int k = ORD; k >= 0; --k) {
+                r = r * d + tc->c[k];
+            }
+            return r;
+        };
+        t->src = "Taylor(" + a[0] + ", " + a[1]
+            + (a.size() == 3 ? ", " + a[2] : "") + ")";
+        t->cmdName = "Taylor";
+        t->cmdArgs = { a[0], a[1] };
+        if (a.size() == 3) t->cmdArgs.push_back(a[2]);
+        t->inputs = { f };
+        if (aNum) t->inputs.push_back(aNum);
+        t->update();
+        made = std::move(t);
         return true;
     }
     // NthRoot(x, n)：n 次方根（上游 f(x) 页 ⁿ√□ 模板键）。负底奇数次取实根
