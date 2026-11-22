@@ -130,6 +130,7 @@
 // 内修）。
 import dreamemberKernel from 'libdreamember.so';
 import { inputMethod } from '@kit.IMEKit';
+import { ratexLayoutLatex, ratexDrawItem, RATEX_FONT_SCALE } from './RatexView';
 import { fileIo as fs, fileUri, picker } from '@kit.CoreFileKit';
 import { common } from '@kit.AbilityKit';
 import { image } from '@kit.ImageKit';
@@ -576,9 +577,7 @@ export struct CanvasView {
           break;
         case 't':
           if (text.length > 0 && nums.length >= 2) {
-            this.ctx.fillStyle = color;
-            this.ctx.font = `${Math.round(14 * this.uiScale)}px sans-serif`;
-            this.ctx.fillText(text, nums[0], nums[1]);
+            this.drawTextMixed(text, nums[0], nums[1], color);
           }
           break;
         case 'w':
@@ -635,6 +634,47 @@ export struct CanvasView {
   private refresh(): void {
     if (this.canvasW <= 1 || this.canvasH <= 1) return;
     this.execFrame(dreamemberKernel.kernelRender(this.canvasW, this.canvasH, this.uiScale, this.dark));
+  }
+
+  // 159包 混排文本绘制：$…$ 片段走 RaTeX 排版（KaTeX 字形轮廓，MathField
+  // 同链路），其余字面量 fillText；基线对齐——公式盒顶 = 基线 − ascent。
+  // $ 不配对（段数偶数）整串按原文回退；单段排版失败也按原文回退，不报错
+  private drawTextMixed(text: string, x: number, y: number, color: string): void {
+    const fs = Math.round(14 * this.uiScale);
+    const parts = text.split('$');
+    if (parts.length === 1 || parts.length % 2 === 0) {
+      this.ctx.fillStyle = color;
+      this.ctx.font = `${fs}px sans-serif`;
+      this.ctx.fillText(text, x, y);
+      return;
+    }
+    this.ctx.font = `${fs}px sans-serif`;
+    let pen = x;
+    for (let i = 0; i < parts.length; ++i) {
+      const seg = parts[i];
+      if (i % 2 === 0) {
+        if (seg.length > 0) {
+          this.ctx.fillStyle = color;
+          this.ctx.fillText(seg, pen, y);
+          pen += this.ctx.measureText(seg).width;
+        }
+        continue;
+      }
+      const lay = ratexLayoutLatex(seg, color);
+      if (lay === null || lay.items.length === 0) {
+        this.ctx.fillStyle = color;
+        const raw = '$' + seg + '$';
+        this.ctx.fillText(raw, pen, y);
+        pen += this.ctx.measureText(raw).width;
+        continue;
+      }
+      const scalePx = fs * RATEX_FONT_SCALE;
+      const top = y - lay.heightEm * scalePx;
+      for (const it of lay.items) {
+        ratexDrawItem(this.ctx, it, scalePx, top, color, pen);
+      }
+      pen += lay.widthEm * scalePx;
+    }
   }
 
   private syncAlgebra(raw: string): void {
