@@ -23428,10 +23428,13 @@ std::string Kernel::getXml() const
             break;
         }
         case GeoType::Image: {
-            // 158包 图片：命令重放重建（字节走 media 条目），element 仅样式
+            // 158包 图片：命令重放重建（字节走 media 条目），element 仅样式。
+            // AppendElementHead 不自闭合——漏 </element> 会把 XML 中后续
+            // 对象吞进本元素（冒烟实锤：多图片 .ggb 往返丢 p2/p3）
             GeoImage *im = static_cast<GeoImage *>(g);
             AppendCommandXml(o, *im);
             AppendElementHead(o, *im, "image");
+            o += "</element>\n";
             break;
         }
         case GeoType::Numeric: {
