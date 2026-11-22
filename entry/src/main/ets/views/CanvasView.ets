@@ -188,6 +188,36 @@ function cmdNameStartBefore(s: string, a: number): number {
   return commandCallNameAt(s, j) === a - j ? j : -1;
 }
 
+// 1.5.1.1 GIF 导出进度弹窗：逐帧进度 + 取消钮。进度打点走 AppStorage
+// gifProgFrame/gifProgTotal（捕获循环逐帧 setOrCreate），取消走
+// gifProgCancel（按钮置位后自关，捕获循环每帧检测中止）
+@CustomDialog
+struct GifProgressDialog {
+  controller?: CustomDialogController
+  @StorageLink('gifProgFrame') frame: number = 0;
+  @StorageLink('gifProgTotal') total: number = 36;
+  @StorageLink('gifProgCancel') cancel: boolean = false;
+  build() {
+    Column({ space: 16 }) {
+      Text('导出动画 GIF')
+        .fontSize(18)
+        .fontWeight(FontWeight.Medium)
+      Text('正在逐帧捕获 ' + this.frame + ' / ' + this.total + '……')
+        .fontSize(14)
+      Progress({ value: this.frame, total: this.total,
+        type: ProgressType.Linear }).width('100%')
+      Button('取消导出')
+        .width('100%')
+        .onClick(() => {
+          this.cancel = true;
+          this.controller?.close();
+        })
+    }
+    .padding(24)
+    .width(300)
+  }
+}
+
 @Component
 export struct CanvasView {
   @State private inputError: string = '';
@@ -249,6 +279,13 @@ export struct CanvasView {
   @StorageProp('evt.exportGif') @Watch('onExportGifEvt') private exportGifTick: number = 0;
   // 1.5.1 导出合并：弹三选弹窗分派 .ggb / 图片 / 动画 GIF
   @StorageProp('evt.exportMenu') @Watch('onExportMenuEvt') private exportMenuTick: number = 0;
+  // 1.5.1.1 GIF 导出进度弹窗控制器（进度/取消状态经 AppStorage gifProg*
+  // 桥接，弹窗内 @StorageLink 直读）
+  private gifDialog: CustomDialogController = new CustomDialogController({
+    builder: GifProgressDialog(),
+    autoCancel: false,
+    alignment: DialogAlignment.Center
+  });
   @StorageProp('evt.copyGgb') @Watch('onCopyGgbEvt') private copyGgbTick: number = 0;
   // 第五包：CAS 视图（☰ 菜单"视图"分组发起，上游经典版 同位）
   @StorageProp('evt.openCas') @Watch('onOpenCasEvt') private openCasTick: number = 0;
@@ -1908,7 +1945,9 @@ export struct CanvasView {
   // 150包 导出动画 GIF：找动画中滑条（行协议 anim=1 + min/max）→
   // 等步采样 N 帧（setProp value → 等渲染 → componentSnapshot →
   // readPixelsToBuffer）→ napi GIF89a 编码 → 图库落盘（saveButton
-  // 口径同 PNG 导出，零权限）。完成回置滑条原值
+  // 口径同 PNG 导出，零权限）。完成回置滑条原值。
+  // 1.5.1.1：加进度弹窗（gifDialog，逐帧打点）+ 可取消（循环每帧检测
+  // gifProgCancel）+ 防重入（gifBusy）
   private sleepMs(ms: number): Promise<void> {
     return new Promise<void>((r) => {
       setTimeout(() => r(), ms);
@@ -1916,6 +1955,9 @@ export struct CanvasView {
   }
 
   private async onExportGifEvt(): Promise<void> {
+    if (AppStorage.get<boolean>('gifBusy') ?? false) {
+      return;
+    }
     let sl: AlgebraEntry | null = null;
     for (const e of this.algebra) {
       if (e.type === 'slider' && e.anim === '1') { sl = e; break; }
@@ -1928,12 +1970,22 @@ export struct CanvasView {
     const compId = is3d ? 'geo3dView' : 'geo2dStage';
     const N = 36;
     const delayMs = 60;
+    AppStorage.setOrCreate('gifBusy', true);
+    AppStorage.setOrCreate('gifProgFrame', 0);
+    AppStorage.setOrCreate('gifProgTotal', N);
+    AppStorage.setOrCreate('gifProgCancel', false);
+    this.gifDialog.open();
+    let cancelled = false;
     try {
       const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
       let w = 0;
       let h = 0;
       const bufs: ArrayBuffer[] = [];
       for (let k = 0; k < N; ++k) {
+        if (AppStorage.get<boolean>('gifProgCancel') ?? false) {
+          cancelled = true;
+          break;
+        }
         const v = sl.min + (sl.max - sl.min) * k / N;
         dreamemberKernel.kernelSetProp(sl.label, 'value', v.toFixed(6));
         await this.sleepMs(45);
@@ -1946,8 +1998,13 @@ export struct CanvasView {
         const ab = new ArrayBuffer(w * h * 4);
         await snap.readPixelsToBuffer(ab);
         bufs.push(ab);
+        AppStorage.setOrCreate('gifProgFrame', k + 1);
       }
       dreamemberKernel.kernelSetProp(sl.label, 'value', sl.value);
+      if (cancelled) {
+        this.alertBox('已取消', '动画导出已中止，未保存文件');
+        return;
+      }
       const all = new ArrayBuffer(w * h * 4 * N);
       const u8 = new Uint8Array(all);
       let off = 0;
@@ -1957,6 +2014,7 @@ export struct CanvasView {
       }
       const gif: ArrayBuffer = dreamemberKernel.kernelExportGif(all, w, h, N, delayMs);
       if (gif.byteLength <= 0) {
+        this.gifDialog.close();
         this.alertBox('导出失败', 'GIF 编码未成功，请重试');
         return;
       }
@@ -1968,6 +2026,7 @@ export struct CanvasView {
       } finally {
         fs.closeSync(file);
       }
+      this.gifDialog.close();
       const ph = photoAccessHelper.getPhotoAccessHelper(ctx);
       const now = new Date();
       const pad = (v: number): string =>
@@ -1984,7 +2043,10 @@ export struct CanvasView {
         this.alertBox('导出成功', title + '.gif 已存入图库（' + N + ' 帧）');
       }
     } catch (e) {
+      this.gifDialog.close();
       this.alertBox('导出失败', '动画帧捕获未成功，请重试');
+    } finally {
+      AppStorage.setOrCreate('gifBusy', false);
     }
   }
 
