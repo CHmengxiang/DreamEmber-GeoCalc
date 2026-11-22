@@ -67,6 +67,9 @@ public:
     // 156包 复函数求值：同 evalCx 但 Param 节点取 pv（f(z)=… 体内 z
     // 形参绑定实参值）
     bool evalCxP(const CxResolve &resolve, const CxVal &pv, CxVal &out) const;
+    // 157包 复域采样：同 evalCx 但 Var（x）节点取 xv（实变量表达式在
+    // 复样本点上求值，配合体内 i 引用固定 (0,1)）
+    bool evalCxX(const CxResolve &resolve, const CxVal &xv, CxVal &out) const;
     bool containsX() const { return hasX_; }
     bool containsY() const { return hasY_; }
     bool empty() const { return !root_; }

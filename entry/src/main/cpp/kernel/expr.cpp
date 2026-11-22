@@ -2,6 +2,7 @@
 #include "kernel/expr.h"
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -1291,7 +1292,8 @@ bool Expr::evalVal(const ValResolve &resolve, ExprVal &out) const
 // 文案）。一元负沿用解析器 0−X 树形自然命中。^ 整数指数（|k|≤32）走
 // 复乘平方快速幂（精确），其余极坐标主值；除零口径与 DivC 一致 (0,0)
 static bool EvalNodeCx(const Expr::Node *n, const CxResolve *resolve,
-                       CxVal &out, const CxVal *pv = nullptr)
+                       CxVal &out, const CxVal *pv = nullptr,
+                       const CxVal *xv = nullptr)
 {
     switch (n->kind) {
     case Expr::Node::Kind::Num:
@@ -1299,6 +1301,10 @@ static bool EvalNodeCx(const Expr::Node *n, const CxResolve *resolve,
         out.im = 0.0;
         return true;
     case Expr::Node::Kind::Var:
+        // 157包 复域采样：Var（x）绑定复样本点；无绑定时维持旧口径
+        if (xv == nullptr) return false;
+        out = *xv;
+        return true;
     case Expr::Node::Kind::YVar:
         return false;
     case Expr::Node::Kind::Param:
@@ -1308,7 +1314,36 @@ static bool EvalNodeCx(const Expr::Node *n, const CxResolve *resolve,
         return true;
     case Expr::Node::Kind::Ref:
         return resolve != nullptr && (*resolve)(n->name, out);
-    case Expr::Node::Kind::Call:
+    case Expr::Node::Kind::Call: {
+        // 157包 复域初等函数（std::complex 主值）：CSolve 超越方程牛顿
+        // 求值用。两参/离散函数（mod/min/floor/…）不支持维持 false
+        if (n->args.size() != 1) return false;
+        CxVal a;
+        if (!EvalNodeCx(n->args[0].get(), resolve, a, pv, xv)) return false;
+        const std::complex<double> z(a.re, a.im);
+        std::complex<double> r2;
+        const std::string &nm = n->name;
+        if (nm == "sin") r2 = std::sin(z);
+        else if (nm == "cos") r2 = std::cos(z);
+        else if (nm == "tan") r2 = std::tan(z);
+        else if (nm == "asin") r2 = std::asin(z);
+        else if (nm == "acos") r2 = std::acos(z);
+        else if (nm == "atan") r2 = std::atan(z);
+        else if (nm == "sinh") r2 = std::sinh(z);
+        else if (nm == "cosh") r2 = std::cosh(z);
+        else if (nm == "tanh") r2 = std::tanh(z);
+        else if (nm == "exp") r2 = std::exp(z);
+        else if (nm == "ln") r2 = std::log(z);
+        else if (nm == "log" || nm == "log10") r2 = std::log10(z);
+        else if (nm == "sqrt") r2 = std::sqrt(z);
+        else if (nm == "abs") r2 = std::complex<double>(std::abs(z), 0.0);
+        else return false;
+        if (!std::isfinite(r2.real()) || !std::isfinite(r2.imag())) {
+            return false;
+        }
+        out = CxVal{r2.real(), r2.imag()};
+        return true;
+    }
     case Expr::Node::Kind::If:
         return false;
     case Expr::Node::Kind::Bin: {
@@ -1316,9 +1351,9 @@ static bool EvalNodeCx(const Expr::Node *n, const CxResolve *resolve,
             return false;
         }
         CxVal a;
-        if (!EvalNodeCx(n->l.get(), resolve, a, pv)) return false;
+        if (!EvalNodeCx(n->l.get(), resolve, a, pv, xv)) return false;
         CxVal b;
-        if (!EvalNodeCx(n->r.get(), resolve, b, pv)) return false;
+        if (!EvalNodeCx(n->r.get(), resolve, b, pv, xv)) return false;
         switch (n->op) {
         case '+':
             out.re = a.re + b.re;
@@ -1398,6 +1433,15 @@ bool Expr::evalCxP(const CxResolve &resolve, const CxVal &pv, CxVal &out) const
     if (!root_) return false;
     CxVal v;
     if (!EvalNodeCx(root_.get(), &resolve, v, &pv)) return false;
+    out = v;
+    return true;
+}
+
+bool Expr::evalCxX(const CxResolve &resolve, const CxVal &xv, CxVal &out) const
+{
+    if (!root_) return false;
+    CxVal v;
+    if (!EvalNodeCx(root_.get(), &resolve, v, nullptr, &xv)) return false;
     out = v;
     return true;
 }

@@ -3546,10 +3546,17 @@ static void PolishRoots(const std::vector<double> &c, std::vector<CxVal> &roots)
 // 实系数多项式全部复根：Durand-Kerner 同时迭代（种子 (0.4+0.9i)^i，
 // 400 轮，步长 1e-14 收敛）。多重根收敛线性、精度弱化——155包出根后
 // 统一走牛顿抛光收口
-static bool PolyRootsDK(const std::vector<double> &c, std::vector<CxVal> &roots)
+static bool PolyRootsDK(const std::vector<double> &cIn, std::vector<CxVal> &roots)
 {
-    const int d = (int)c.size() - 1;
-    if (d < 1 || std::fabs(c.back()) < 1e-12) return false;
+    if (cIn.empty()) return false;
+    const int d = (int)cIn.size() - 1;
+    const double lead = cIn.back();
+    if (d < 1 || std::fabs(lead) < 1e-12) return false;
+    // 157包 归一化首一：DK 迭代 z←z−f/∏(z_i−z_j) 隐含首一假定，非首一
+    // 时步长带 |a_n| 因子（|1−a_n|≥1 即不收敛——此前实通道 d=1/非首一
+    // 潜在错根，本次一并收口）。根集不变
+    std::vector<double> c(cIn);
+    for (double &v : c) v /= lead;
     std::vector<CxVal> z(d);
     CxVal seed{0.4, 0.9};
     z[0] = CxVal{1.0, 0.0};
@@ -3769,6 +3776,307 @@ static bool PolyCoeffsFromFn(GeoFunction *f, std::vector<double> &c)
         }
     }
     return false;
+}
+
+// ---------- 157包 复系数多项式复根（与实通道并列，口径一致） ----------
+
+// 复系数 Horner（升幂）
+static CxVal PolyEvalCxC(const std::vector<CxVal> &c, const CxVal &z)
+{
+    CxVal r = c.back();
+    for (int i = (int)c.size() - 2; i >= 0; --i) {
+        r = CxVal{r.re * z.re - r.im * z.im + c[i].re,
+                  r.re * z.im + r.im * z.re + c[i].im};
+    }
+    return r;
+}
+
+// 复系数 Vandermonde（实采样点 xs，复样本值 ys；部分主元复高斯）
+static bool SolveVandermondeCx(const std::vector<double> &xs,
+                               const std::vector<CxVal> &ys,
+                               std::vector<CxVal> &c)
+{
+    const int n = (int)xs.size();
+    std::vector<std::vector<CxVal>> A(n, std::vector<CxVal>(n + 1));
+    for (int r = 0; r < n; ++r) {
+        CxVal pw{1.0, 0.0};
+        for (int k = 0; k < n; ++k) {
+            A[r][k] = pw;
+            pw = CxVal{pw.re * xs[r], pw.im * xs[r]};
+        }
+        A[r][n] = ys[r];
+    }
+    for (int col = 0; col < n; ++col) {
+        int piv = col;
+        for (int r = col + 1; r < n; ++r) {
+            if (std::fabs(A[r][col].re) + std::fabs(A[r][col].im)
+                > std::fabs(A[piv][col].re) + std::fabs(A[piv][col].im)) {
+                piv = r;
+            }
+        }
+        if (std::fabs(A[piv][col].re) + std::fabs(A[piv][col].im) < 1e-12) {
+            return false;
+        }
+        std::swap(A[col], A[piv]);
+        for (int r = col + 1; r < n; ++r) {
+            const double dd = A[col][col].re * A[col][col].re
+                + A[col][col].im * A[col][col].im;
+            const CxVal fr{
+                (A[r][col].re * A[col][col].re
+                     + A[r][col].im * A[col][col].im) / dd,
+                (A[r][col].im * A[col][col].re
+                     - A[r][col].re * A[col][col].im) / dd};
+            for (int k = col; k <= n; ++k) {
+                A[r][k] = CxVal{A[r][k].re - fr.re * A[col][k].re
+                                    + fr.im * A[col][k].im,
+                                A[r][k].im - fr.re * A[col][k].im
+                                    - fr.im * A[col][k].re};
+            }
+        }
+    }
+    c.assign(n, CxVal{0.0, 0.0});
+    for (int r = n - 1; r >= 0; --r) {
+        CxVal s = A[r][n];
+        for (int k = r + 1; k < n; ++k) {
+            s = CxVal{s.re - A[r][k].re * c[k].re + A[r][k].im * c[k].im,
+                      s.im - A[r][k].re * c[k].im - A[r][k].im * c[k].re};
+        }
+        const double dd = A[r][r].re * A[r][r].re + A[r][r].im * A[r][r].im;
+        c[r] = CxVal{(s.re * A[r][r].re + s.im * A[r][r].im) / dd,
+                     (s.im * A[r][r].re - s.re * A[r][r].im) / dd};
+    }
+    return true;
+}
+
+// 复系数 DK（种子/迭代与实通道同构），出根后复 DD 抛光
+static void PolishRootsC(const std::vector<CxVal> &c, std::vector<CxVal> &roots);
+
+static bool PolyRootsDKC(const std::vector<CxVal> &cIn, std::vector<CxVal> &roots)
+{
+    if (cIn.empty()) return false;
+    const int d = (int)cIn.size() - 1;
+    const CxVal lead = cIn.back();
+    const double leadM = std::fabs(lead.re) + std::fabs(lead.im);
+    if (d < 1 || leadM < 1e-12) return false;
+    // 157包 归一化首一（同 PolyRootsDK 口径）
+    std::vector<CxVal> c(cIn);
+    for (CxVal &v : c) {
+        const double dd = lead.re * lead.re + lead.im * lead.im;
+        v = CxVal{(v.re * lead.re + v.im * lead.im) / dd,
+                  (v.im * lead.re - v.re * lead.im) / dd};
+    }
+    std::vector<CxVal> z(d);
+    CxVal seed{0.4, 0.9};
+    z[0] = CxVal{1.0, 0.0};
+    for (int i = 1; i < d; ++i) {
+        z[i] = CxVal{z[i - 1].re * seed.re - z[i - 1].im * seed.im,
+                     z[i - 1].re * seed.im + z[i - 1].im * seed.re};
+    }
+    for (int it = 0; it < 400; ++it) {
+        double maxDelta = 0;
+        for (int i = 0; i < d; ++i) {
+            const CxVal pv = PolyEvalCxC(c, z[i]);
+            CxVal den{1.0, 0.0};
+            for (int j = 0; j < d; ++j) {
+                if (j == i) continue;
+                const CxVal df{z[i].re - z[j].re, z[i].im - z[j].im};
+                den = CxVal{den.re * df.re - den.im * df.im,
+                            den.re * df.im + den.im * df.re};
+            }
+            const double ddm = den.re * den.re + den.im * den.im;
+            if (ddm < 1e-30) continue;
+            const double sr = (pv.re * den.re + pv.im * den.im) / ddm;
+            const double si = (pv.im * den.re - pv.re * den.im) / ddm;
+            z[i].re -= sr;
+            z[i].im -= si;
+            const double mag = std::sqrt(sr * sr + si * si);
+            if (mag > maxDelta) maxDelta = mag;
+        }
+        if (maxDelta < 1e-14) break;
+    }
+    roots = z;
+    PolishRootsC(c, roots);
+    return true;
+}
+
+// 复 DD Horner（系数 re/im 各一对 DD）
+static void PolyEvalCxDDC(
+    const std::vector<std::pair<DD, DD>> &c, const CxDD &z, CxDD &out)
+{
+    CxDD r{c.back().first, c.back().second};
+    for (int i = (int)c.size() - 2; i >= 0; --i) {
+        const DD ac = ddMulDD(r.re, z.re);
+        const DD bd = ddMulDD(r.im, z.im);
+        const DD ad = ddMulDD(r.re, z.im);
+        const DD bc = ddMulDD(r.im, z.re);
+        r.re = ddAddDD(ddSubDD(ac, bd), c[i].first);
+        r.im = ddAddDD(ddAddDD(ad, bc), c[i].second);
+    }
+    out = r;
+}
+
+// 复 DD 抛光（155包 PolishRoots 的复系数版：通道/护栏/排名口径一致）
+static void PolishRootsC(const std::vector<CxVal> &c, std::vector<CxVal> &roots)
+{
+    const int d = (int)c.size() - 1;
+    if (d < 1) return;
+    std::vector<std::pair<DD, DD>> cd, dcd;
+    cd.reserve(c.size());
+    for (const CxVal &v : c) {
+        cd.emplace_back(DD{v.re, 0.0}, DD{v.im, 0.0});
+    }
+    for (int i = 1; i <= d; ++i) {
+        dcd.emplace_back(ddMulD(cd[i].first, (double)i),
+                         ddMulD(cd[i].second, (double)i));
+    }
+    for (auto &r0 : roots) {
+        double bestRes;
+        {
+            CxDD f0;
+            PolyEvalCxDDC(cd, CxDD{DD{r0.re, 0.0}, DD{r0.im, 0.0}}, f0);
+            bestRes = f0.re.hi * f0.re.hi + f0.im.hi * f0.im.hi;
+        }
+        CxVal best = r0;
+        const double dispCap = 1e-3 * (1.0 + std::fabs(r0.re)
+                                          + std::fabs(r0.im));
+        for (int m = 1; m <= 4 && m <= d; ++m) {
+            CxDD z{DD{r0.re, 0.0}, DD{r0.im, 0.0}};
+            for (int it = 0; it < 20; ++it) {
+                CxDD f, fp;
+                PolyEvalCxDDC(cd, z, f);
+                PolyEvalCxDDC(dcd, z, fp);
+                const DD den = ddAddDD(ddMulDD(fp.re, fp.re),
+                                       ddMulDD(fp.im, fp.im));
+                if (den.hi == 0.0 || !std::isfinite(den.hi)) break;
+                const DD nre = ddAddDD(ddMulDD(f.re, fp.re),
+                                       ddMulDD(f.im, fp.im));
+                const DD nim = ddSubDD(ddMulDD(f.im, fp.re),
+                                       ddMulDD(f.re, fp.im));
+                const DD qr = ddDivDD(nre, den);
+                const DD qi = ddDivDD(nim, den);
+                const double sr = qr.hi * (double)m;
+                const double si = qi.hi * (double)m;
+                if (!std::isfinite(sr) || !std::isfinite(si)) break;
+                if (std::sqrt(sr * sr + si * si) > dispCap) break;
+                z.re = ddSubDD(z.re, ddMulD(qr, (double)m));
+                z.im = ddSubDD(z.im, ddMulD(qi, (double)m));
+            }
+            const double dr = z.re.hi - r0.re;
+            const double di = z.im.hi - r0.im;
+            if (std::sqrt(dr * dr + di * di) > dispCap) continue;
+            CxDD fz;
+            PolyEvalCxDDC(cd, z, fz);
+            const double res = fz.re.hi * fz.re.hi + fz.im.hi * fz.im.hi;
+            if (res < bestRes) {
+                bestRes = res;
+                best = CxVal{z.re.hi, z.im.hi};
+            }
+        }
+        r0 = best;
+    }
+}
+
+// 复采样 → 复系数（最小拟合次数 + 未采样点复核，同实通道口径）。
+// sample(j, y)：实样本点 j 复函数值。非多项式/非有限返回 false
+static bool PolyCoeffsFromCxSample(
+    const std::function<bool(double, CxVal &)> &sample, std::vector<CxVal> &c)
+{
+    const int maxDeg = 8;
+    for (int d = 0; d <= maxDeg; ++d) {
+        std::vector<double> xs;
+        std::vector<CxVal> ys;
+        xs.reserve(d + 1);
+        ys.reserve(d + 1);
+        for (int j = 0; j <= d; ++j) {
+            CxVal v;
+            if (!sample((double)j, v) || !std::isfinite(v.re)
+                || !std::isfinite(v.im)) {
+                return false;
+            }
+            xs.push_back((double)j);
+            ys.push_back(v);
+        }
+        std::vector<CxVal> cd;
+        if (!SolveVandermondeCx(xs, ys, cd)) continue;
+        bool fits = true;
+        for (int j = d + 1; j <= d + 6 && fits; ++j) {
+            CxVal v;
+            if (!sample((double)j, v)) return false;
+            const CxVal pv = PolyEvalCxC(cd, CxVal{(double)j, 0.0});
+            const double dv = std::fabs(v.re - pv.re)
+                + std::fabs(v.im - pv.im);
+            if (dv > 1e-6 * (1.0 + std::fabs(v.re) + std::fabs(v.im))) {
+                fits = false;
+            }
+        }
+        if (fits) {
+            c = cd;
+            return true;
+        }
+    }
+    return false;
+}
+
+// 复域牛顿超越方程求根：数值导数中心差分，多初值串行尝试，首个收敛根
+//（|f|<1e-10）即返回。未收敛返回空（调用方给文案）
+static std::vector<CxVal> CxNewtonRoot(
+    const std::function<bool(const CxVal &, CxVal &)> &fn)
+{
+    static const double z0r[] = {0.0, 1.0, -1.0, 0.5, 2.0};
+    static const double z0i[] = {0.0, 1.0, -1.0, 0.5, 2.0};
+    for (int a = 0; a < 5; ++a) {
+        for (int b = 0; b < 5; ++b) {
+            if (a + b > 4) continue;   // 粗格 15 个初值（0/实轴/虚轴/斜向）
+            CxVal z{z0r[a], z0i[b]};
+            double lastStep = 0;
+            bool diverged = false;
+            for (int it = 0; it < 60; ++it) {
+                CxVal fv, fp1, fp2;
+                if (!fn(z, fv) || !std::isfinite(fv.re)
+                    || !std::isfinite(fv.im)) {
+                    diverged = true;
+                    break;
+                }
+                const double fm = fv.re * fv.re + fv.im * fv.im;
+                if (fm < 1e-20) {
+                    // 收敛双条件：残差小 且 上一步长已收缩——exp(z) 类
+                    // 步长恒定（f/f′=1）向 −∞ 步进时残差也会过阈值，
+                    // 步长不收缩即伪收敛（下溢伪零同路拦截）
+                    if (lastStep <= 0.5
+                        && std::fabs(z.re) + std::fabs(z.im) <= 1e3) {
+                        return std::vector<CxVal>{z};
+                    }
+                    diverged = true;
+                    break;
+                }
+                const double h = 1e-5 * (1.0 + std::fabs(z.re)
+                                             + std::fabs(z.im));
+                if (!fn(CxVal{z.re + h, z.im}, fp1)
+                    || !fn(CxVal{z.re - h, z.im}, fp2)
+                    || !std::isfinite(fp1.re) || !std::isfinite(fp2.re)) {
+                    diverged = true;
+                    break;
+                }
+                const CxVal df{(fp1.re - fp2.re) / (2.0 * h),
+                               (fp1.im - fp2.im) / (2.0 * h)};
+                const double dd = df.re * df.re + df.im * df.im;
+                if (dd < 1e-30) {
+                    diverged = true;
+                    break;
+                }
+                const double sr = (fv.re * df.re + fv.im * df.im) / dd;
+                const double si = (fv.im * df.re - fv.re * df.im) / dd;
+                lastStep = std::sqrt(sr * sr + si * si);
+                z = CxVal{z.re - sr, z.im - si};
+                if (!std::isfinite(z.re) || !std::isfinite(z.im)
+                    || std::fabs(z.re) + std::fabs(z.im) > 1e8) {
+                    diverged = true;
+                    break;
+                }
+            }
+        }
+    }
+    return std::vector<CxVal>();
 }
 
 // 内核源文 → giac 求值串：mod(A,B) 翻译为 (A-B*floor(A/B))（欧几里得余，
@@ -9024,28 +9332,133 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         return true;
     }
     // ---------- 149包 复数二期下：ComplexRoots(f) / CSolve(f[, x]) ----------
-    // 实系数多项式全部复根 → 点列表（isComplex 点，值列 a+bi；实根 y=0，
-    // 排序虚部降序实部升序）。calc 每次现采样提取系数重解（f 含滑条
-    // 系数随动）；创建期预检非多项式给文案（超越方程复域求解留三期）
+    // 实/复系数多项式全部复根 → 点列表（isComplex 点，值列 a+bi；实根
+    // y=0，排序虚部降序实部升序）。calc 每次现采样重解。157包：复系数
+    // 走复采样 + 复 Vandermonde + 复 DK/DD 抛光（f(z)= 复函数走
+    // evalCxAt；含 i 的内联式经 refs 重解析为匿名函数，体内引用仅放行
+    // i）；CSolve 非多项式回落复域牛顿超越求根（多初值串行，首个收敛
+    // 根，未收敛给文案），ComplexRoots 维持多项式口径
     if ((cmdLower == "complexroots" || cmdLower == "csolve")
         && (a.size() == 1 || a.size() == 2)) {
         GeoFunction *f = resolveFunctionArg(a[0]);
-        if (!f) { made = nullptr; return true; }   // lastError 已填
-        std::vector<double> c0;
-        if (!PolyCoeffsFromFn(f, c0)) {
+        if (!f) {
+            // 157包：实参含 i 的内联式（(1+i)x^2+1 类）——refs 模式重
+            // 解析为匿名函数；体内引用仅放行 i，其余维持原错误
+            std::string berr;
+            Expr bx;
+            bool refsOk = bx.parse(a[0], berr, std::string(), true)
+                && bx.containsX();
+            if (refsOk) {
+                for (const std::string &rn : bx.refs()) {
+                    if (rn != "i") { refsOk = false; break; }
+                }
+            }
+            if (!refsOk) { made = nullptr; return true; }   // lastError 已填
+            auto anon2 = std::make_unique<GeoFunction>();
+            anon2->src = a[0];
+            anon2->body = std::move(bx);
+            f = anon2.release();
+            lastError.clear();   // 157包 兜底成功路径：清 resolveFunctionArg 的残留文案
+        }
+        // 通道判定：复函数标记 或 体内含 i → 复采样
+        bool cxMode = f->isCx;
+        if (!cxMode) {
+            for (const std::string &rn : f->body.refs()) {
+                if (rn == "i") { cxMode = true; break; }
+            }
+        }
+        auto iRes = [](const std::string &nm, CxVal &o) {
+            if (nm == "i") { o = CxVal{0.0, 1.0}; return true; }
+            return false;
+        };
+        // 实样本点采样（复系数拟合用）
+        auto sampleJ = [f, iRes](double j, CxVal &y) -> bool {
+            if (f->isCx) return f->evalCxAt(CxVal{j, 0.0}, y);
+            if (!f->body.evalCxX(iRes, CxVal{j, 0.0}, y)) return false;
+            return std::isfinite(y.re) && std::isfinite(y.im);
+        };
+        // 任意复点采样（牛顿超越用）
+        auto sampleZ = [f, iRes](const CxVal &z, CxVal &y) -> bool {
+            if (f->isCx) return f->evalCxAt(z, y);
+            if (!f->body.evalCxX(iRes, z, y)) return false;
+            return std::isfinite(y.re) && std::isfinite(y.im);
+        };
+        bool polyOk = false;
+        std::vector<CxVal> cc;
+        if (cxMode) {
+            polyOk = PolyCoeffsFromCxSample(sampleJ, cc);
+        } else {
+            std::vector<double> c0;
+            polyOk = PolyCoeffsFromFn(f, c0);
+            if (polyOk) {
+                cc.reserve(c0.size());
+                for (double v : c0) cc.push_back(CxVal{v, 0.0});
+            }
+        }
+        if (!polyOk && cmdLower == "csolve") {
+            // 157包 超越方程：复域牛顿（单根，创建期即求；calc 重跑同初值
+            // 序列确定性复现）
+            std::vector<CxVal> nroots = CxNewtonRoot(sampleZ);
+            if (nroots.empty()) {
+                lastError = "CSolve 未找到收敛根（复域牛顿迭代未收敛）";
+                made = nullptr;
+                return true;
+            }
+            const std::string disp2 = "CSolve";
+            auto out = std::make_unique<GeoList>();
+            GeoFunction *src = f;
+            out->calc = [src, iRes](GeoList *g) {
+                auto smpZ = [src, iRes](const CxVal &z, CxVal &y) -> bool {
+                    if (src->isCx) return src->evalCxAt(z, y);
+                    if (!src->body.evalCxX(iRes, z, y)) return false;
+                    return std::isfinite(y.re) && std::isfinite(y.im);
+                };
+                g->points.clear();
+                g->pointRefs.clear();
+                for (const CxVal &r : CxNewtonRoot(smpZ)) {
+                    g->points.emplace_back(
+                        std::isfinite(r.re) ? r.re : 0.0,
+                        std::isfinite(r.im) ? r.im : 0.0);
+                }
+            };
+            out->update();
+            out->cmdName = disp2;
+            out->cmdArgs = { a[0] };
+            if (a.size() == 2) out->cmdArgs.push_back(a[1]);
+            out->inputs = { f };
+            made = std::move(out);
+            return true;
+        }
+        if (!polyOk) {
             lastError = cmdLower == "complexroots"
-                ? "ComplexRoots 需要实系数多项式函数（超越方程复域求解暂不支持）"
-                : "CSolve 一期仅支持实系数多项式（超越方程复域求解暂不支持）";
+                ? "ComplexRoots 需要实系数多项式函数（超越方程复域求解请用 CSolve）"
+                : "CSolve 未找到收敛根（复域牛顿迭代未收敛）";
             made = nullptr;
             return true;
         }
         const std::string disp = cmdLower == "complexroots" ? "ComplexRoots" : "CSolve";
+        const bool cxM = cxMode;
         auto out = std::make_unique<GeoList>();
         GeoFunction *src = f;
-        out->calc = [src](GeoList *g) {
-            std::vector<double> c;
+        out->calc = [src, cxM, iRes](GeoList *g) {
             std::vector<CxVal> roots;
-            if (PolyCoeffsFromFn(src, c) && PolyRootsDK(c, roots)) {
+            bool ok2 = false;
+            if (cxM) {
+                auto smpJ = [src, iRes](double j, CxVal &y) -> bool {
+                    if (src->isCx) return src->evalCxAt(CxVal{j, 0.0}, y);
+                    if (!src->body.evalCxX(iRes, CxVal{j, 0.0}, y)) {
+                        return false;
+                    }
+                    return std::isfinite(y.re) && std::isfinite(y.im);
+                };
+                std::vector<CxVal> c2;
+                ok2 = PolyCoeffsFromCxSample(smpJ, c2)
+                    && PolyRootsDKC(c2, roots);
+            } else {
+                std::vector<double> c2;
+                ok2 = PolyCoeffsFromFn(src, c2) && PolyRootsDK(c2, roots);
+            }
+            if (ok2) {
                 std::sort(roots.begin(), roots.end(),
                           [](const CxVal &A, const CxVal &B) {
                               if (std::fabs(A.im - B.im) > 1e-9) return A.im > B.im;
