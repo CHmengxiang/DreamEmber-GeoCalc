@@ -4,6 +4,7 @@
 #include "napi/native_api.h"
 #include <string>
 #include <vector>
+#include <map>
 #include <cstring>
 #include <cmath>
 #include "kernel/app.h"
@@ -18,6 +19,8 @@ dreamember::GeoPoint *g_dragPoint = nullptr;    // 当前被单指拖动的自�
 dreamember::GeoNumeric *g_dragSlider = nullptr; // N5 当前被拖动的滑动条
 dreamember::GeoPoint *g_dragPoint3D = nullptr;  // 1.0.8.1 当前被拖动的三维自由点
 dreamember::GeoElement *g_dragObj3D = nullptr;  // 1.1.3.8 当前被拖动的三维非点对象（球/面/实体）
+dreamember::GeoImage *g_dragImage = nullptr;    // 158包 当前被单指拖动的图片
+double g_dragImgOffX = 0, g_dragImgOffY = 0;    // 158包 抓取偏移（中心−手指）
 
 napi_value ToNapi(napi_env env, const std::string &s)
 {
@@ -230,6 +233,14 @@ napi_value KernelPickPoint(napi_env env, napi_callback_info info)
     napi_get_value_double(env, argv[1], &py);
     g_dragPoint = g_kernel.pickPoint(px, py);
     if (g_dragPoint) return ToNapi(env, "+|" + g_dragPoint->label);
+    // 158包 图片拾取（点未命中时）：记抓取偏移，拖动保持相对位置
+    dreamember::GeoImage *im = g_kernel.pickImage(px, py);
+    if (im) {
+        g_dragImage = im;
+        g_dragImgOffX = im->x - g_kernel.view.wx(px);
+        g_dragImgOffY = im->y - g_kernel.view.wy(py);
+        return ToNapi(env, "+|" + im->label);
+    }
     return ToNapi(env, "-|");
 }
 
@@ -250,6 +261,13 @@ napi_value KernelDragPointTo(napi_env env, napi_callback_info info)
         g_kernel.movePoint(g_dragPoint, g_kernel.view.wx(px), g_kernel.view.wy(py));
         return ToNapi(env, RenderFrame());
     }
+    if (g_dragImage) {
+        // 158包 图片拖动：中心 = 手指 + 抓取偏移
+        g_kernel.moveImage(g_dragImage,
+                           g_kernel.view.wx(px) + g_dragImgOffX,
+                           g_kernel.view.wy(py) + g_dragImgOffY);
+        return ToNapi(env, RenderFrame());
+    }
     return ToNapi(env, "-|");
 }
 
@@ -260,9 +278,72 @@ napi_value KernelEndDrag(napi_env env, napi_callback_info)
     g_dragSlider = nullptr;
     g_dragPoint3D = nullptr;
     g_dragObj3D = nullptr;
+    g_dragImage = nullptr;
     napi_value undef;
     napi_get_undefined(env, &undef);
     return undef;
+}
+
+// ---- 158包 图片 media / 视图信息 ----
+
+// kernelSetMedia(label, data: ArrayBuffer): void — 图片字节入 media 库
+napi_value KernelSetMedia(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 2 || argv[0] == nullptr || argv[1] == nullptr) {
+        napi_throw_error(env, nullptr, "kernelSetMedia requires (label, ArrayBuffer)");
+        return nullptr;
+    }
+    const std::string label = NapiToString(env, argv[0]);
+    void *data = nullptr;
+    size_t len = 0;
+    if (napi_get_arraybuffer_info(env, argv[1], &data, &len) != napi_ok) {
+        napi_throw_error(env, nullptr, "kernelSetMedia requires ArrayBuffer");
+        return nullptr;
+    }
+    const unsigned char *p = (const unsigned char *)data;
+    g_kernel.setMedia(label, std::vector<unsigned char>(p, p + len));
+    napi_value undef;
+    napi_get_undefined(env, &undef);
+    return undef;
+}
+
+// kernelGetMedia(label): ArrayBuffer — media 库取字节（缺失返回空 buffer）
+napi_value KernelGetMedia(napi_env env, napi_callback_info info)
+{
+    size_t argc = 1;
+    napi_value argv[1] = {nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 1 || argv[0] == nullptr) {
+        napi_throw_error(env, nullptr, "kernelGetMedia requires (label)");
+        return nullptr;
+    }
+    const std::string label = NapiToString(env, argv[0]);
+    std::vector<unsigned char> bytes;
+    g_kernel.getMedia(label, bytes);
+    void *data = nullptr;
+    napi_value ab = nullptr;
+    if (napi_create_arraybuffer(env, bytes.size(), &data, &ab) != napi_ok) {
+        napi_throw_error(env, nullptr, "create arraybuffer failed");
+        return nullptr;
+    }
+    if (!bytes.empty()) memcpy(data, bytes.data(), bytes.size());
+    return ab;
+}
+
+// kernelViewInfo(): string — "cx,cy,wWorld,hWorld"（当前 2D 视图中心与
+// 世界尺寸，插入图片定位用）
+napi_value KernelViewInfo(napi_env env, napi_callback_info)
+{
+    const double cx = (g_kernel.view.xmin() + g_kernel.view.xmax()) / 2.0;
+    const double cy = (g_kernel.view.ymin() + g_kernel.view.ymax()) / 2.0;
+    const double ww = g_kernel.view.xmax() - g_kernel.view.xmin();
+    const double wh = g_kernel.view.ymax() - g_kernel.view.ymin();
+    char b[128];
+    snprintf(b, sizeof(b), "%g,%g,%g,%g", cx, cy, ww, wh);
+    return ToNapi(env, std::string(b));
 }
 
 // ---- 1.0.8.1 三维视图 NAPI（协议与 2D 同一套帧文本） ----
@@ -970,12 +1051,13 @@ napi_value KernelAnimTick(napi_env env, napi_callback_info info)
     return ToNapi(env, "-|");
 }
 
-// kernelGetGgb(): ArrayBuffer — 当前构造序列化打包为 .ggb（zip 容器，N4）
+// kernelGetGgb(): ArrayBuffer — 当前构造序列化打包为 .ggb（zip 容器，N4；
+// 158包 media 条目随行）
 napi_value KernelGetGgb(napi_env env, napi_callback_info)
 {
     std::string xml = g_kernel.getXml();
     std::string zip;
-    if (!dreamember::MakeGgb(xml, zip)) {
+    if (!dreamember::MakeGgbMedia(xml, g_kernel.mediaMap(), zip)) {
         napi_throw_error(env, nullptr, "MakeGgb failed");
         return nullptr;
     }
@@ -1015,9 +1097,11 @@ napi_value KernelLoadGgb(napi_env env, napi_callback_info info)
     }
     std::string zip((const char *)data, len);
     std::string xml;
-    if (!dreamember::ParseGgb(zip, xml)) {
+    std::map<std::string, std::vector<unsigned char>> mediaLoaded;
+    if (!dreamember::ParseGgbMedia(zip, xml, mediaLoaded)) {
         return ToNapi(env, "error: 无法读取 .ggb 文件（缺少 geogebra.xml 条目）");
     }
+    g_kernel.setMediaMap(std::move(mediaLoaded));   // 158包 图片字节先入库再重建
     int skipped = 0;
     g_dragPoint = nullptr;
     g_dragSlider = nullptr;
@@ -1064,6 +1148,9 @@ void DreamemberRegisterKernelApis(napi_env env, napi_value exports)
         { "kernelGetGgb", nullptr, KernelGetGgb, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelGetXmlText", nullptr, KernelGetXmlText, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelLoadGgb", nullptr, KernelLoadGgb, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelSetMedia", nullptr, KernelSetMedia, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelGetMedia", nullptr, KernelGetMedia, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelViewInfo", nullptr, KernelViewInfo, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelTool", nullptr, KernelTool, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelToolTap", nullptr, KernelToolTap, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelToolTap3D", nullptr, KernelToolTap3D, nullptr, nullptr, nullptr, napi_default, nullptr },

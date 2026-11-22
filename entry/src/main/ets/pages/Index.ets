@@ -514,6 +514,10 @@ struct Index {
             this.menuOpen = false;
             this.fireEvt('evt.exportMenu');
           })
+          this.MenuRow('插入图片', '图库选图插入画布', () => {
+            this.menuOpen = false;
+            this.fireEvt('evt.insertImage');
+          })
           this.MenuRow('复制构图', '当前构图 .ggb 文本进剪贴板', () => {
             this.menuOpen = false;
             this.fireEvt('evt.copyGgb');

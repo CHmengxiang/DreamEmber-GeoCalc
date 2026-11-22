@@ -9484,9 +9484,30 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         made = std::move(out);
         return true;
     }
+    // ---------- 158包 图片对象：Image(cx, cy, w, h) ----------
+    // 插入图片流程专用（ETS 选图后 kernelSetMedia 以标签为键入 media 库再
+    // input 本命令）；XML 按命令重放，字节随 .ggb media 条目往返
+    if (cmdLower == "image" && a.size() == 4) {
+        double iv[4];
+        for (int qi = 0; qi < 4; ++qi) {
+            if (!numArg(a[qi], iv[qi])) {
+                lastError = "Image 需要（中心x, 中心y, 宽, 高）数值";
+                made = nullptr;
+                return true;
+            }
+        }
+        auto im = std::make_unique<GeoImage>();
+        im->x = iv[0];
+        im->y = iv[1];
+        im->w = std::max(0.01, iv[2]);
+        im->h = std::max(0.01, iv[3]);
+        im->cmdName = "Image";
+        im->cmdArgs = a;
+        made = std::move(im);
+        return true;
+    }
     // NthRoot(x, n)：n 次方根（上游 f(x) 页 ⁿ√□ 模板键）。负底奇数次取实根
-    if (cmdLower == "nthroot" && a.size() == 2) {
-        double xv = 0, nv = 0;
+    if (cmdLower == "nthroot" && a.size() == 2) {        double xv = 0, nv = 0;
         if (!numArg(a[0], xv) || !numArg(a[1], nv)) {
             lastError = "NthRoot 需要（数, 次数）";
             made = nullptr;
@@ -14480,6 +14501,13 @@ std::string Kernel::nextLabelFor(GeoType t)
             if (lookup(cand) == nullptr) return cand;
         }
         return "X";
+    } else if (t == GeoType::Image) {
+        // 158包 图片标签池 img1..（与 ETS 显式标签口径一致）
+        for (int n = 1; n < 1000; ++n) {
+            std::string cand = "img" + std::to_string(n);
+            if (lookup(cand) == nullptr) return cand;
+        }
+        return "X";
     } else {
         pool = "abcdeghijklmnopqrstuvwxyz";
         poolLen = 25;
@@ -14525,6 +14553,7 @@ void Kernel::algebraRows(std::vector<AlgebraRow> &out) const
         // 1.1.0.1 圆锥曲线独立行类型（入「圆锥曲线」分组）
         case GeoType::Conic2: r.type = "conic2"; break;   // 1.2.0.2
         case GeoType::Locus: r.type = "locus"; break;     // 142包
+        case GeoType::Image: r.type = "image"; break;     // 158包
         case GeoType::Curve3: r.type = "curve3"; break;   // 1.2.0.6
         case GeoType::Conic3: r.type = "conic"; break;
         case GeoType::Cone: r.type = "cone"; break;
@@ -14647,6 +14676,41 @@ GeoPoint *Kernel::pickPoint(double px, double py, double *outD)
     }
     if (outD) *outD = bestD;   // 无命中 = 1e9，调用方做就近比较用
     return best;
+}
+
+// 158包 图片拾取：命中矩形内返回该图片（点优先由调用方先试）
+GeoImage *Kernel::pickImage(double px, double py)
+{
+    for (auto &g : geos_) {
+        if (g->type() != GeoType::Image || !g->visible) continue;
+        GeoImage *im = static_cast<GeoImage *>(g.get());
+        const double cx = view.px(im->x);
+        const double cy = view.py(im->y);
+        const double hw = im->w * view.xscale / 2.0;
+        const double hh = im->h * view.yscale / 2.0;
+        if (std::fabs(px - cx) <= hw && std::fabs(py - cy) <= hh) return im;
+    }
+    return nullptr;
+}
+
+// 158包 图片拖动：中心随手指（自由图片；重算走全量——图片不产依赖但
+// 保持级联口径一致）
+void Kernel::moveImage(GeoImage *im, double wx, double wy)
+{
+    if (!im || !im->isFree) return;
+    im->x = wx;
+    im->y = wy;
+    recomputeAll();
+}
+
+// 158包 media 取字节（键不存在返回 false）
+bool Kernel::getMedia(const std::string &key,
+                      std::vector<unsigned char> &out) const
+{
+    auto it = media_.find(key);
+    if (it == media_.end()) return false;
+    out = it->second;
+    return true;
 }
 
 void Kernel::movePoint(GeoPoint *p, double wx, double wy)
@@ -16132,6 +16196,14 @@ GeoElement *Kernel::pickObject(double px, double py)
             double ccx = view.px(c->ccx()), ccy = view.py(c->ccy());
             double rr = c->radius * view.xscale;
             d = fabs(sqrt((px - ccx) * (px - ccx) + (py - ccy) * (py - ccy)) - rr);
+        } else if (t == GeoType::Image) {
+            // 158包 图片拾取：矩形内含即命中（优先级低于既有曲线判距）
+            GeoImage *im = static_cast<GeoImage *>(g.get());
+            const double cx = view.px(im->x), cy = view.py(im->y);
+            const double hw = im->w * view.xscale / 2.0;
+            const double hh = im->h * view.yscale / 2.0;
+            d = (std::fabs(px - cx) <= hw && std::fabs(py - cy) <= hh)
+                ? 0.5 : 1e18;
         } else if (t == GeoType::Locus) {
             // 142包 轨迹拾取：采样折线段距（与渲染同点位）
             GeoLocus *L = static_cast<GeoLocus *>(g.get());
@@ -16873,6 +16945,16 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->ineqChain = s->ineqChain;
             d->ineqDNF = s->ineqDNF;
             d->fillAlpha = s->fillAlpha;
+            break;
+        }
+        case GeoType::Image: {
+            GeoImage *d = static_cast<GeoImage *>(dst);
+            GeoImage *s = static_cast<GeoImage *>(src);
+            d->x = s->x;
+            d->y = s->y;
+            d->w = s->w;
+            d->h = s->h;
+            d->isFree = s->isFree;
             break;
         }
         case GeoType::Numeric: {
@@ -19848,6 +19930,23 @@ void Kernel::render(std::vector<DrawCmd> &out)
             GeoFunction *f = static_cast<GeoFunction *>(g.get());
             if (f->ineqOp || f->ineqCombo()) appendInequalityPlot(*f, out);
             else if (!f->isCx) appendFunctionPlot(*f, out, f->selected);   // 156包 复函数不绘图
+            break;
+        }
+        case GeoType::Image: {
+            // 158包 图片：世界矩形 → 像素矩形，位图由 ETS 按标签查缓存
+            GeoImage *im = static_cast<GeoImage *>(g.get());
+            if (!im->visible) break;
+            DrawCmd d;
+            d.op = DrawOp::Image;
+            d.color = "#000000";
+            d.text = im->label;
+            const double cx = view.px(im->x);
+            const double cy = view.py(im->y);
+            const double hw = im->w * view.xscale / 2.0;
+            const double hh = im->h * view.yscale / 2.0;
+            d.pts = {(float)(cx - hw), (float)(cy - hh),
+                     (float)(2.0 * hw), (float)(2.0 * hh)};
+            out.push_back(d);
             break;
         }
         case GeoType::Angle: {
@@ -23326,6 +23425,13 @@ std::string Kernel::getXml() const
             AppendElementHead(o, *f, "function",
                 (f->ineqOp || f->ineqCombo()) ? f->fillAlpha : 0.0);
             AppendLineStyle(o, f->lineThickness);
+            break;
+        }
+        case GeoType::Image: {
+            // 158包 图片：命令重放重建（字节走 media 条目），element 仅样式
+            GeoImage *im = static_cast<GeoImage *>(g);
+            AppendCommandXml(o, *im);
+            AppendElementHead(o, *im, "image");
             break;
         }
         case GeoType::Numeric: {

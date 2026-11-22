@@ -5,6 +5,7 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <map>
 #include <cstdint>
 #include "kernel/geos.h"   // 150包 EncodeGif89a 用 uint8_t
 #include "kernel/view.h"
@@ -23,6 +24,8 @@ enum class DrawOp {
     Arc,         // 圆弧（角度工具）：cx,cy,r,start,end（canvas 弧度）
     FillPoly,    // 多边形填充：pts 成对顶点
     TextHalo,    // 文本选中底衬（strokeText 描边）
+    Image,       // 158包 图片：pts=px,py,pw,ph（像素矩形），text=标签（ETS 侧
+                 // 按标签查缓存的 PixelMap 绘制——位图不进帧协议）
 };
 
 struct DrawCmd {
@@ -148,6 +151,24 @@ public:
     // N5 对象拾取（长按菜单/工具用）：点以外的最近对象（线段/直线/射线/向量/
     // 圆/多边形/函数）；不在线上返回 nullptr
     GeoElement *pickObject(double px, double py);
+    // 158包 图片拾取（单指拖动）：命中矩形内返回最上层图片对象
+    GeoImage *pickImage(double px, double py);
+    // 158包 图片拖动：中心随手指（抓取偏移由绑定层记存）
+    void moveImage(GeoImage *im, double wx, double wy);
+    // 158包 media 库：图片字节按标签键存取；.ggb 打包随行
+    void setMedia(const std::string &key, std::vector<unsigned char> bytes)
+    {
+        media_[key] = std::move(bytes);
+    }
+    bool getMedia(const std::string &key, std::vector<unsigned char> &out) const;
+    const std::map<std::string, std::vector<unsigned char>> &mediaMap() const
+    {
+        return media_;
+    }
+    void setMediaMap(std::map<std::string, std::vector<unsigned char>> m)
+    {
+        media_ = std::move(m);
+    }
     // N5 滑动条手柄拾取（拖动改值）
     GeoNumeric *pickSliderHandle(double px, double py);
     void dragSliderTo(GeoNumeric *n, double px);
@@ -270,6 +291,9 @@ public:
 
 private:
     std::vector<std::unique_ptr<GeoElement>> geos_;
+    // 158包 图片 media 库（键=图片对象标签；.ggb 打包为
+    // dreamember_media_<键> 条目随行）
+    std::map<std::string, std::vector<unsigned char>> media_;
     GeoPoint *picked_ = nullptr;
 
     // 撤销/重做快照栈（存变更前的完整 XML）

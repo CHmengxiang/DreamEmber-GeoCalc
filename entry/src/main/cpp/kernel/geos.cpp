@@ -437,6 +437,22 @@ bool GeoFunction::evalCxAt(const CxVal &arg, CxVal &out) const
     return true;
 }
 
+// ---- 158包 GeoImage ----
+
+std::string GeoImage::valueText() const
+{
+    return "图片 " + FormatNum(w) + "×" + FormatNum(h);
+}
+
+std::string GeoImage::definitionText() const
+{
+    std::string args;
+    for (size_t i = 0; i < cmdArgs.size(); ++i) {
+        args += (i > 0 ? ", " : "") + cmdArgs[i];
+    }
+    return label + "=Image(" + args + ")";
+}
+
 // ---- GeoRay ----
 
 std::string GeoRay::valueText() const

@@ -12,7 +12,7 @@
 namespace dreamember {
 
 enum class GeoType { Point, Segment, Line, Ray, Vector, Circle, Conic2, Polygon, Function, Numeric, Angle, List, Text,
-                     Surface, Sphere, Cylinder, Line3, Plane, Circle3, Conic3, Cone, Solid, Curve3, Locus };
+                     Surface, Sphere, Cylinder, Line3, Plane, Circle3, Conic3, Cone, Solid, Curve3, Locus, Image };
 
 struct GeoColor {
     int r = 0, g = 0, b = 0;
@@ -129,6 +129,19 @@ public:
     // 内核重采样闭包（捕获 kernel；CopyGeoState 随重定义迁移）
     std::function<void(GeoLocus *)> locusCalc;
     void update() override { if (locusCalc) locusCalc(this); }
+    std::string valueText() const override;
+    std::string definitionText() const override;
+};
+
+// 158包 图片对象：画布位图（字节存内核 media 库、以标签为键；位置/尺寸
+// 世界坐标，中心定位）。不进实通道运算；拖动经 pickImage/moveImage；
+// .ggb 随行 dreamember_media_<标签> 条目往返（官方图片文件读取留二期）
+class GeoImage : public GeoElement {
+public:
+    GeoImage() : GeoElement(GeoType::Image) {}
+    double x = 0, y = 0;   // 中心（世界坐标）
+    double w = 4, h = 3;   // 世界尺寸
+    bool isFree = true;    // 自由图片可拖动（口径同 GeoPoint/GeoNumeric）
     std::string valueText() const override;
     std::string definitionText() const override;
 };

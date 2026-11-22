@@ -279,6 +279,10 @@ export struct CanvasView {
   @StorageProp('evt.exportGif') @Watch('onExportGifEvt') private exportGifTick: number = 0;
   // 1.5.1 导出合并：弹三选弹窗分派 .ggb / 图片 / 动画 GIF
   @StorageProp('evt.exportMenu') @Watch('onExportMenuEvt') private exportMenuTick: number = 0;
+  // 158包 插入图片（Index ☰ 菜单触发）+ 图片像素缓存（键=对象标签）
+  @StorageProp('evt.insertImage') @Watch('onInsertImageEvt') private insertImageTick: number = 0;
+  private imageCache: Map<string, image.PixelMap> = new Map();
+  private nextImgNum: number = 1;
   // 1.5.1.1 GIF 导出进度弹窗控制器（进度/取消状态经 AppStorage gifProg*
   // 桥接，弹窗内 @StorageLink 直读）
   private gifDialog: CustomDialogController = new CustomDialogController({
@@ -505,7 +509,7 @@ export struct CanvasView {
       const lw = parseFloat(parts[2]);
       let text = '';
       let coordsStr = parts[3];
-      if (op === 't') {
+      if (op === 't' || op === 'g') {
         text = parts[3];
         coordsStr = parts.length > 4 ? parts[4] : '';
       }
@@ -608,6 +612,18 @@ export struct CanvasView {
             }
             this.ctx.closePath();
             this.ctx.fill();
+          }
+          break;
+        case 'g':
+          // 158包 图片：按标签查像素缓存绘制（字节不进帧协议；缓存缺失
+          // 静默跳过——hydrateImages 异步回灌后下一帧出现）
+          if (nums.length >= 4 && this.imageCache.has(text)) {
+            try {
+              this.ctx.drawImage(this.imageCache.get(text),
+                nums[0], nums[1], nums[2], nums[3]);
+            } catch (err) {
+              // 尺寸非法等：跳过本帧
+            }
           }
           break;
         default:
@@ -1824,6 +1840,7 @@ export struct CanvasView {
     this.panelTab = 'algebra';
     this.setPanelVisible(true);
     this.refresh();
+    this.hydrateImages();   // 158包 图片字节回灌
     if (dreamemberKernel.kernelAnyAnimating() === '1') {
       this.startAnimTicker();
     }
@@ -1872,6 +1889,87 @@ export struct CanvasView {
       cancel: (): void => {
       }
     });
+  }
+
+  // 158包 插入图片：图库选择（零权限 PhotoViewPicker）→ 读字节 → 解码
+  // PixelMap（大图缩 ≤2048）→ 视图中心按 1/3 视宽放置（宽高比随图）→
+  // kernelInput 建对象 + kernelSetMedia 入库 + 像素进缓存
+  private async onInsertImageEvt(): Promise<void> {
+    try {
+      const picker2 = new photoAccessHelper.PhotoViewPicker();
+      const opts: photoAccessHelper.PhotoSelectOptions = {
+        MIMEType: photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE,
+        maxSelectNumber: 1
+      };
+      const res: photoAccessHelper.PhotoSelectResult = await picker2.select(opts);
+      if (res.photoUris.length === 0) {
+        return;   // 用户取消
+      }
+      const file = fs.openSync(res.photoUris[0], fs.OpenMode.READ_ONLY);
+      let buf: ArrayBuffer;
+      try {
+        const size = Math.min(fs.statSync(file.fd).size, 10 * 1024 * 1024);
+        buf = new ArrayBuffer(size);
+        fs.readSync(file.fd, buf);
+      } finally {
+        fs.closeSync(file);
+      }
+      const src = image.createImageSource(buf);
+      const info = await src.getImageInfo();
+      let pmOpts: image.DecodingOptions = {};
+      if (info.size.width > 2048 || info.size.height > 2048) {
+        const scale = 2048 / Math.max(info.size.width, info.size.height);
+        pmOpts = {
+          desiredSize: {
+            width: Math.round(info.size.width * scale),
+            height: Math.round(info.size.height * scale)
+          }
+        };
+      }
+      const pm = await src.createPixelMap(pmOpts);
+      const vi = dreamemberKernel.kernelViewInfo().split(',');
+      const cx = parseFloat(vi[0]);
+      const cy = parseFloat(vi[1]);
+      const wWorld = parseFloat(vi[2]);
+      const w = Math.max(0.5, wWorld / 3);
+      const h = w * info.size.height / Math.max(1, info.size.width);
+      let label = '';
+      for (let t2 = 0; t2 < 3 && label === ''; ++t2) {
+        const cand = 'img' + this.nextImgNum;
+        this.nextImgNum++;
+        const r = dreamemberKernel.kernelInput(
+          cand + '=Image(' + cx + ',' + cy + ',' + w + ',' + h + ')');
+        if (!r.startsWith('error:')) {
+          label = cand;
+        }
+      }
+      if (label === '') {
+        this.alertBox('插入失败', '图片对象创建未成功');
+        return;
+      }
+      dreamemberKernel.kernelSetMedia(label, buf);
+      this.imageCache.set(label, pm);
+      this.refresh();
+    } catch (e) {
+      this.alertBox('插入失败', '图片读取未成功');
+    }
+  }
+
+  // 158包 图片字节回灌：.ggb 载入后按代数行 type=image 逐个取 media 解码
+  private async hydrateImages(): Promise<void> {
+    for (const e of this.algebra) {
+      if (e.type !== 'image' || this.imageCache.has(e.label)) continue;
+      const bytes: ArrayBuffer = dreamemberKernel.kernelGetMedia(e.label);
+      if (bytes.byteLength <= 0) continue;
+      try {
+        const src = image.createImageSource(bytes);
+        const pm = await src.createPixelMap();
+        this.imageCache.set(e.label, pm);
+        this.refresh();
+      } catch (err) {
+        // 解码失败：跳过（占位无图）
+      }
+    }
   }
 
   private onOpenGgbEvt(): void {

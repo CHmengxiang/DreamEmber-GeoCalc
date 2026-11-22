@@ -39,6 +39,10 @@ export const kernelClearAll: () => string;
 // N4 .ggb 文件读写（zip 容器 + GeoGebra 兼容 XML）
 export const kernelGetGgb: () => ArrayBuffer;
 export const kernelGetXmlText: () => string;
+// 158包 图片 media：字节按标签键存取（.ggb 打包随行）+ 视图信息
+export const kernelSetMedia: (label: string, data: ArrayBuffer) => void;
+export const kernelGetMedia: (label: string) => ArrayBuffer;
+export const kernelViewInfo: () => string;
 // 141包 轨迹追踪：kernelSetTrace(label, on) 开关（开/关均清缓冲）；
 // kernelClearTraces() 清全部缓冲（开关状态保持）
 export const kernelSetTrace: (label: string, on: boolean) => void;

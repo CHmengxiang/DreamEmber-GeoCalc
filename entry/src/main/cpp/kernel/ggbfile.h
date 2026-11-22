@@ -5,7 +5,9 @@
 #ifndef DREAMEMBER_KERNEL_GGBFILE_H
 #define DREAMEMBER_KERNEL_GGBFILE_H
 
+#include <map>
 #include <string>
+#include <vector>
 
 namespace dreamember {
 
@@ -13,6 +15,18 @@ namespace dreamember {
 bool MakeGgb(const std::string &xml, std::string &outZip);
 // 从 zip 提取 geogebra.xml；找不到该条目返回 false
 bool ParseGgb(const std::string &zip, std::string &outXml);
+
+// 158包 媒体版：xml 之外追加 media 条目（键=对象标签，条目名
+// dreamember_media_<键>，store 方式——图片字节已压缩）。xml 条目仍居首
+bool MakeGgbMedia(
+    const std::string &xml,
+    const std::map<std::string, std::vector<unsigned char>> &media,
+    std::string &outZip);
+// 媒体版读取：geogebra.xml + 全部 media 条目；xml 缺失返回 false
+//（无 media 条目视为空集）
+bool ParseGgbMedia(
+    const std::string &zip, std::string &outXml,
+    std::map<std::string, std::vector<unsigned char>> &media);
 
 } // namespace dreamember
 #endif // DREAMEMBER_KERNEL_GGBFILE_H
