@@ -3354,8 +3354,12 @@ static CxVal PolyEvalCx(const std::vector<double> &c, const CxVal &z)
     return r;
 }
 
+// 155包 前置声明：DK 出根后的牛顿抛光（实现见下）
+static void PolishRoots(const std::vector<double> &c, std::vector<CxVal> &roots);
+
 // 实系数多项式全部复根：Durand-Kerner 同时迭代（种子 (0.4+0.9i)^i，
-// 400 轮，步长 1e-14 收敛）。多重根收敛线性、精度弱化（记录口径）
+// 400 轮，步长 1e-14 收敛）。多重根收敛线性、精度弱化——155包出根后
+// 统一走牛顿抛光收口
 static bool PolyRootsDK(const std::vector<double> &c, std::vector<CxVal> &roots)
 {
     const int d = (int)c.size() - 1;
@@ -3390,7 +3394,165 @@ static bool PolyRootsDK(const std::vector<double> &c, std::vector<CxVal> &roots)
         if (maxDelta < 1e-14) break;
     }
     roots = z;
+    PolishRoots(c, roots);
     return true;
+}
+
+// 155包 复根牛顿抛光：DK 在多重根处收敛线性、根位散布。k 重根邻域
+// |f|=O(|δ|^k)，双精度 Horner 舍入噪声（O(eps)·|系数|·|z|^d，量级
+// 1e-14）在 δ≲1e-5 时已淹没真值——残差比较与牛顿方向全成噪声比拼
+// （这正是 DK 散布 1e-5 收不动的原因）。故抛光阶段求值升级为
+// double-double（Dekker twoProd，~32 位有效数字），牛顿方向与残差
+// 排名重新有效。每根跑 m 重根修正牛顿（r←r−m·f/f′，候选 m=1..4 各
+// 一通道跑满 20 步），终点按残差排名取严格优于原根者；单步/累计位移
+// 护栏（>dispCap 判跨根跳变弃用）防误迁移。简单根残差本已机器精度级，
+// 不采纳即不回退；多重根 m 通道两三步落到根心（δ→1e-10 级）
+struct DD { double hi, lo; };
+
+static const double DDSPLIT = 134217729.0;   // 2^27+1
+
+static DD ddTwoSum(double a, double b)
+{
+    const double s = a + b;
+    const double bb = s - a;
+    return DD{s, (a - (s - bb)) + (b - bb)};
+}
+
+static DD ddQuickTwoSum(double a, double b)
+{
+    const double s = a + b;
+    return DD{s, b - (s - a)};
+}
+
+static DD ddTwoProd(double a, double b)
+{
+    const double p = a * b;
+    const double t = DDSPLIT * a;
+    const double ah = t - (t - a);
+    const double al = a - ah;
+    const double u = DDSPLIT * b;
+    const double bh = u - (u - b);
+    const double bl = b - bh;
+    const double err = ((ah * bh - p) + ah * bl + al * bh) + al * bl;
+    return ddQuickTwoSum(p, err);
+}
+
+static DD ddAddDD(DD a, DD b)
+{
+    DD s = ddTwoSum(a.hi, b.hi);
+    DD t = ddTwoSum(a.lo, b.lo);
+    s.lo += t.hi;
+    s = ddQuickTwoSum(s.hi, s.lo);
+    s.lo += t.lo;
+    return ddQuickTwoSum(s.hi, s.lo);
+}
+
+static DD ddSubDD(DD a, DD b)
+{
+    return ddAddDD(a, DD{-b.hi, -b.lo});
+}
+
+static DD ddMulDD(DD a, DD b)
+{
+    DD p = ddTwoProd(a.hi, b.hi);
+    p.lo += a.hi * b.lo + a.lo * b.hi;
+    return ddQuickTwoSum(p.hi, p.lo);
+}
+
+static DD ddMulD(DD a, double b)
+{
+    DD p = ddTwoProd(a.hi, b);
+    p.lo += a.lo * b;
+    return ddQuickTwoSum(p.hi, p.lo);
+}
+
+static DD ddAddD(DD a, double b)
+{
+    DD s = ddTwoSum(a.hi, b);
+    s.lo += a.lo;
+    return ddQuickTwoSum(s.hi, s.lo);
+}
+
+static DD ddDivDD(DD a, DD b)
+{
+    const double q1 = a.hi / b.hi;
+    DD r = ddSubDD(a, ddMulD(b, q1));
+    const double q2 = r.hi / b.hi;
+    r = ddSubDD(r, ddMulD(b, q2));
+    const double q3 = r.hi / b.hi;
+    return ddAddD(ddAddD(DD{q1, 0.0}, q2), q3);
+}
+
+// 复 DD（re/im 各一对）
+struct CxDD { DD re, im; };
+
+// 复多项式 DD Horner（升幂系数，im 系数恒 0）
+static CxDD PolyEvalCxDD(const std::vector<DD> &c, const CxDD &z)
+{
+    CxDD r{c.back(), DD{0.0, 0.0}};
+    for (int i = (int)c.size() - 2; i >= 0; --i) {
+        const DD ac = ddMulDD(r.re, z.re);
+        const DD bd = ddMulDD(r.im, z.im);
+        const DD ad = ddMulDD(r.re, z.im);
+        const DD bc = ddMulDD(r.im, z.re);
+        r.re = ddAddDD(ddSubDD(ac, bd), c[i]);
+        r.im = ddAddDD(ad, bc);
+    }
+    return r;
+}
+
+static void PolishRoots(const std::vector<double> &c, std::vector<CxVal> &roots)
+{
+    const int d = (int)c.size() - 1;
+    if (d < 1) return;
+    std::vector<DD> cd, dcd;
+    cd.reserve(c.size());
+    for (double v : c) cd.push_back(DD{v, 0.0});
+    for (int i = 1; i <= d; ++i) dcd.push_back(DD{c[i] * (double)i, 0.0});
+    for (auto &r0 : roots) {
+        double bestRes;
+        {
+            const CxDD f0 = PolyEvalCxDD(cd, CxDD{DD{r0.re, 0.0},
+                                                  DD{r0.im, 0.0}});
+            bestRes = f0.re.hi * f0.re.hi + f0.im.hi * f0.im.hi;
+        }
+        CxVal best = r0;
+        const double dispCap = 1e-3 * (1.0 + std::fabs(r0.re)
+                                          + std::fabs(r0.im));
+        for (int m = 1; m <= 4 && m <= d; ++m) {
+            CxDD z{DD{r0.re, 0.0}, DD{r0.im, 0.0}};
+            for (int it = 0; it < 20; ++it) {
+                const CxDD f = PolyEvalCxDD(cd, z);
+                const CxDD fp = PolyEvalCxDD(dcd, z);
+                const DD den = ddAddDD(ddMulDD(fp.re, fp.re),
+                                       ddMulDD(fp.im, fp.im));
+                if (den.hi == 0.0 || !std::isfinite(den.hi)) break;
+                const DD nre = ddAddDD(ddMulDD(f.re, fp.re),
+                                       ddMulDD(f.im, fp.im));
+                const DD nim = ddSubDD(ddMulDD(f.im, fp.re),
+                                       ddMulDD(f.re, fp.im));
+                const DD qr = ddDivDD(nre, den);
+                const DD qi = ddDivDD(nim, den);
+                const double sr = qr.hi * (double)m;
+                const double si = qi.hi * (double)m;
+                if (!std::isfinite(sr) || !std::isfinite(si)) break;
+                if (std::sqrt(sr * sr + si * si) > dispCap) break;
+                z.re = ddSubDD(z.re, ddMulD(qr, (double)m));
+                z.im = ddSubDD(z.im, ddMulD(qi, (double)m));
+            }
+            const double dr = z.re.hi - r0.re;
+            const double di = z.im.hi - r0.im;
+            if (std::sqrt(dr * dr + di * di) > dispCap) continue;
+            const CxDD fz = PolyEvalCxDD(cd, z);
+            const double res = fz.re.hi * fz.re.hi
+                + fz.im.hi * fz.im.hi;
+            if (res < bestRes) {
+                bestRes = res;
+                best = CxVal{z.re.hi, z.im.hi};
+            }
+        }
+        r0 = best;
+    }
 }
 
 // f → 实系数（最小拟合次数）；非多项式/零函数返回 false
