@@ -1691,6 +1691,13 @@ bool Kernel::inputImpl(const std::string &srcRaw)
     if (hasAssign && name.size() > 3 && name.compare(name.size() - 3, 3, "(x)") == 0) {
         name.resize(name.size() - 3);
     }
+    // 156包 复函数形式左部 f(z)=：剥 "(z)" 置 cxForm（占用检查用裸名，
+    // 定义分支据此走复函数路径）
+    bool cxForm = false;
+    if (hasAssign && name.size() > 3 && name.compare(name.size() - 3, 3, "(z)") == 0) {
+        name.resize(name.size() - 3);
+        cxForm = true;
+    }
     // ans 是求值历史保留名（上游 同款），禁止占用为标签
     if (hasAssign && name == "ans") {
         lastError = "ans 是保留名（上一答案），请换一个标签";
@@ -2382,8 +2389,160 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                 // h(x)=zz+1 混入）时置 made 为空回落旧流程，保持原错误文案
                 // 1.0.8.2 f(x,y)=k / z=k 常数式不再落数值（GGB 3D 口径为
                 // 平面）：surfaceForm/z 形式跳过数值分支，交曲面入口定型
+                // 156包 复函数应用：h=f(z1) / h=f(2+i)——rhs 整体为
+                // 「复函数名(实参)」形态且名命中复函数对象时建依随复数点
+                //（实参内 i/复数点/数值引用进依赖随动；复函数重定义级联）。
+                // 其余形态落回数值赋值路径。cxForm（f(z)= 定义）不进本钩子
+                {
+                    std::string s;
+                    s.reserve(norm.size());
+                    for (char cch : norm) {
+                        if (!isspace((unsigned char)cch)) s.push_back(cch);
+                    }
+                    const size_t pp = s.find('(');
+                    if (pp != std::string::npos && pp > 0 && !cxForm
+                        && s.back() == ')') {
+                        bool nmOk = true;
+                        for (size_t ci = 0; ci < pp; ++ci) {
+                            const char cc = s[ci];
+                            if (!isalnum((unsigned char)cc) && cc != '_') {
+                                nmOk = false;
+                                break;
+                            }
+                        }
+                        GeoFunction *cf = nmOk
+                            ? dynamic_cast<GeoFunction *>(
+                                  lookup(s.substr(0, pp)))
+                            : nullptr;
+                        if (cf != nullptr && cf->isCx && cf->definable()) {
+                            const std::string argS = s.substr(
+                                pp + 1, s.size() - pp - 2);
+                            Expr ax;
+                            std::string aerr;
+                            if (!ax.parse(argS, aerr, std::string(), true)) {
+                                lastError = aerr;
+                                return false;
+                            }
+                            std::vector<std::pair<std::string, GeoNumeric *>>
+                                adeps;
+                            std::vector<std::pair<std::string, GeoPoint *>>
+                                acdeps;
+                            bool aBad = false;
+                            std::string badNm;
+                            for (const std::string &rn : ax.refs()) {
+                                if (rn == "i") continue;
+                                GeoElement *ge = lookup(rn);
+                                GeoNumeric *dn =
+                                    dynamic_cast<GeoNumeric *>(ge);
+                                GeoPoint *gp = dynamic_cast<GeoPoint *>(ge);
+                                if (dn != nullptr) {
+                                    adeps.emplace_back(rn, dn);
+                                } else if (gp != nullptr && gp->isComplex) {
+                                    acdeps.emplace_back(rn, gp);
+                                } else {
+                                    aBad = true;
+                                    badNm = rn;
+                                    break;
+                                }
+                            }
+                            if (aBad) {
+                                lastError = "复函数实参须为数值或复数（点）: "
+                                    + badNm;
+                                return false;
+                            }
+                            auto aRes = [&adeps, &acdeps](
+                                            const std::string &nm,
+                                            CxVal &o) -> bool {
+                                if (nm == "i") {
+                                    o = CxVal{0.0, 1.0};
+                                    return true;
+                                }
+                                for (const auto &d : acdeps) {
+                                    if (d.first == nm) {
+                                        o = CxVal{d.second->x, d.second->y};
+                                        return true;
+                                    }
+                                }
+                                for (const auto &d : adeps) {
+                                    if (d.first == nm) {
+                                        o = CxVal{d.second->value, 0.0};
+                                        return true;
+                                    }
+                                }
+                                return false;
+                            };
+                            CxVal av;
+                            if (!ax.evalCx(aRes, av) || !std::isfinite(av.re)
+                                || !std::isfinite(av.im)) {
+                                lastError = "复函数实参暂不支持该写法";
+                                return false;
+                            }
+                            CxVal fv;
+                            if (!cf->evalCxAt(av, fv)) {
+                                lastError = "复函数求值未成功（体内含不支持写法）";
+                                return false;
+                            }
+                            auto hp = std::make_unique<GeoPoint>();
+                            hp->isComplex = true;
+                            hp->pointSize = 4;
+                            hp->x = fv.re;
+                            hp->y = fv.im;
+                            hp->src = name.empty() ? norm : name + "=" + norm;
+                            if (!adeps.empty() || !acdeps.empty()) {
+                                hp->isFree = false;
+                                Expr astA = ax;
+                                GeoFunction *fnC = cf;
+                                auto depsA = adeps;
+                                auto cdepsA = acdeps;
+                                hp->calc = [astA, fnC, depsA, cdepsA](
+                                               GeoPoint *q) {
+                                    auto res2 = [&depsA, &cdepsA](
+                                                    const std::string &nm,
+                                                    CxVal &o) -> bool {
+                                        if (nm == "i") {
+                                            o = CxVal{0.0, 1.0};
+                                            return true;
+                                        }
+                                        for (const auto &d : cdepsA) {
+                                            if (d.first == nm) {
+                                                o = CxVal{d.second->x,
+                                                          d.second->y};
+                                                return true;
+                                            }
+                                        }
+                                        for (const auto &d : depsA) {
+                                            if (d.first == nm) {
+                                                o = CxVal{d.second->value, 0.0};
+                                                return true;
+                                            }
+                                        }
+                                        return false;
+                                    };
+                                    CxVal a2;
+                                    CxVal v2;
+                                    if (astA.evalCx(res2, a2)
+                                        && fnC->evalCxAt(a2, v2)
+                                        && std::isfinite(v2.re)
+                                        && std::isfinite(v2.im)) {
+                                        q->x = v2.re;
+                                        q->y = v2.im;
+                                    }
+                                };
+                                for (const auto &d : acdeps) {
+                                    hp->inputs.push_back(d.second);
+                                }
+                                for (const auto &d : adeps) {
+                                    hp->inputs.push_back(d.second);
+                                }
+                                hp->inputs.push_back(cf);
+                            }
+                            made = std::move(hp);
+                        }
+                    }
+                }
                 Expr t;
-                if (t.parse(norm, err, std::string(), true) && !t.containsX()
+                if (!made && !cxForm && t.parse(norm, err, std::string(), true)
+                    && !t.containsX()
                     && !t.containsY() && !surfaceForm && name != "z") {
                     // 148包 复数通道触发判定：rhs 含 i 字面量或复数点引用
                     // → 走复域建 isComplex 点（下方分支）。标签优先于单位：
@@ -2610,6 +2769,33 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                     norm = src.substr(px + 4);
                 }
             }
+        }
+        // 156包 复函数定义 f(z)=…：cxForm 由左部剥 "(z)" 置位。body 以
+        // param=z + refs 模式解析（i 落 Ref），定义期校验体内仅 z/数/i、
+        // 不混 x/y。复函数不绘图不走实通道绘图；ComplexRoots(f) 经实
+        // 通道采样（实系数时成立），调用 h=f(z1) 走上方应用分支
+        if (!made && cxForm) {
+            Expr cb;
+            if (!cb.parse(norm, err, "z", true)) {
+                lastError = err;
+                return false;
+            }
+            if (cb.containsX() || cb.containsY()) {
+                lastError = "复函数仅以 z 为自变量（x/y 不可混入）";
+                return false;
+            }
+            for (const std::string &rn : cb.refs()) {
+                if (rn != "i") {
+                    lastError = "复函数体内暂不支持对象引用（仅 z 与数）: "
+                        + rn;
+                    return false;
+                }
+            }
+            auto cf2 = std::make_unique<GeoFunction>();
+            cf2->isCx = true;
+            cf2->src = norm;
+            cf2->body = std::move(cb);
+            made = std::move(cf2);
         }
         // 1.0.8.2 隐式线性平面方程（GGB 3D 口径）：x+y+z=5 等无标签方程。
         // 顶层 '='（引号/括号外）且左部不含 '('（不劫持 f(x)= / u(x)= 类），
@@ -16264,6 +16450,7 @@ static void CopyGeoState(GeoElement *dst, GeoElement *src)
             d->src = s->src;
             d->body = s->body;
             d->alt = s->alt;
+            d->isCx = s->isCx;   // 156包 复函数标记随迁
             d->ineqOp = s->ineqOp;
             d->ineqVertical = s->ineqVertical;
             d->ineqX = s->ineqX;
@@ -19247,7 +19434,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
         case GeoType::Function: {
             GeoFunction *f = static_cast<GeoFunction *>(g.get());
             if (f->ineqOp || f->ineqCombo()) appendInequalityPlot(*f, out);
-            else appendFunctionPlot(*f, out, f->selected);
+            else if (!f->isCx) appendFunctionPlot(*f, out, f->selected);   // 156包 复函数不绘图
             break;
         }
         case GeoType::Angle: {
@@ -22718,8 +22905,10 @@ std::string Kernel::getXml() const
                 // 命令产物（Derivative 等）：按命令重放重建（src 对输入解析不可回放）
                 AppendCommandXml(o, *f);
             } else {
+                // 156包 复函数按 f(z)= 原文重放（载入命中复函数定义分支）
                 o += "<expression label=\"" + XmlEsc(f->label) + "\" exp=\""
-                   + XmlEsc(f->label + "(x)=" + f->src) + "\"/>\n";
+                   + XmlEsc(f->label + (f->isCx ? "(z)=" : "(x)=") + f->src)
+                   + "\"/>\n";
             }
             AppendElementHead(o, *f, "function",
                 (f->ineqOp || f->ineqCombo()) ? f->fillAlpha : 0.0);

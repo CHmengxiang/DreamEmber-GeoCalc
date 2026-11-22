@@ -409,13 +409,32 @@ std::string GeoCurve3::definitionText() const
 std::string GeoFunction::valueText() const
 {
     if (ineqOp || !ineqChain.empty() || !ineqDNF.empty()) return src;   // 不等式：值列/定义列即原文（可回填重定义）
+    if (isCx) return label + "(z) = " + src;   // 156包 复函数
     return label + "(x) = " + src;
 }
 
 std::string GeoFunction::definitionText() const
 {
     if (ineqOp || !ineqChain.empty() || !ineqDNF.empty()) return src;
+    if (isCx) return label + "(z) = " + src;   // 156包 复函数（可回填重定义）
     return label + "(x) = " + src;
+}
+
+// 156包 复函数复域求值：z 形参绑定实参；体内 i 在求值期固定 (0,1)
+//（定义期放行的唯一引用）。求值失败或非有限返回 false
+bool GeoFunction::evalCxAt(const CxVal &arg, CxVal &out) const
+{
+    if (!isCx || body.empty()) return false;
+    // 体内 i 为定义期放行的唯一引用，求值期固定 (0,1)
+    auto res = [](const std::string &nm, CxVal &o) {
+        if (nm == "i") { o = CxVal{0.0, 1.0}; return true; }
+        return false;
+    };
+    CxVal v;
+    if (!body.evalCxP(res, arg, v)) return false;
+    if (!std::isfinite(v.re) || !std::isfinite(v.im)) return false;
+    out = v;
+    return true;
 }
 
 // ---- GeoRay ----

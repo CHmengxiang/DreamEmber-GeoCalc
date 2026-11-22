@@ -1290,7 +1290,8 @@ bool Expr::evalVal(const ValResolve &resolve, ExprVal &out) const
 // 函数调用/比较逻辑/If/含 x/y/Param/后缀算符一律 false（调用方给专用
 // 文案）。一元负沿用解析器 0−X 树形自然命中。^ 整数指数（|k|≤32）走
 // 复乘平方快速幂（精确），其余极坐标主值；除零口径与 DivC 一致 (0,0)
-static bool EvalNodeCx(const Expr::Node *n, const CxResolve *resolve, CxVal &out)
+static bool EvalNodeCx(const Expr::Node *n, const CxResolve *resolve,
+                       CxVal &out, const CxVal *pv = nullptr)
 {
     switch (n->kind) {
     case Expr::Node::Kind::Num:
@@ -1299,8 +1300,12 @@ static bool EvalNodeCx(const Expr::Node *n, const CxResolve *resolve, CxVal &out
         return true;
     case Expr::Node::Kind::Var:
     case Expr::Node::Kind::YVar:
-    case Expr::Node::Kind::Param:
         return false;
+    case Expr::Node::Kind::Param:
+        // 156包 复函数体：Param（z 形参）绑定实参值；无绑定时维持旧口径
+        if (pv == nullptr) return false;
+        out = *pv;
+        return true;
     case Expr::Node::Kind::Ref:
         return resolve != nullptr && (*resolve)(n->name, out);
     case Expr::Node::Kind::Call:
@@ -1311,9 +1316,9 @@ static bool EvalNodeCx(const Expr::Node *n, const CxResolve *resolve, CxVal &out
             return false;
         }
         CxVal a;
-        if (!EvalNodeCx(n->l.get(), resolve, a)) return false;
+        if (!EvalNodeCx(n->l.get(), resolve, a, pv)) return false;
         CxVal b;
-        if (!EvalNodeCx(n->r.get(), resolve, b)) return false;
+        if (!EvalNodeCx(n->r.get(), resolve, b, pv)) return false;
         switch (n->op) {
         case '+':
             out.re = a.re + b.re;
@@ -1384,6 +1389,15 @@ bool Expr::evalCx(const CxResolve &resolve, CxVal &out) const
     if (!root_) return false;
     CxVal v;
     if (!EvalNodeCx(root_.get(), &resolve, v)) return false;
+    out = v;
+    return true;
+}
+
+bool Expr::evalCxP(const CxResolve &resolve, const CxVal &pv, CxVal &out) const
+{
+    if (!root_) return false;
+    CxVal v;
+    if (!EvalNodeCx(root_.get(), &resolve, v, &pv)) return false;
     out = v;
     return true;
 }

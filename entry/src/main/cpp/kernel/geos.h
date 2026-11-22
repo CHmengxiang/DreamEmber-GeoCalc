@@ -273,8 +273,22 @@ public:
     // 持久化复用 上游 <objColor alpha>（仅不等式元素写入；载入 alpha=0 视为旧版占位回默认）
     double fillAlpha = 0.10;
 
-    double evalAt(double x) const { return alt ? alt(x) : body.eval(x); }
+    double evalAt(double x) const
+    {
+        if (alt) return alt(x);
+        // 156包 复函数：body 以 param=z 解析，实采样须把 z 绑到 x
+        //（Expr::eval(x) 的 param 槽是 0.0，直接用会恒得 f(0)）
+        return isCx ? body.eval(x, x) : body.eval(x);
+    }
     bool definable() const { return alt != nullptr || !body.empty(); }
+    // 156包 复函数标记：f(z)=… 定义（body 以 param=z 解析）。不绘图、
+    // 不走实通道绘图/拾取；evalAt 经 Param→x 槽位仍可实采样（实系数
+    // 多项式供 ComplexRoots 采样），复域求值走 evalCxAt
+    bool isCx = false;
+    // 复域求值：体内 z 绑定 arg（i 落 Ref 由解析期放行、求值期固定
+    // (0,1)；其余引用不支持——定义期已拒）。失败（不支持写法/非有限）
+    // 返回 false
+    bool evalCxAt(const CxVal &arg, CxVal &out) const;
     std::string valueText() const override;
     std::string definitionText() const override;
 };

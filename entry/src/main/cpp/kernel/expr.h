@@ -64,6 +64,9 @@ public:
     // 比较/If/含 x/y/Param 一律 false（调用方给专用文案）。^ 整数指数走
     // 复乘平方快速幂（精确），其余极坐标主值；除零口径与 DivC 一致 (0,0)
     bool evalCx(const CxResolve &resolve, CxVal &out) const;
+    // 156包 复函数求值：同 evalCx 但 Param 节点取 pv（f(z)=… 体内 z
+    // 形参绑定实参值）
+    bool evalCxP(const CxResolve &resolve, const CxVal &pv, CxVal &out) const;
     bool containsX() const { return hasX_; }
     bool containsY() const { return hasY_; }
     bool empty() const { return !root_; }
