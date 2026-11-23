@@ -219,6 +219,56 @@ struct GifProgressDialog {
   }
 }
 
+// 1.5.2 导出三选弹窗：替代 ActionSheet——华为云测（Mate60 Pro / API24）
+// ①「保存图片点击后无反应」：ActionSheet 点击回调与系统安全确认弹窗
+// （UIExtension 宿主内嵌）启动冲突，sheet 收起吞掉弹窗；②行距过密。
+// 自绘：按钮描边圆角、行距 20、文字居中；点击先收本弹窗、延迟 200ms
+// 再派发导出（等弹窗完全关闭再启系统安全弹窗）。
+@CustomDialog
+struct ExportDialog {
+  controller?: CustomDialogController
+  onPickGgb: () => void = () => {};
+  onPickPng: () => void = () => {};
+  onPickGif: () => void = () => {};
+
+  @Builder
+  exportButton(label: string, action: () => void) {
+    Button(label)
+      .width('100%')
+      .height(44)
+      .fontSize(16)
+      .fontColor('#1A1A1A')
+      .backgroundColor(Color.White)
+      .borderRadius(10)
+      .border({ width: 1, color: '#DCDCDC' })
+      .onClick(() => {
+        this.controller?.close();
+        setTimeout(action, 200);
+      })
+  }
+
+  build() {
+    Column({ space: 20 }) {
+      Text('导出')
+        .fontSize(18)
+        .fontWeight(FontWeight.Medium)
+      Text('选择导出类型')
+        .fontSize(14)
+      this.exportButton('保存 .ggb 文件', (): void => {
+        this.onPickGgb();
+      })
+      this.exportButton('保存图片', (): void => {
+        this.onPickPng();
+      })
+      this.exportButton('导出动画 GIF', (): void => {
+        this.onPickGif();
+      })
+    }
+    .padding(24)
+    .width(320)
+  }
+}
+
 @Component
 export struct CanvasView {
   @State private inputError: string = '';
@@ -289,6 +339,22 @@ export struct CanvasView {
   private gifDialog: CustomDialogController = new CustomDialogController({
     builder: GifProgressDialog(),
     autoCancel: false,
+    alignment: DialogAlignment.Center
+  });
+  // 1.5.2 导出三选弹窗（替代 ActionSheet，见 ExportDialog 注）
+  private exportDialog: CustomDialogController = new CustomDialogController({
+    builder: ExportDialog({
+      onPickGgb: (): void => {
+        this.onSaveGgbEvt();
+      },
+      onPickPng: (): void => {
+        this.onExportPngEvt();
+      },
+      onPickGif: (): void => {
+        this.onExportGifEvt();
+      }
+    }),
+    autoCancel: true,
     alignment: DialogAlignment.Center
   });
   @StorageProp('evt.copyGgb') @Watch('onCopyGgbEvt') private copyGgbTick: number = 0;
@@ -1900,35 +1966,13 @@ export struct CanvasView {
     });
   }
 
-  // 1.5.1 导出合并弹窗：ActionSheet 三选项分派既有处理器（PNG 与 GIF
-  // 均走 showAssetsCreationDialog 系统允许确认，零权限口径不变）
+  // 1.5.2 导出合并弹窗：自绘 ExportDialog 三选项分派既有处理器（PNG 与
+  // GIF 均走 showAssetsCreationDialog 系统允许确认，零权限口径不变）。
+  // 前身 ActionSheet 两桩云测问题：①「保存图片」点击即启系统安全弹窗，
+  // 与 sheet 收起动画冲突被吞（GIF 路径有进度弹窗垫着未复现）——现点击
+  // 先收本弹窗、200ms 后再派发；②行距过密——自绘按钮间距 20vp。
   private onExportMenuEvt(): void {
-    ActionSheet.show({
-      title: '导出',
-      message: '选择导出类型',
-      sheets: [
-        {
-          title: '保存 .ggb 文件',
-          action: (): void => {
-            this.onSaveGgbEvt();
-          }
-        },
-        {
-          title: '保存图片',
-          action: (): void => {
-            this.onExportPngEvt();
-          }
-        },
-        {
-          title: '导出动画 GIF',
-          action: (): void => {
-            this.onExportGifEvt();
-          }
-        }
-      ],
-      cancel: (): void => {
-      }
-    });
+    this.exportDialog.open();
   }
 
   // 158包 插入图片：图库选择（零权限 PhotoViewPicker）→ 读字节 → 解码
@@ -2177,7 +2221,17 @@ export struct CanvasView {
       ];
       const created = await ph.showAssetsCreationDialog(
         [fileUri.getUriFromPath(path)], infos);
+      // 1.5.2 云测修正：弹窗只建图库资产并授权目标 URI，内容须应用自行
+      // 写入返回的 URI——此前漏写，资产 0 字节，真机图库不显示空文件
+      // （「提示已存图库但图库中未找到」根因）
       if (created.length > 0) {
+        const dst = fs.openSync(created[0],
+          fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+        try {
+          fs.writeSync(dst.fd, gif);
+        } finally {
+          fs.closeSync(dst);
+        }
         this.alertBox('导出成功', title + '.gif 已存入图库（' + N + ' 帧）');
       }
     } catch (e) {
@@ -2222,7 +2276,25 @@ export struct CanvasView {
       ];
       const created = await ph.showAssetsCreationDialog(
         [fileUri.getUriFromPath(path)], infos);
+      // 1.5.2 云测修正：同 GIF 路径——弹窗只建资产授权 URI，内容须应用
+      // 写入返回的 URI；此前漏写致资产 0 字节（图库无图）。缓存文件已有
+      // 成品 PNG，直接字节搬运（packer 已 release，不重编码）
       if (created.length > 0) {
+        const src = fs.openSync(path, fs.OpenMode.READ_ONLY);
+        let buf: ArrayBuffer;
+        try {
+          buf = new ArrayBuffer(fs.statSync(src.fd).size);
+          fs.readSync(src.fd, buf);
+        } finally {
+          fs.closeSync(src);
+        }
+        const dst = fs.openSync(created[0],
+          fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+        try {
+          fs.writeSync(dst.fd, buf);
+        } finally {
+          fs.closeSync(dst);
+        }
         this.alertBox('导出成功', title + ' 已存入图库');
       }
     } catch (e) {
