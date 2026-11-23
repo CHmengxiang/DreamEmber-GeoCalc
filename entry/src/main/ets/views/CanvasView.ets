@@ -2281,6 +2281,11 @@ export struct CanvasView {
         { title: title, fileNameExtension: 'png',
           photoType: photoAccessHelper.PhotoType.IMAGE }
       ];
+      // 1.5.2 真机第三轮：Mate60 Pro 上两次尝试（ActionSheet 即启 /
+      // ExportDialog+200ms）系统框均静默不起（无异常无提示=resolve 空数
+      // 组走取消分支），而 GIF 路径（帧捕获 ~3s 后启框）两次全通——判定
+      // 自定义弹窗关闭后过快启动安全弹窗会被静默吞，加缓冲再启
+      await this.sleepMs(800);
       const created = await ph.showAssetsCreationDialog(
         [fileUri.getUriFromPath(path)], infos);
       // 1.5.2 云测修正：弹窗只建资产授权 URI，内容须应用写入返回的 URI
@@ -2293,6 +2298,9 @@ export struct CanvasView {
           fs.closeSync(dst);
         }
         this.alertBox('导出成功', title + ' 已存入图库');
+      } else {
+        // 空数组=未启框/未授权——给反馈不再无声（用户拒存也归此提示）
+        this.alertBox('未保存', '保存图片未完成——未获保存授权或已取消');
       }
     } catch (e) {
       // 用户取消对话框返回空数组不报错；其余失败提示带错误信息（真机
