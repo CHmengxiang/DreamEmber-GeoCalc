@@ -269,39 +269,6 @@ struct ExportDialog {
   }
 }
 
-// 1.5.2 真机第五轮：Mate60 Pro 上 showAssetsCreationDialog 对 PNG 挂起
-// （PNGDBG 实锤 step5 后无返回；GIF 同 API 却通——不再死磕）。PNG 改道
-// SaveButton 安全组件口径：点击即临时授权（140包 PNG 初版同款机制），
-// createAsset 直建图库资产写入内容，无系统确认框。SaveButton 须由真实
-// 点击触发授权，故挂在专用确认弹窗里。
-@CustomDialog
-struct PngSaveDialog {
-  controller?: CustomDialogController
-  onAuthorized: () => void = () => {};
-
-  build() {
-    Column({ space: 20 }) {
-      Text('保存图片')
-        .fontSize(18)
-        .fontWeight(FontWeight.Medium)
-      Text('点击下方按钮授权保存当前画布到图库')
-        .fontSize(14)
-      SaveButton({ icon: SaveIconStyle.FULL_FILLED, text: SaveDescription.SAVE,
-        buttonType: ButtonType.Capsule })
-        .onClick((_: ClickEvent, result: SaveButtonOnClickResult): void => {
-          if (result === SaveButtonOnClickResult.SUCCESS) {
-            this.controller?.close();
-            this.onAuthorized();
-          } else {
-            this.controller?.close();
-          }
-        })
-    }
-    .padding(24)
-    .width(320)
-  }
-}
-
 @Component
 export struct CanvasView {
   @State private inputError: string = '';
@@ -381,21 +348,10 @@ export struct CanvasView {
         this.onSaveGgbEvt();
       },
       onPickPng: (): void => {
-        this.pngSaveDialog.open();
+        this.onExportPngEvt();
       },
       onPickGif: (): void => {
         this.onExportGifEvt();
-      }
-    }),
-    autoCancel: true,
-    alignment: DialogAlignment.Center
-  });
-  // 1.5.2 PNG 保存授权弹窗（SaveButton 安全组件，见 PngSaveDialog 注）：
-  // 授权成功走 createAsset 直写口径
-  private pngSaveDialog: CustomDialogController = new CustomDialogController({
-    builder: PngSaveDialog({
-      onAuthorized: (): void => {
-        this.onExportPngEvt();
       }
     }),
     autoCancel: true,
@@ -2287,10 +2243,11 @@ export struct CanvasView {
   }
 
   // 1.2.0.12 导出 PNG：componentSnapshot 截当前活动画布（2D/3D）→ PNG
-  // 落图库（零权限）。1.5.2 真机五轮改道：showAssetsCreationDialog 对
-  // PNG 在 Mate60 Pro 挂起（PNGDBG 实锤），改 SaveButton 临时授权 +
-  // createAsset 直建资产写入（无系统确认框；授权弹窗 PngSaveDialog
-  // 由 ExportDialog「保存图片」项打开）
+  // 字节流 → 缓存 → showAssetsCreationDialog 用户确认落图库（与 GIF 同
+  // 口径统一）。1.5.2 真机七轮回切：五轮曾疑系统框对 PNG 挂起改道
+  // SaveButton+createAsset，六轮实为 title 带后缀被拒（Title is
+  // invalid）——系统框路径挂起疑同因（title 非法静默挂起不报错），回切
+  // GIF 同款路径 + title 去后缀统一验证（PNGDBG 埋点保留）
   private async onExportPngEvt(): Promise<void> {
     const is3d = (AppStorage.get<boolean>('view3dOn') ?? false);
     const compId = is3d ? 'geo3dView' : 'geo2dStage';
@@ -2309,28 +2266,45 @@ export struct CanvasView {
         this.alertBox('导出失败', '画布编码未成功，请重试');
         return;
       }
+      const path = ctx.cacheDir + '/dreamember_export.png';
+      const file = fs.openSync(path,
+        fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
+      try {
+        fs.writeSync(file.fd, png);
+      } finally {
+        fs.closeSync(file);
+      }
+      hilog.info(0x0000, 'PNGDBG', 'step4 cache written');
+      const ph = photoAccessHelper.getPhotoAccessHelper(ctx);
       const now = new Date();
       const pad = (v: number): string =>
         (v < 10 ? '0' : '') + v.toString();
-      // createAsset title 不带扩展名（extension 单独传参；title 含
-      // '.png' 点号被「Title is invalid」拒——GIF 路径 title 本就无
-      // 后缀故通，图库展示时系统自动补扩展名）
+      // title 不带扩展名（与 GIF 路径同口径；带 .png 点号会被
+      // 「Title is invalid」拒，图库展示系统自动补扩展名）
       const title = '梦烬几何_' + now.getFullYear() + pad(now.getMonth() + 1)
         + pad(now.getDate()) + '_' + pad(now.getHours()) + pad(now.getMinutes());
-      // SaveButton 点击授权窗口内 createAsset 直建图库资产（返回可写 URI）
-      const ph = photoAccessHelper.getPhotoAccessHelper(ctx);
-      hilog.info(0x0000, 'PNGDBG', 'step4 createAsset begin');
-      const uri = await ph.createAsset(
-        photoAccessHelper.PhotoType.IMAGE, 'png', { title: title });
-      hilog.info(0x0000, 'PNGDBG', 'step5 asset created');
-      const dst = fs.openSync(uri,
-        fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
-      try {
-        fs.writeSync(dst.fd, png);
-      } finally {
-        fs.closeSync(dst);
+      const infos: Array<photoAccessHelper.PhotoCreationConfig> = [
+        { title: title, fileNameExtension: 'png',
+          photoType: photoAccessHelper.PhotoType.IMAGE }
+      ];
+      hilog.info(0x0000, 'PNGDBG', 'step5 dialog launching');
+      const created = await ph.showAssetsCreationDialog(
+        [fileUri.getUriFromPath(path)], infos);
+      hilog.info(0x0000, 'PNGDBG', 'step6 dialog returned n=%d',
+        created.length);
+      // 弹窗只建资产授权 URI，内容须应用写入返回的 URI（§116 根因）
+      if (created.length > 0) {
+        const dst = fs.openSync(created[0],
+          fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
+        try {
+          fs.writeSync(dst.fd, png);
+        } finally {
+          fs.closeSync(dst);
+        }
+        this.alertBox('导出成功', title + ' 已存入图库');
+      } else {
+        this.alertBox('未保存', '保存图片未完成——未获保存授权或已取消');
       }
-      this.alertBox('导出成功', title + ' 已存入图库');
     } catch (e) {
       hilog.error(0x0000, 'PNGDBG',
         'export png error: %{public}s', (e as Error)?.message ?? String(e));
