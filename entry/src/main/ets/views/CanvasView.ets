@@ -2243,8 +2243,10 @@ export struct CanvasView {
   }
 
   // 1.2.0.12 导出 PNG：componentSnapshot 截当前活动画布（2D/3D）→ PNG 落
-  // 缓存 → showAssetsCreationDialog 用户确认落图库（saveButton 安全组件
-  // 已在菜单点击时授权，全程零权限申请）
+  // 缓存 → showAssetsCreationDialog 用户确认落图库（全程零权限申请）
+  // 1.5.2 真机反馈第二轮：packToFile 路径在 Mate60 Pro 上 PNG 连系统安全
+  // 弹窗都不起（疑 packToFile 失败留 0 字节缓存、弹窗对无效图启动失败）——
+  // 改 pack(snap) 字节流自写缓存，与 GIF 已验证路径同构；报错带具体信息
   private async onExportPngEvt(): Promise<void> {
     const is3d = (AppStorage.get<boolean>('view3dOn') ?? false);
     const compId = is3d ? 'geo3dView' : 'geo2dStage';
@@ -2252,14 +2254,19 @@ export struct CanvasView {
       const snap = await this.getUIContext().getComponentSnapshot()
         .get(compId);
       const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
+      const packer = image.createImagePacker();
+      const png: ArrayBuffer = await packer.packing(snap,
+        { format: 'image/png', quality: 100 });
+      packer.release();
+      if (png.byteLength <= 0) {
+        this.alertBox('导出失败', '画布编码未成功，请重试');
+        return;
+      }
       const path = ctx.cacheDir + '/dreamember_export.png';
       const file = fs.openSync(path,
         fs.OpenMode.READ_WRITE | fs.OpenMode.CREATE | fs.OpenMode.TRUNC);
       try {
-        const packer = image.createImagePacker();
-        await packer.packToFile(snap, file.fd,
-          { format: 'image/png', quality: 100 });
-        packer.release();
+        fs.writeSync(file.fd, png);
       } finally {
         fs.closeSync(file);
       }
@@ -2276,30 +2283,22 @@ export struct CanvasView {
       ];
       const created = await ph.showAssetsCreationDialog(
         [fileUri.getUriFromPath(path)], infos);
-      // 1.5.2 云测修正：同 GIF 路径——弹窗只建资产授权 URI，内容须应用
-      // 写入返回的 URI；此前漏写致资产 0 字节（图库无图）。缓存文件已有
-      // 成品 PNG，直接字节搬运（packer 已 release，不重编码）
+      // 1.5.2 云测修正：弹窗只建资产授权 URI，内容须应用写入返回的 URI
       if (created.length > 0) {
-        const src = fs.openSync(path, fs.OpenMode.READ_ONLY);
-        let buf: ArrayBuffer;
-        try {
-          buf = new ArrayBuffer(fs.statSync(src.fd).size);
-          fs.readSync(src.fd, buf);
-        } finally {
-          fs.closeSync(src);
-        }
         const dst = fs.openSync(created[0],
           fs.OpenMode.READ_WRITE | fs.OpenMode.TRUNC);
         try {
-          fs.writeSync(dst.fd, buf);
+          fs.writeSync(dst.fd, png);
         } finally {
           fs.closeSync(dst);
         }
         this.alertBox('导出成功', title + ' 已存入图库');
       }
     } catch (e) {
-      // 用户取消对话框返回空数组不报错；其余失败提示
-      this.alertBox('导出失败', '画布截图未成功，请重试');
+      // 用户取消对话框返回空数组不报错；其余失败提示带错误信息（真机
+      // 排障：上一轮静默 catch 只给固定文案，无法区分编码/弹窗哪步失败）
+      const msg = (e as Error)?.message ?? '';
+      this.alertBox('导出失败', '画布截图未成功，请重试' + (msg !== '' ? '（' + msg + '）' : ''));
     }
   }
 
