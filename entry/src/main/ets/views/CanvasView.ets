@@ -2244,20 +2244,22 @@ export struct CanvasView {
 
   // 1.2.0.12 导出 PNG：componentSnapshot 截当前活动画布（2D/3D）→ PNG 落
   // 缓存 → showAssetsCreationDialog 用户确认落图库（全程零权限申请）
-  // 1.5.2 真机反馈第二轮：packToFile 路径在 Mate60 Pro 上 PNG 连系统安全
-  // 弹窗都不起（疑 packToFile 失败留 0 字节缓存、弹窗对无效图启动失败）——
-  // 改 pack(snap) 字节流自写缓存，与 GIF 已验证路径同构；报错带具体信息
+  // 1.5.2 真机四轮排查：全链 hilog 埋点（tag PNGDBG，真机
+  // `hilog -x | grep PNGDBG` 抓全时间线一锤定音）+ 弹框前用户可见反馈
   private async onExportPngEvt(): Promise<void> {
     const is3d = (AppStorage.get<boolean>('view3dOn') ?? false);
     const compId = is3d ? 'geo3dView' : 'geo2dStage';
     try {
+      hilog.info(0x0000, 'PNGDBG', 'step1 snapshot begin');
       const snap = await this.getUIContext().getComponentSnapshot()
         .get(compId);
+      hilog.info(0x0000, 'PNGDBG', 'step2 snapshot ok');
       const ctx = this.getUIContext().getHostContext() as common.UIAbilityContext;
       const packer = image.createImagePacker();
       const png: ArrayBuffer = await packer.packing(snap,
         { format: 'image/png', quality: 100 });
       packer.release();
+      hilog.info(0x0000, 'PNGDBG', 'step3 packed bytes=%d', png.byteLength);
       if (png.byteLength <= 0) {
         this.alertBox('导出失败', '画布编码未成功，请重试');
         return;
@@ -2270,6 +2272,7 @@ export struct CanvasView {
       } finally {
         fs.closeSync(file);
       }
+      hilog.info(0x0000, 'PNGDBG', 'step4 cache written');
       const ph = photoAccessHelper.getPhotoAccessHelper(ctx);
       const now = new Date();
       const pad = (v: number): string =>
@@ -2281,13 +2284,16 @@ export struct CanvasView {
         { title: title, fileNameExtension: 'png',
           photoType: photoAccessHelper.PhotoType.IMAGE }
       ];
-      // 1.5.2 真机第三轮：Mate60 Pro 上两次尝试（ActionSheet 即启 /
-      // ExportDialog+200ms）系统框均静默不起（无异常无提示=resolve 空数
-      // 组走取消分支），而 GIF 路径（帧捕获 ~3s 后启框）两次全通——判定
-      // 自定义弹窗关闭后过快启动安全弹窗会被静默吞，加缓冲再启
-      await this.sleepMs(800);
+      // 真机第三轮证据：await 弹框永不 resolve 且无异常——系统安全弹窗
+      // 在该设备上启动慢或挂起。弹框前给用户可见提示（框若迟到用户知道
+      // 在等什么），缓冲提至 1200ms
+      this.alertBox('正在保存', '正在调起系统保存框，请稍候……');
+      await this.sleepMs(1200);
+      hilog.info(0x0000, 'PNGDBG', 'step5 dialog launching');
       const created = await ph.showAssetsCreationDialog(
         [fileUri.getUriFromPath(path)], infos);
+      hilog.info(0x0000, 'PNGDBG', 'step6 dialog returned n=%d',
+        created.length);
       // 1.5.2 云测修正：弹窗只建资产授权 URI，内容须应用写入返回的 URI
       if (created.length > 0) {
         const dst = fs.openSync(created[0],
@@ -2303,8 +2309,8 @@ export struct CanvasView {
         this.alertBox('未保存', '保存图片未完成——未获保存授权或已取消');
       }
     } catch (e) {
-      // 用户取消对话框返回空数组不报错；其余失败提示带错误信息（真机
-      // 排障：上一轮静默 catch 只给固定文案，无法区分编码/弹窗哪步失败）
+      hilog.error(0x0000, 'PNGDBG',
+        'export png error: %{public}s', (e as Error)?.message ?? String(e));
       const msg = (e as Error)?.message ?? '';
       this.alertBox('导出失败', '画布截图未成功，请重试' + (msg !== '' ? '（' + msg + '）' : ''));
     }
