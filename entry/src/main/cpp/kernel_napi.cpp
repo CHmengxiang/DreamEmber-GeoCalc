@@ -88,6 +88,8 @@ void AppendCmd(std::string &out, const dreamember::DrawCmd &c)
     case dreamember::DrawOp::TextHalo: op = 'w'; break;
     case dreamember::DrawOp::Arc: op = 'a'; break;
     case dreamember::DrawOp::FillPoly: op = 'y'; break;
+    case dreamember::DrawOp::Image: op = 'g'; break;   // 158包 图片（实机黑线根因：
+                                                       // 漏分支落 'p' 画成线段）
     }
     out.push_back(op);
     out.push_back('|');
@@ -95,7 +97,8 @@ void AppendCmd(std::string &out, const dreamember::DrawCmd &c)
     out.push_back('|');
     out += std::to_string(c.lineWidth);
     out.push_back('|');
-    if (c.op == dreamember::DrawOp::Text || c.op == dreamember::DrawOp::TextHalo) {
+    if (c.op == dreamember::DrawOp::Text || c.op == dreamember::DrawOp::TextHalo
+        || c.op == dreamember::DrawOp::Image) {
         out += c.text;
         out.push_back('|');
     }

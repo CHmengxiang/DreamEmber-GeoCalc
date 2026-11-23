@@ -2000,23 +2000,47 @@ export struct CanvasView {
       }
       const src = image.createImageSource(buf);
       const info = await src.getImageInfo();
-      let pmOpts: image.DecodingOptions = {};
-      if (info.size.width > 2048 || info.size.height > 2048) {
-        const scale = 2048 / Math.max(info.size.width, info.size.height);
-        pmOpts = {
-          desiredSize: {
-            width: Math.round(info.size.width * scale),
-            height: Math.round(info.size.height * scale)
-          }
-        };
+      const dbg1 = `pick src=${info.size.width}x${info.size.height} bytes=${buf.byteLength}`;
+      hilog.info(0x0000, 'IMGDBG', dbg1);
+      // 实机一条线排障：desiredSize 解码（防 HEIC 退化），失败重解不裁剪
+      let pm: image.PixelMap | null = null;
+      let iw = 0;
+      let ih = 0;
+      if (info.size.width > 0 && info.size.height > 0) {
+        const scale = Math.min(1, 2048 / Math.max(info.size.width, info.size.height));
+        const dw = Math.max(1, Math.round(info.size.width * scale));
+        const dh = Math.max(1, Math.round(info.size.height * scale));
+        try {
+          pm = await src.createPixelMap({
+            desiredSize: { width: dw, height: dh }
+          });
+          const di = await pm.getImageInfo();
+          iw = di.size.width;
+          ih = di.size.height;
+        } catch (e1) {
+          hilog.error(0x0000, 'IMGDBG', `desiredSize decode fail: ${(e1 as Error)?.message ?? e1}`);
+        }
       }
-      const pm = await src.createPixelMap(pmOpts);
+      if (pm === null || iw <= 1 || ih <= 1) {
+        // 退化/失败兜底：不裁剪重解（原图即原比例），仍退化按 4:3
+        pm = await src.createPixelMap();
+        const di = await pm.getImageInfo();
+        iw = di.size.width;
+        ih = di.size.height;
+        hilog.info(0x0000, 'IMGDBG', `raw decode ${iw}x${ih}`);
+        if (iw <= 1 || ih <= 1) {
+          iw = 4;
+          ih = 3;
+        }
+      }
+      const dbg2 = `final ratio src=${iw}x${ih}`;
+      hilog.info(0x0000, 'IMGDBG', dbg2);
       const vi = dreamemberKernel.kernelViewInfo().split(',');
       const cx = parseFloat(vi[0]);
       const cy = parseFloat(vi[1]);
       const wWorld = parseFloat(vi[2]);
       const w = Math.max(0.5, wWorld / 3);
-      const h = w * info.size.height / Math.max(1, info.size.width);
+      const h = Math.max(0.1, w * ih / Math.max(1, iw));
       let label = '';
       for (let t2 = 0; t2 < 3 && label === ''; ++t2) {
         const cand = 'img' + this.nextImgNum;
