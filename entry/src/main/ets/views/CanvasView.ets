@@ -2312,9 +2312,11 @@ export struct CanvasView {
       const now = new Date();
       const pad = (v: number): string =>
         (v < 10 ? '0' : '') + v.toString();
+      // createAsset title 不带扩展名（extension 单独传参；title 含
+      // '.png' 点号被「Title is invalid」拒——GIF 路径 title 本就无
+      // 后缀故通，图库展示时系统自动补扩展名）
       const title = '梦烬几何_' + now.getFullYear() + pad(now.getMonth() + 1)
-        + pad(now.getDate()) + '_' + pad(now.getHours()) + pad(now.getMinutes())
-        + '.png';
+        + pad(now.getDate()) + '_' + pad(now.getHours()) + pad(now.getMinutes());
       // SaveButton 点击授权窗口内 createAsset 直建图库资产（返回可写 URI）
       const ph = photoAccessHelper.getPhotoAccessHelper(ctx);
       hilog.info(0x0000, 'PNGDBG', 'step4 createAsset begin');
