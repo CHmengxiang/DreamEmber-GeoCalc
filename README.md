@@ -17,8 +17,8 @@
 
 ## 系统要求
 
-- OpenHarmony SDK **API 23**（`compileSdkVersion` 23）
-- 设备类型：`default`（手机等）、`tablet`与 `2in1`（宽屏自由窗口布局）
+- OpenHarmony 6.1+ （API23+）
+- 设备类型：`phone`、`tablet`与 `2in1`
 
 ## 从源码构建
 
