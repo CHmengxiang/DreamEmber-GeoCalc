@@ -15171,12 +15171,32 @@ GeoPoint *Kernel::pickPoint(double px, double py, double *outD)
     return best;
 }
 
+// 173包 拾取顺序：与 render 同口径（层序小者先画、大者上层），拾取从
+// 最后画的往前找——同位置重叠时选中的是看得见的那一张（真机反馈实锤：
+// 两张图叠放点选总选到下层）
+namespace {
+std::vector<GeoElement *> DrawOrderOf(
+    const std::vector<std::unique_ptr<GeoElement>> &geos)
+{
+    std::vector<GeoElement *> v;
+    v.reserve(geos.size());
+    for (const auto &g : geos) v.push_back(g.get());
+    std::stable_sort(v.begin(), v.end(),
+                     [](const GeoElement *a, const GeoElement *b) {
+                         return a->layer < b->layer;
+                     });
+    return v;
+}
+} // namespace
+
 // 158包 图片拾取：命中矩形内返回该图片（点优先由调用方先试）
 GeoImage *Kernel::pickImage(double px, double py)
 {
-    for (auto &g : geos_) {
+    const std::vector<GeoElement *> ord = DrawOrderOf(geos_);
+    for (auto it = ord.rbegin(); it != ord.rend(); ++it) {
+        GeoElement *g = *it;
         if (g->type() != GeoType::Image || !g->visible) continue;
-        GeoImage *im = static_cast<GeoImage *>(g.get());
+        GeoImage *im = static_cast<GeoImage *>(g);
         const double cx = view.px(im->x);
         const double cy = view.py(im->y);
         const double hw = im->w * view.xscale / 2.0;
@@ -15198,26 +15218,88 @@ void Kernel::moveImage(GeoImage *im, double wx, double wy)
     recomputeAll();
 }
 
-// 173包 图片角柄缩放：目标右下角 (px,py)（位图像素）→ 等比（宽为基准
-// 保持当前宽高比），钳最小 0.1 世界单位
+// 173包 图片角柄缩放：目标右下角 (px,py)（位图像素）→ **等比**缩放
+//（保持当前宽高比；官方图片格式只存左右角点、高度按像素比推出，宽高
+// 各自自由会存出去回不来），钳最小 0.1 世界单位
 void Kernel::resizeImagePx(GeoImage *im, double px, double py)
 {
     if (!im || !im->isFree || im->w <= 0) return;
     const double halfWpx = px - view.px(im->x);
     const double halfHpx = py - view.py(im->y);   // py 轴向下：底边角在中心下方为正
-    double w2 = 2.0 * halfWpx / (view.xscale > 0 ? view.xscale : 1.0);
-    double h2 = 2.0 * halfHpx / (view.yscale > 0 ? view.yscale : 1.0);
-    // 取两轴换算中较大的需求宽，保证角柄跟手（另一轴退化时也不缩成线）
-    if (w2 < h2 * (im->w / (im->h > 0 ? im->h : 1.0))) {
-        w2 = h2 * (im->w / (im->h > 0 ? im->h : 1.0));
-    }
-    if (w2 < 0.1) w2 = 0.1;
-    if (h2 < 0.1) h2 = 0.1;   // 极端宽高比下高也钳（防止压成线）
+    const double wreq = 2.0 * halfWpx / (view.xscale > 0 ? view.xscale : 1.0);
+    const double hreq = 2.0 * halfHpx / (view.yscale > 0 ? view.yscale : 1.0);
+    const double ratio = im->h / im->w;   // 当前宽高比（高/宽）
+    // 两轴需求取大者换算成宽：角柄沿任一方向外拖都跟手，且等比不失真
+    double w2 = std::max(wreq, ratio > 0 ? hreq / ratio : hreq);
+    // 双钳：宽 ≥0.1，且高 = 宽×比 也 ≥0.1（极端宽高比不压成线）
+    const double minW = ratio > 0 ? std::max(0.1, 0.1 / ratio) : 0.1;
+    if (w2 < minW) w2 = minW;
     im->w = w2;
-    im->h = h2;
+    im->h = w2 * ratio;
     // 173包 冒烟修正：缩放后同步 cmdArgs（代数区定义列与旧重放口径一致）
     im->cmdArgs = { NumA(im->x), NumA(im->y), NumA(im->w), NumA(im->h) };
     recomputeAll();
+}
+
+// 173包 媒体条目名：图片对象的 zip 条目名。缺省 dreamember_media_<标签>；
+// 官方互通要求 <file name> 能按名解码，故按字节魔数补扩展名
+namespace {
+std::string MediaExtFromBytes(const std::vector<unsigned char> &b)
+{
+    auto at = [&](size_t i) { return i < b.size() ? b[i] : 0; };
+    if (at(0) == 0xFF && at(1) == 0xD8) return "jpg";
+    if (at(0) == 0x89 && at(1) == 'P' && at(2) == 'N' && at(3) == 'G') return "png";
+    if (at(0) == 'G' && at(1) == 'I' && at(2) == 'F') return "gif";
+    if (at(0) == 'B' && at(1) == 'M') return "bmp";
+    if (at(0) == 'R' && at(1) == 'I' && at(2) == 'F' && at(3) == 'F'
+        && at(8) == 'W' && at(9) == 'E' && at(10) == 'B' && at(11) == 'P') {
+        return "webp";
+    }
+    // HEIF/AVIF：ISO BMFF ftyp 盒
+    if (at(4) == 'f' && at(5) == 't' && at(6) == 'y' && at(7) == 'p') return "heic";
+    return "png";   // 未知魔数：按 PNG 记名（解码失败只会画不出，不崩溃）
+}
+
+// 173包 官方互通：无字节的占位图片（命令建 Image 未挂图）——官方文件
+// 必须有可解码的 <file>，故存 .ggb 时补一张 1×1 透明 PNG
+const std::vector<unsigned char> &StubPng1x1()
+{
+    static const unsigned char kPng[] = {
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+        0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+        0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00,
+        0x0B, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x60, 0x00, 0x00, 0x02,
+        0x00, 0x01, 0x7A, 0x5E, 0xAB, 0x3F, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45,
+        0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82
+    };
+    static const std::vector<unsigned char> v(
+        kPng, kPng + sizeof(kPng) / sizeof(kPng[0]));
+    return v;
+}
+// 173包 图片 zip 条目名：官方原名优先，否则 dreamember_media_<标签>.<扩展名>
+std::string ImageEntryName(const GeoImage *im,
+                           const std::vector<unsigned char> *bytes)
+{
+    if (!im->mediaName.empty()) return im->mediaName;
+    return kGgbMediaPrefix + im->label + "."
+        + (bytes ? MediaExtFromBytes(*bytes) : std::string("png"));
+}
+} // namespace
+
+void Kernel::setMedia(const std::string &key, std::vector<unsigned char> bytes)
+{
+    const std::string ext = MediaExtFromBytes(bytes);
+    media_[key] = bytes;
+    GeoImage *im = dynamic_cast<GeoImage *>(lookup(key));
+    if (im) {
+        // 条目名：已有官方原名就保留（补扩展名），否则按标签自造
+        if (im->mediaName.empty()
+            || im->mediaName.find('.') == std::string::npos) {
+            im->mediaName = im->mediaName.empty()
+                ? kGgbMediaPrefix + key + "." + ext
+                : im->mediaName + "." + ext;
+        }
+    }
 }
 
 // 158包 media 取字节（键不存在返回 false）
@@ -15228,6 +15310,80 @@ bool Kernel::getMedia(const std::string &key,
     if (it == media_.end()) return false;
     out = it->second;
     return true;
+}
+
+// 173包 官方互通写侧：media_（标签键）→ zip 条目表（条目名键）。
+// 图片条目名用 im->mediaName（缺扩展名按字节补）；不再出官方原始名重复
+// 条目（解析时只搬进标签键，原始名已不在 media_，故无须去重）
+std::map<std::string, std::vector<unsigned char>> Kernel::mediaEntries() const
+{
+    std::map<std::string, std::vector<unsigned char>> out;
+    for (const auto &kv : media_) {
+        const GeoImage *im = dynamic_cast<const GeoImage *>(lookup(kv.first));
+        out[im ? ImageEntryName(im, &kv.second)
+               : kGgbMediaPrefix + kv.first] = kv.second;
+    }
+    // 占位图片（无字节）：补 1×1 透明 PNG，官方读侧才有一张可解码的图
+    for (const auto &g : geos_) {
+        if (g->type() != GeoType::Image) continue;
+        const GeoImage *im = static_cast<const GeoImage *>(g.get());
+        if (media_.count(im->label) > 0) continue;
+        out[ImageEntryName(im, nullptr)] = StubPng1x1();
+    }
+    return out;
+}
+
+// 173包 官方图片宽高比回灌：XML 只有左右角点 → 高度 = 宽 × 像素比，
+// 底边不动。ETS 解码后调一次（aspectAuto 置位的图片才生效）
+void Kernel::fitImageAspect(GeoImage *im, double iw, double ih)
+{
+    if (!im || !im->aspectAuto || iw <= 0 || ih <= 0 || im->w <= 0) return;
+    const double bottom = im->y - im->h / 2.0;
+    const double nh = im->w * ih / iw;
+    if (!std::isfinite(nh) || nh <= 0) return;
+    im->h = nh;
+    im->y = bottom + nh / 2.0;
+    im->aspectAuto = false;
+    im->cmdArgs = { NumA(im->x), NumA(im->y), NumA(im->w), NumA(im->h) };
+    recomputeAll();
+}
+
+// 173包 置顶：比其余对象最高层再高一层（同层按点击先后稳定排序），越界
+// 时整体压缩；置底对称。UI 侧仍走 setProp layer 的 99/-99 哨兵
+void Kernel::raiseLayer(GeoElement *g)
+{
+    if (!g) return;
+    int top = -1000;
+    for (auto &o : geos_) {
+        if (o.get() != g) top = std::max(top, o->layer);
+    }
+    if (top < -99) top = -99;
+    int v = top + 1;
+    if (v > 99) {
+        // 越界：全体减 (v - 99) 后再置位（层序关系保持）
+        const int shift = v - 99;
+        for (auto &o : geos_) o->layer -= shift;
+        v = 99;
+    }
+    g->layer = v;
+}
+
+// 173包 置底：比其余对象最低层再低一层（对称 raiseLayer）
+void Kernel::lowerLayer(GeoElement *g)
+{
+    if (!g) return;
+    int bot = 1000;
+    for (auto &o : geos_) {
+        if (o.get() != g) bot = std::min(bot, o->layer);
+    }
+    if (bot > 99) bot = 99;
+    int v = bot - 1;
+    if (v < -99) {
+        const int shift = -99 - v;
+        for (auto &o : geos_) o->layer += shift;
+        v = -99;
+    }
+    g->layer = v;
 }
 
 void Kernel::movePoint(GeoPoint *p, double wx, double wy)
@@ -16668,21 +16824,24 @@ GeoElement *Kernel::pickObject(double px, double py)
     GeoElement *best = nullptr;
     double bestD = 1e9;
     const double grab = 12.0 * view.uiScale;
-    for (auto &g : geos_) {
+    // 173包 层序：从最上层往下找（同距平局 = 上层胜出，真机反馈实锤）
+    const std::vector<GeoElement *> ord = DrawOrderOf(geos_);
+    for (auto oit = ord.rbegin(); oit != ord.rend(); ++oit) {
+        GeoElement *g = *oit;
         if (!g->visible) continue;
         if (g->lives3D) continue;   // 1.1.3.11 三维变换像不进 2D 拾取
         GeoType t = g->type();
         double d = 1e18;
         if (t == GeoType::Segment) {
-            GeoSegment *s = static_cast<GeoSegment *>(g.get());
+            GeoSegment *s = static_cast<GeoSegment *>(g);
             d = PtSegDist(px, py, view.px(s->ex1()), view.py(s->ey1()),
                           view.px(s->ex2()), view.py(s->ey2()));
         } else if (t == GeoType::Vector) {
-            GeoVector *v = static_cast<GeoVector *>(g.get());
+            GeoVector *v = static_cast<GeoVector *>(g);
             d = PtSegDist(px, py, view.px(v->ex1()), view.py(v->ey1()),
                           view.px(v->ex2()), view.py(v->ey2()));
         } else if (t == GeoType::Ray) {
-            GeoRay *r = static_cast<GeoRay *>(g.get());
+            GeoRay *r = static_cast<GeoRay *>(g);
             double x1 = view.px(r->p1->x), y1 = view.py(r->p1->y);
             double dx = view.px(r->p2->x) - x1, dy = view.py(r->p2->y) - y1;
             double len2 = dx * dx + dy * dy;
@@ -16691,7 +16850,7 @@ GeoElement *Kernel::pickObject(double px, double py)
             double cx = x1 + tt * dx, cy = y1 + tt * dy;
             d = sqrt((px - cx) * (px - cx) + (py - cy) * (py - cy));
         } else if (t == GeoType::Line) {
-            GeoLine *l = static_cast<GeoLine *>(g.get());
+            GeoLine *l = static_cast<GeoLine *>(g);
             if (fabs(l->a) > 1e-15 || fabs(l->b) > 1e-15) {
                 double p1x, p1y, p2x, p2y;
                 if (fabs(l->b) < 1e-15) {
@@ -16709,13 +16868,13 @@ GeoElement *Kernel::pickObject(double px, double py)
                 d = len > 1e-9 ? fabs((px - p1x) * ddy - (py - p1y) * ddx) / len : 1e18;
             }
         } else if (t == GeoType::Circle) {
-            GeoCircle *c = static_cast<GeoCircle *>(g.get());
+            GeoCircle *c = static_cast<GeoCircle *>(g);
             double ccx = view.px(c->ccx()), ccy = view.py(c->ccy());
             double rr = c->radius * view.xscale;
             d = fabs(sqrt((px - ccx) * (px - ccx) + (py - ccy) * (py - ccy)) - rr);
         } else if (t == GeoType::Image) {
             // 158包 图片拾取：矩形内含即命中（优先级低于既有曲线判距）
-            GeoImage *im = static_cast<GeoImage *>(g.get());
+            GeoImage *im = static_cast<GeoImage *>(g);
             const double cx = view.px(im->x), cy = view.py(im->y);
             const double hw = im->w * view.xscale / 2.0;
             const double hh = im->h * view.yscale / 2.0;
@@ -16723,7 +16882,7 @@ GeoElement *Kernel::pickObject(double px, double py)
                 ? 0.5 : 1e18;
         } else if (t == GeoType::Locus) {
             // 142包 轨迹拾取：采样折线段距（与渲染同点位）
-            GeoLocus *L = static_cast<GeoLocus *>(g.get());
+            GeoLocus *L = static_cast<GeoLocus *>(g);
             d = 1e18;
             if (L->pts.size() >= 4) {
                 for (size_t s = 0; s + 3 < L->pts.size(); s += 2) {
@@ -16736,7 +16895,7 @@ GeoElement *Kernel::pickObject(double px, double py)
         } else if (t == GeoType::Conic2) {
             // 1.2.0.2 圆锥曲线拾取：参数采样折线段距（椭圆 96/双曲线两支各 48/
             // 抛物线 64，与渲染同参数化口径）
-            GeoConic2 *cn = static_cast<GeoConic2 *>(g.get());
+            GeoConic2 *cn = static_cast<GeoConic2 *>(g);
             d = 1e18;
             if (cn->ok) {
                 auto feed = [&](double wx1, double wy1, double wx2, double wy2) {
@@ -16796,7 +16955,7 @@ GeoElement *Kernel::pickObject(double px, double py)
                 }
             }
         } else if (t == GeoType::Polygon) {
-            GeoPolygon *pg = static_cast<GeoPolygon *>(g.get());
+            GeoPolygon *pg = static_cast<GeoPolygon *>(g);
             size_t n = pg->image ? pg->ivx.size() : pg->verts.size();
             d = 1e18;
             for (size_t i = 0; i < n; ++i) {
@@ -16809,7 +16968,7 @@ GeoElement *Kernel::pickObject(double px, double py)
                 if (dd < d) d = dd;
             }
         } else if (t == GeoType::Function) {
-            GeoFunction *f = static_cast<GeoFunction *>(g.get());
+            GeoFunction *f = static_cast<GeoFunction *>(g);
             d = 1e18;
             if (f->ineqOp || f->ineqCombo()) {
                 // 区域拾取：触点满足不等式即命中（权重 6px，边界上的其他对象优先）
@@ -16862,7 +17021,7 @@ GeoElement *Kernel::pickObject(double px, double py)
             }
         } else if (t == GeoType::Text) {
             // 文本拾取：锚点像素附近的方形区域（宽≈字号×字符数，考虑 fillText 基线）
-            GeoText *tx = static_cast<GeoText *>(g.get());
+            GeoText *tx = static_cast<GeoText *>(g);
             const double cx = view.px(tx->x), cy = view.py(tx->y);
             const double tw = 14.0 * view.uiScale * 0.6 * (double)tx->text.size();
             if (px >= cx - 4 && px <= cx + tw + 4
@@ -16875,9 +17034,9 @@ GeoElement *Kernel::pickObject(double px, double py)
         }
         // 同距平局后建胜出（GGB 置顶语义；1.0.7.6 区域交并产物叠在源区域
         // 之上，点按应选中它而非先建的源区域）
-        if (d < grab && d <= bestD) {
+        if (d < grab && d < bestD) {
             bestD = d;
-            best = g.get();
+            best = g;
         }
     }
     return best;
@@ -17192,8 +17351,19 @@ bool Kernel::setProp(const std::string &label, const std::string &key,
         return true;
     }
     if (key == "layer") {
-        // 173包 层序（渲染稳定排序，大者上层；-99~99 钳位）
+        // 173包 层序：99/-99 是 UI 置顶/置底的哨兵——按「比同层更高/更低
+        // 一层」相对赋值（固定 99/-99 会让两张图轮流置顶后同层并列，排序
+        // 回落到构造序，看起来像置顶失效——真机反馈实锤）；其余数值直接
+        // 落层（-99~99 钳位）
         int v = static_cast<int>(std::lround(strtod(val.c_str(), nullptr)));
+        if (v == 99) {
+            raiseLayer(g);
+            return true;
+        }
+        if (v == -99) {
+            lowerLayer(g);
+            return true;
+        }
         if (v < -99) v = -99;
         if (v > 99) v = 99;
         g->layer = v;
@@ -24043,25 +24213,28 @@ std::string Kernel::getXml() const
             break;
         }
         case GeoType::Image: {
-            // 158包 图片：命令重放重建（字节走 media 条目），element 仅样式。
+            // 173包 官方互通（用户真机反向复核实锤）：官方不认自产
+            // <command name="Image"> 四数值参重放，整份文件打开失败
+            //（"processing of command: Image(...)"）——图片一律按官方
+            // 元素形态写：<file name> + 左右角点 startPoint(0/1)，高度由
+            // 像素宽高比推出（故缩放走等比）。旧版带 Image 命令的文件读侧
+            // 仍兼容（xmlCommand 里保留重放分支）
             // AppendElementHead 不自闭合——漏 </element> 会把 XML 中后续
             // 对象吞进本元素（冒烟实锤：多图片 .ggb 往返丢 p2/p3）
             GeoImage *im = static_cast<GeoImage *>(g);
-            // 173包 冒烟修正：图片按当前 x/y/w/h 重放，不用 cmdArgs 原文——
-            // 角柄缩放/拖动改的是对象几何而非 cmdArgs，按原文写会把用户
-            // 调整后的尺寸/位置在重开时丢回初始值（设备冒烟实锤：
-            // 4×3 拖成 6.39×4.63，保存的 <input> 仍是 4/3）
-            o += "<command name=\"Image\">\n";
-            o += "<input a0=\"" + NumA(im->x) + "\" a1=\"" + NumA(im->y)
-               + "\" a2=\"" + NumA(im->w) + "\" a3=\"" + NumA(im->h) + "\"/>\n";
-            o += "<output a0=\"" + XmlEsc(im->label) + "\"/>\n</command>\n";
+            const double x0 = im->x - im->w / 2.0;
+            const double x1 = im->x + im->w / 2.0;
+            const double yb = im->y - im->h / 2.0;   // 官方角点取左下/右下
+            auto mit = media_.find(im->label);
+            std::string entry = ImageEntryName(
+                im, mit != media_.end() ? &mit->second : nullptr);
             AppendElementHead(o, *im, "image");
-            // 173包 官方互通写侧：<file name> 指向 zip 条目名（官方读侧按
-            // 名取字节；自产读侧走 prefix 条目归属不受影响）
-            if (media_.count(im->label) > 0) {
-                o += std::string("<file name=\"") + kGgbMediaPrefix
-                   + XmlEsc(im->label) + "\"/>\n";
-            }
+            // 无字节占位图也写 <file>（mediaEntries 会补 1×1 PNG）
+            o += "<file name=\"" + XmlEsc(entry) + "\"/>\n";
+            o += "<startPoint number=\"0\" x=\"" + NumA(x0) + "\" y=\""
+               + NumA(yb) + "\" z=\"1\"/>\n";
+            o += "<startPoint number=\"1\" x=\"" + NumA(x1) + "\" y=\""
+               + NumA(yb) + "\" z=\"1\"/>\n";
             o += "</element>\n";
             break;
         }
@@ -24479,11 +24652,38 @@ void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
 // <animation .../>：数值按自由数值重建后由 xmlApplyStyle 落滑条参数与动画态。
 // 单位约定（1.0.6.5 对齐官方）：XML 数值无单位，角值恒存弧度（与
 // <kernel> angleUnit 无关）——角重建一律 ×180/π，数值不再按单位换算
+// 173包 官方互通：<file name> 指向的待消费条目 → media_ 标签键 + 条目名
+void Kernel::imageTakeMedia(const std::string &label, const std::string &inner,
+                            GeoImage *im)
+{
+    if (!im) return;
+    const size_t fp = inner.find("<file");
+    if (fp == std::string::npos) return;
+    const size_t fe = inner.find('>', fp);
+    const std::string fname = AttrVal(inner.substr(fp, fe == std::string::npos
+        ? std::string::npos : fe - fp), "name");
+    if (fname.empty()) return;
+    if (im->mediaName.empty()) im->mediaName = fname;   // 官方原名优先
+    auto it = pendingMedia_.find(fname);
+    if (it == pendingMedia_.end() || it->second.empty()) {
+        // 撤销/重做快照：XML 里有 <file name> 但没有 zip 条目表——字节
+        // 仍在本会话 media_ 的标签键里，原地保留即可
+        return;
+    }
+    setMedia(label, it->second);    // 副本进标签键，hydrate 按标签取
+    pendingMedia_.erase(it);
+}
+
 void Kernel::xmlElement(const std::string &type, const std::string &label,
                         const std::string &inner, int *skipped)
 {
     GeoElement *existing = lookup(label);
     if (existing) {
+        // 173包 官方互通：旧版自产文件的图片由 <command name="Image"> 重放
+        // 创建，element 这里只刷样式——字节/条目名要在这里补搬
+        if (type == "image") {
+            imageTakeMedia(label, inner, dynamic_cast<GeoImage *>(existing));
+        }
         xmlApplyStyle(existing, inner);
         return;
     }
@@ -24587,27 +24787,53 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
             }
         }
     } else if (type == "image" && !label.empty()) {
-        // 173包 官方带图 .ggb 读侧：官方图片元素 = <file name="..."/> 引用
-        // zip 独立条目（ParseGgbMedia 已按原名收进 media_）。自产文件图片
-        // 走 <command name="Image"> 重放 + prefix 条目归属，不进此支。
-        // 官方 Corner 落位暂不解析——视图中心 4×3 默认落位（挂账：官方
-        // 互通二期做角点重放）
+        // 173包 官方互通读侧：官方图片元素 = <file name> 引用 zip 条目 +
+        // startPoint(0/1) 左右角点（高度按像素宽高比，本层先用 3:4 估，
+        // ETS 解码后 fitImageAspect 校正）。旧版自产文件的 Image 命令重放
+        // 走 xmlCommand，此处只搬字节（element 是样式节点）
         const size_t fp = inner.find("<file");
         if (fp == std::string::npos) { ++*skipped; return; }
         const size_t fe = inner.find('>', fp);
         const std::string fname = AttrVal(inner.substr(fp, fe == std::string::npos
             ? std::string::npos : fe - fp), "name");
-        std::vector<unsigned char> bytes;
-        if (fname.empty() || !getMedia(fname, bytes) || bytes.empty()) {
+        const bool havePending = !fname.empty()
+            && pendingMedia_.find(fname) != pendingMedia_.end();
+        const bool haveLocal = media_.count(label) > 0;   // 撤销快照口径
+        if (!havePending && !haveLocal) {
             ++*skipped;   // 引用缺条目：跳过（skipped 记账）
             return;
         }
-        const double cx = view.wx(view.width / 2.0);
-        const double cy = view.wy(view.height / 2.0);
-        if (!input(label + "=Image(" + NumA(cx) + "," + NumA(cy)
-                   + ", 4, 3)")) { ++*skipped; return; }
-        // 字节搬到标签键（hydrateImages 按标签回灌像素）
-        setMedia(label, std::move(bytes));
+        // 角点：number=0 左下、number=1 右下（官方 2D 图片只存两个）
+        double x0 = NAN, x1 = NAN, yb = NAN;
+        size_t sp = 0;
+        while ((sp = inner.find("<startPoint", sp)) != std::string::npos) {
+            const size_t se = inner.find('>', sp);
+            if (se == std::string::npos) break;
+            const std::string tag = inner.substr(sp, se - sp);
+            const int num = (int)AttrNum(tag, "number", 0.0);
+            if (num == 0) { x0 = AttrNum(tag, "x", NAN); yb = AttrNum(tag, "y", NAN); }
+            else if (num == 1) x1 = AttrNum(tag, "x", NAN);
+            sp = se + 1;
+        }
+        double cx, cy, w, h;
+        if (std::isfinite(x0) && std::isfinite(x1) && std::isfinite(yb)
+            && x1 > x0) {
+            w = x1 - x0;
+            cx = (x0 + x1) / 2.0;
+            h = w * 0.75;          // 占位高（ETS 按像素比校正）
+            cy = yb + h / 2.0;
+        } else {
+            // 角点缺失/非法：视图中心 4×3 默认落位
+            cx = view.wx(view.width / 2.0);
+            cy = view.wy(view.height / 2.0);
+            w = 4;
+            h = 3;
+        }
+        if (!input(label + "=Image(" + NumA(cx) + "," + NumA(cy) + ", "
+                   + NumA(w) + ", " + NumA(h) + ")")) { ++*skipped; return; }
+        GeoImage *nim = dynamic_cast<GeoImage *>(lookup(label));
+        if (nim) nim->aspectAuto = true;
+        imageTakeMedia(label, inner, nim);
     } else {
         ++*skipped;
         return;

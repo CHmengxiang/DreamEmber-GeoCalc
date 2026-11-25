@@ -46,6 +46,9 @@ export const kernelMacros: () => string;
 // 173包 图片角柄缩放：右下角柄拖到 (px,py)（位图像素）等比缩放，
 // 返回重绘帧；对象不存在 "-|"
 export const kernelResizeImage: (label: string, px: number, py: number) => string;
+// 173包 官方图片宽高比回灌：官方 XML 只存左右角点，解码后按像素宽高比
+// 校正高度（底边不动）；仅官方载入的图片生效，返回重绘帧
+export const kernelImageAspect: (label: string, iw: number, ih: number) => string;
 // 158包 图片 media：字节按标签键存取（.ggb 打包随行）+ 视图信息
 export const kernelSetMedia: (label: string, data: ArrayBuffer) => void;
 export const kernelGetMedia: (label: string) => ArrayBuffer;

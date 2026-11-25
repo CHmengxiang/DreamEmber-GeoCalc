@@ -147,24 +147,13 @@ bool MakeGgbMedia(
     outZip.clear();
     std::string cd;
     AppendZipEntry(outZip, cd, kEntryName, xml);
-    // 173包 冒烟修正：官方带图文件载入后 media_ 同时留着原始条目名（含
-    // 扩展名，如 pic.png）与标签键（如 pic）两份同样的字节——写侧只按
-    // 标签键出条目（XML 的 <file name> 引用的就是 prefix+标签），原始名
-    // 条目跳过；与任何标签键都不同字节的原始名条目照写（不丢字节）。
-    std::set<std::string> labelBytes;
-    for (const auto &kv : media) {
-        if (kv.first.find('.') == std::string::npos) {
-            labelBytes.insert(std::string(kv.second.begin(), kv.second.end()));
-        }
-    }
+    // 173包 官方互通：条目名已是最终名（Kernel::mediaEntries 决定：官方
+    // 原名优先 / dreamember_media_<标签>.<扩展名>），这里不再加前缀——
+    // 官方 <file name> 按 zip 原名取字节
     unsigned entries = 1;
     for (const auto &kv : media) {
-        const std::string payload(kv.second.begin(), kv.second.end());
-        if (kv.first.find('.') != std::string::npos
-            && labelBytes.count(payload) > 0) {
-            continue;   // 与标签键同字节的原始名条目：不重复写
-        }
-        AppendZipEntry(outZip, cd, kGgbMediaPrefix + kv.first, payload);
+        AppendZipEntry(outZip, cd, kv.first,
+                       std::string(kv.second.begin(), kv.second.end()));
         ++entries;
     }
     outZip += cd;
@@ -227,7 +216,9 @@ bool ParseGgbMedia(
         } else if (name.compare(0, strlen(kGgbMediaPrefix), kGgbMediaPrefix) == 0) {
             std::string bytes;
             if (ExtractEntry(zip, m, cs, us, loff, bytes)) {
-                media[name.substr(strlen(kGgbMediaPrefix))] =
+                // 173包 官方互通：条目一律按 zip 原名收（不剥前缀）——
+                // <file name> 按名取字节，前缀剥掉后名字对不上
+                media[name] =
                     std::vector<unsigned char>(bytes.begin(), bytes.end());
             }
         } else if (!found && !hasXml && name.size() > 4 &&

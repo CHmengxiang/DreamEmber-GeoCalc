@@ -145,6 +145,12 @@ public:
     double x = 0, y = 0;   // 中心（世界坐标）
     double w = 4, h = 3;   // 世界尺寸
     bool isFree = true;    // 自由图片可拖动（口径同 GeoPoint/GeoNumeric）
+    // 173包 官方互通：zip 条目名（如 dreamember_media_p.png / 官方 image1.png）。
+    // 写侧 <file name> 直接引用这个名字；空 = 尚无字节
+    std::string mediaName;
+    // 官方图片高度由像素宽高比决定（XML 只存两角点）——载入时置 true，
+    // ETS 回灌像素尺寸后按比例校正高度并清位
+    bool aspectAuto = false;
     std::string valueText() const override;
     std::string definitionText() const override;
 };

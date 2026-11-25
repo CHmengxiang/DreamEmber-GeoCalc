@@ -977,11 +977,31 @@ export struct CanvasView {
     this.pendingInput = '';
     this.mathCaret = 0;
     this.inputError = '';
+    // 173包 官方互通：撤销/重做恢复的图片 XML 只有角点，高度靠像素比——
+    // 已缓存位图不走 hydrate，先按缓存像素尺寸校正再同步代数（行值不旧）
+    this.refitCachedImageAspects();
     this.syncAlgebra(dreamemberKernel.kernelAlgebra());
     this.refresh();
     if (dreamemberKernel.kernelAnyAnimating() === '1') {
       this.startAnimTicker();
     }
+  }
+
+  // 173包 已缓存图片的宽高比回灌（撤销/重做后调用；aspectAuto 已清的
+  // 内核侧忽略，可安全重复）
+  private refitCachedImageAspects(): void {
+    this.imageCache.forEach((pm: image.PixelMap, label: string) => {
+      try {
+        const info = pm.getImageInfoSync();
+        if (info.size.width > 0 && info.size.height > 0) {
+          dreamemberKernel.kernelImageAspect(label,
+            info.size.width, info.size.height);
+        }
+      } catch (err) {
+        // 取不到尺寸：保持占位比例
+      }
+    });
+    this.refresh();
   }
 
   // 输入一条代数式，刷新画布。返回错误信息（空串=成功）。
@@ -2089,6 +2109,9 @@ export struct CanvasView {
     this.stopAnimTicker();
     this.setTool('');
     this.selectedLabel = '';
+    // 173包：换文件后旧标签可能复用（如官方文件里的 pic）——像素缓存
+    // 必须清，否则新文件同名图沿用上一份的位图
+    this.imageCache.clear();
     dreamemberKernel.kernelSelect('');
     this.editingLabel = '';
     this.creating = false;
@@ -2268,11 +2291,25 @@ export struct CanvasView {
         const src = image.createImageSource(bytes);
         const pm = await src.createPixelMap();
         this.imageCache.set(e.label, pm);
+        // 173包 官方互通：官方文件只存左右角点、高度按像素宽高比——解码
+        // 拿到真实像素尺寸后回灌内核校正（避免导入后横向/纵向拉伸）
+        try {
+          const info = pm.getImageInfoSync();
+          if (info.size.width > 0 && info.size.height > 0) {
+            dreamemberKernel.kernelImageAspect(e.label,
+              info.size.width, info.size.height);
+          }
+        } catch (err2) {
+          // 取不到尺寸：保持 4:3 占位比例
+        }
         this.refresh();
       } catch (err) {
         // 解码失败：跳过（占位无图）
       }
     }
+    // 宽高比校正（缓存命中的也补一次）后代数区「图片 W×H」跟着刷新
+    this.refitCachedImageAspects();
+    this.syncAlgebra(dreamemberKernel.kernelAlgebra());
   }
 
   private onOpenGgbEvt(): void {

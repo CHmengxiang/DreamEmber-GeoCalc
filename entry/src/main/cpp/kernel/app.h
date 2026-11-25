@@ -176,20 +176,33 @@ public:
     // 173包 图片角柄缩放：右下角柄拖到 (px,py)（位图像素），等比缩放
     //（宽为基准保持当前宽高比），最小 0.1 世界单位。非自由图片不动
     void resizeImagePx(GeoImage *im, double px, double py);
-    // 158包 media 库：图片字节按标签键存取；.ggb 打包随行
-    void setMedia(const std::string &key, std::vector<unsigned char> bytes)
-    {
-        media_[key] = std::move(bytes);
-    }
+    // 158包 media 库：图片字节按标签键存取；.ggb 打包随行。
+    // 173包 官方互通：入字节时若该标签已是图片对象且没有条目名，按字节
+    // 魔数补扩展名记到 im->mediaName（官方 <file name> 需要可解码的名字）
+    void setMedia(const std::string &key, std::vector<unsigned char> bytes);
     bool getMedia(const std::string &key, std::vector<unsigned char> &out) const;
     const std::map<std::string, std::vector<unsigned char>> &mediaMap() const
     {
         return media_;
     }
+    // 打开 .ggb 时 ParseGgbMedia 的原样条目表（条目名 → 字节）：<file name>
+    // 按名取字节，xmlElement 消费后搬进 media_ 标签键。不直接进 media_，
+    // 免得"条目名"与"标签"两套键混在一张表里（官方 image1.png 与自产标签
+    // p 语义不同）
     void setMediaMap(std::map<std::string, std::vector<unsigned char>> m)
     {
-        media_ = std::move(m);
+        pendingMedia_ = std::move(m);
     }
+    // 173包 官方互通写侧：zip 条目表（条目名 → 字节）。图片取其
+    // im->mediaName（缺扩展名按字节补），其余键按 dreamember_media_<键>；
+    // 与标签键同字节的官方原始名条目不再重复写
+    std::map<std::string, std::vector<unsigned char>> mediaEntries() const;
+    // 173包 官方图片宽高比回灌（ETS 解码后调）：XML 只存左右角点，高度
+    // 按像素宽高比校正，底边保持不动。aspectAuto 未置位的图片忽略
+    void fitImageAspect(GeoImage *im, double iw, double ih);
+    // 置顶/置底（层序语义：比同层对象更高/更低一层；越界时整体压缩）
+    void raiseLayer(GeoElement *g);
+    void lowerLayer(GeoElement *g);
     // N5 滑动条手柄拾取（拖动改值）
     GeoNumeric *pickSliderHandle(double px, double py);
     void dragSliderTo(GeoNumeric *n, double px);
@@ -339,9 +352,11 @@ private:
                      const std::string &outName);
     // 重放失败回滚：删 baseline 之外本轮新建对象（倒序级联）
     void macroRollback(const std::vector<std::string> &baseline);
-    // 158包 图片 media 库（键=图片对象标签；.ggb 打包为
-    // dreamember_media_<键> 条目随行）
+    // 158包 图片 media 库（键=图片对象标签；.ggb 打包条目名取
+    // im->mediaName，缺省 dreamember_media_<键>）
     std::map<std::string, std::vector<unsigned char>> media_;
+    // 173包 打开 .ggb 时待消费的原样条目表（条目名 → 字节）
+    std::map<std::string, std::vector<unsigned char>> pendingMedia_;
     GeoPoint *picked_ = nullptr;
 
     // 撤销/重做快照栈（存变更前的完整 XML）
@@ -447,6 +462,10 @@ private:
     void xmlCommand(const std::string &headTag, const std::string &body, int *skipped);
     void xmlElement(const std::string &type, const std::string &label,
                     const std::string &inner, int *skipped);
+    // 173包 官方互通：把 <file name> 指向的待消费条目搬进 media_ 标签键，
+    // 并记下条目名（旧版命令重放创建的图片也要搬——element 那时只刷样式）
+    void imageTakeMedia(const std::string &label, const std::string &inner,
+                        GeoImage *im);
 
     static Geometry CircleGeom(const GeoCircle &c, const EuclidianView &v);
     void appendFunctionPlot(const GeoFunction &f, std::vector<DrawCmd> &out,

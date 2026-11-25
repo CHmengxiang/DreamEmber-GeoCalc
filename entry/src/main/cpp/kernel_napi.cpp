@@ -1060,7 +1060,7 @@ napi_value KernelGetGgb(napi_env env, napi_callback_info)
 {
     std::string xml = g_kernel.getXml();
     std::string zip;
-    if (!dreamember::MakeGgbMedia(xml, g_kernel.mediaMap(), zip)) {
+    if (!dreamember::MakeGgbMedia(xml, g_kernel.mediaEntries(), zip)) {
         napi_throw_error(env, nullptr, "MakeGgb failed");
         return nullptr;
     }
@@ -1109,6 +1109,29 @@ napi_value KernelResizeImage(napi_env env, napi_callback_info info)
         dynamic_cast<dreamember::GeoImage *>(g_kernel.lookup(label));
     if (!im) return ToNapi(env, "-|");
     g_kernel.resizeImagePx(im, px, py);
+    return ToNapi(env, RenderFrame());
+}
+
+// kernelImageAspect(label, iw, ih): void — 173包 官方图片宽高比回灌：
+// 官方 XML 只存左右角点，高度由像素比决定；ETS 解码后调一次（仅
+// aspectAuto 图片生效，底边不动）
+napi_value KernelImageAspect(napi_env env, napi_callback_info info)
+{
+    size_t argc = 3;
+    napi_value argv[3] = {nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 3 || argv[0] == nullptr) {
+        napi_throw_error(env, nullptr, "kernelImageAspect requires (label, iw, ih)");
+        return nullptr;
+    }
+    const std::string label = NapiToString(env, argv[0]);
+    double iw = 0, ih = 0;
+    napi_get_value_double(env, argv[1], &iw);
+    napi_get_value_double(env, argv[2], &ih);
+    dreamember::GeoImage *im =
+        dynamic_cast<dreamember::GeoImage *>(g_kernel.lookup(label));
+    if (!im) return ToNapi(env, "-|");
+    g_kernel.fitImageAspect(im, iw, ih);
     return ToNapi(env, RenderFrame());
 }
 
@@ -1182,6 +1205,7 @@ void DreamemberRegisterKernelApis(napi_env env, napi_value exports)
         { "kernelGetXmlText", nullptr, KernelGetXmlText, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelMacros", nullptr, KernelMacros, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelResizeImage", nullptr, KernelResizeImage, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelImageAspect", nullptr, KernelImageAspect, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelLoadGgb", nullptr, KernelLoadGgb, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelSetMedia", nullptr, KernelSetMedia, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelGetMedia", nullptr, KernelGetMedia, nullptr, nullptr, nullptr, napi_default, nullptr },
