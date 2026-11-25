@@ -9,6 +9,9 @@
 
 namespace dreamember {
 
+// 173包 media 条目名前缀（写侧 <file name> 引用与读侧条目归属共用）
+const char *const kGgbMediaPrefix = "dreamember_media_";
+
 namespace {
 
 const char *kEntryName = "geogebra.xml";
@@ -133,8 +136,6 @@ bool ExtractEntry(const std::string &zip, unsigned method,
     return true;
 }
 
-const char *kMediaPrefix = "dreamember_media_";
-
 } // namespace
 
 bool MakeGgbMedia(
@@ -146,7 +147,7 @@ bool MakeGgbMedia(
     std::string cd;
     AppendZipEntry(outZip, cd, kEntryName, xml);
     for (const auto &kv : media) {
-        AppendZipEntry(outZip, cd, kMediaPrefix + kv.first,
+        AppendZipEntry(outZip, cd, kGgbMediaPrefix + kv.first,
                        std::string(kv.second.begin(), kv.second.end()));
     }
     outZip += cd;
@@ -207,16 +208,29 @@ bool ParseGgbMedia(
         if (name == kEntryName) {
             method = m; compSize = cs; uncompSize = us; localOff = loff;
             found = true;
-        } else if (name.compare(0, strlen(kMediaPrefix), kMediaPrefix) == 0) {
+        } else if (name.compare(0, strlen(kGgbMediaPrefix), kGgbMediaPrefix) == 0) {
             std::string bytes;
             if (ExtractEntry(zip, m, cs, us, loff, bytes)) {
-                media[name.substr(strlen(kMediaPrefix))] =
+                media[name.substr(strlen(kGgbMediaPrefix))] =
                     std::vector<unsigned char>(bytes.begin(), bytes.end());
             }
         } else if (!found && !hasXml && name.size() > 4 &&
                    name.compare(name.size() - 4, 4, ".xml") == 0) {
             method = m; compSize = cs; uncompSize = us; localOff = loff;
             hasXml = true;
+        } else {
+            // 173包 官方带图 .ggb：其余非 xml 条目按 zip 原名收进 media 表
+            //——官方 XML <file name="..."/> 引用按名取字节（element
+            // type=image 读侧归属）。官方文件里的缩略图等同被收（无害，
+            // 无引用即不消费）
+            if (name.size() > 4
+                && name.compare(name.size() - 4, 4, ".xml") != 0) {
+                std::string bytes;
+                if (ExtractEntry(zip, m, cs, us, loff, bytes)) {
+                    media[name] =
+                        std::vector<unsigned char>(bytes.begin(), bytes.end());
+                }
+            }
         }
         p += 46 + nameLen + extraLen + cmtLen;
     }

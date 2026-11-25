@@ -41,6 +41,24 @@ struct Geometry {
     double x = 0, y = 0, r = 0;
 };
 
+// 173包 自定义工具宏（工具宏内核三件套）：把一段构造序列录制成可复用
+// 命令。params=录制时闭包里的自由输入对象（形参）；script=依构造序的
+// input 行（原始标签）；created=每行录制时产出的全部标签（主输出 +
+// 多输出命令 extras，重放时按序配对新标签做替换映射）；outLabel=主输出
+// （宏调用的返回对象）。持久化：.ggb construction 段头部 <macroDef> 节点
+struct MacroDef {
+    std::string name;                     // 工具名（命令调用名，分发大小写不敏感）
+    std::vector<std::string> params;      // 形参标签（录制时的自由对象标签）
+    std::vector<std::string> paramTypes;  // 形参类型（重放校验：point/numeric/...）
+    std::string outLabel;                 // 主输出标签（录制时）
+    // 一条脚本步：line=原始 input 行；created=该行产出的录制标签（序配对）
+    struct Step {
+        std::string line;
+        std::vector<std::string> created;
+    };
+    std::vector<Step> script;
+};
+
 // 代数区一行：label|type|value|definition
 struct AlgebraRow {
     std::string label;
@@ -155,6 +173,9 @@ public:
     GeoImage *pickImage(double px, double py);
     // 158包 图片拖动：中心随手指（抓取偏移由绑定层记存）
     void moveImage(GeoImage *im, double wx, double wy);
+    // 173包 图片角柄缩放：右下角柄拖到 (px,py)（位图像素），等比缩放
+    //（宽为基准保持当前宽高比），最小 0.1 世界单位。非自由图片不动
+    void resizeImagePx(GeoImage *im, double px, double py);
     // 158包 media 库：图片字节按标签键存取；.ggb 打包随行
     void setMedia(const std::string &key, std::vector<unsigned char> bytes)
     {
@@ -191,6 +212,7 @@ public:
         tool_ = tool;
         toolPts_.clear();
         toolObj_ = nullptr;
+        toolMacroArgs_.clear();
         askKind_.clear();
         askObj_ = nullptr;
         askPts_.clear();
@@ -250,6 +272,21 @@ public:
     // 字符串（数值/布尔由本层解析）。未知对象/键返回 false，lastError 已填
     bool setProp(const std::string &label, const std::string &key, const std::string &val);
 
+    // ---- 173包 自定义工具宏 ----
+    // 录制：name=工具名（标识符），outLabel=主输出对象标签。沿 inputs 闭包
+    // 回溯，自由对象成为形参，依随对象生成构造脚本。成功 true（lastError
+    // 空）；失败 false（lastError 已填：不可录制的对象/非法名/重名等）
+    bool defineTool(const std::string &name, const std::string &outLabel);
+    // 删除工具（不影响已构造的对象）。失败 false
+    bool deleteTool(const std::string &name);
+    // 工具重命名（同步引用它的调用只按名分发，无需改对象）。失败 false
+    bool renameTool(const std::string &oldName, const std::string &newName);
+    // 工具面板列表协议：每行 "name|参数1,参数2|输出说明"；空表返回空串。
+    // 输出说明 = 主输出的定义文本（代数区口径）
+    std::string macroText() const;
+    // 工具名查询（大小写不敏感；快捷建点改写与嵌套实参防劫持共用）
+    bool isMacroName(const std::string &name) const;
+
     // 二十三包 表格视图批量求值（上游 TableValuesView：行=x 取值、列=函数/
     // 非水平直线 f(x)）。labels/xs 均逗号分隔；返回行协议：行间 ';'、格间
     // ','。不可求值列（不等式/竖直线/未知对象）与非有限值一律输出空格串
@@ -291,6 +328,17 @@ public:
 
 private:
     std::vector<std::unique_ptr<GeoElement>> geos_;
+    // 173包 自定义工具宏表（名大小写不敏感唯一；随 .ggb <macroDef> 往返，
+    // clearAll 一并清空）
+    std::vector<MacroDef> macros_;
+    const MacroDef *findMacro(const std::string &nameLower) const;
+    // 宏重放：args=实参（标签或数值字面量），outName=调用行左部标签（裸
+    // 调用为空，主输出用自动名）。产物是真对象（依赖随动天然成立）。
+    // 成功 true 且 lastAddedLabel_=主输出标签；失败 false（已建产物回滚）
+    bool macroReplay(const MacroDef &m, const std::vector<std::string> &args,
+                     const std::string &outName);
+    // 重放失败回滚：删 baseline 之外本轮新建对象（倒序级联）
+    void macroRollback(const std::vector<std::string> &baseline);
     // 158包 图片 media 库（键=图片对象标签；.ggb 打包为
     // dreamember_media_<键> 条目随行）
     std::map<std::string, std::vector<unsigned char>> media_;
@@ -310,6 +358,8 @@ private:
     std::string tool_;
     std::vector<GeoPoint *> toolPts_;
     GeoElement *toolObj_ = nullptr;
+    // 173包 宏放置流实参（tool_ = "macro:工具名" 时逐个点选对象累积）
+    std::vector<std::string> toolMacroArgs_;
 
     // 二十六包 工具第二批参数待输入态：kind=工具名（rotate/dilate/
     // circleRadius/segLength/angleSize，空=无）；askObj_=变换对象（可空），

@@ -19,6 +19,9 @@ export struct CanvasStage {
   @Prop dark: boolean = false;
   @Prop tool: string = '';          // 当前工具 id（'' = 选择/移动）
   @Prop toolHint: string = '';      // 画布左上反馈条（创建/命令结果）
+  // 173包 选中对象/选中图片像素矩形（角柄命中检测；宿主 execFrame 回填）
+  @Prop selectedLabel: string = '';
+  @Prop selImgRect: number[] = [];
   @Link vpW: number;                // 画布 vp 尺寸（触摸坐标是 vp；缩放按钮定位）
   @Link vpH: number;
   // 渲染上下文由宿主创建并传入（宿主 execFrame 落帧）
@@ -36,6 +39,8 @@ export struct CanvasStage {
   // 工具点按结果（done|/need|/err|）交宿主处理（提示条+同步+动画）
   onToolResult: (r: string) => void = (_r: string) => {};
   onSetVisible: (l: string, show: boolean) => void = (_l: string, _s: boolean) => {};
+  // 173包 层序（置顶/置底：'99'/'-99'）
+  onSetLayer: (l: string, v: string) => void = (_l: string, _v: string) => {};
   onDeleteObj: (l: string) => void = (_l: string) => {};
   onCommitPending: () => void = () => {};
   onDismissKeyboard: () => void = () => {};
@@ -51,7 +56,7 @@ export struct CanvasStage {
   private canvasH: number = 0;
   private uiScale: number = 1.0;
   // 触摸状态
-  private mode: number = 0;       // 0=无 1=拖点 2=平移/点按 3=捏合
+  private mode: number = 0;       // 0=无 1=拖点 2=平移/点按 3=捏合 4=图片角柄缩放
   private pinchStartDist: number = 0;
   private pinchCx: number = 0;    // 位图px
   private pinchCy: number = 0;
@@ -223,6 +228,13 @@ export struct CanvasStage {
     this.onSelectLabel('');
   }
 
+  // 173包 层序：置顶/置底（宿主 setProp layer + 刷新）
+  private menuSetLayer(v: string): void {
+    this.onSetLayer(this.objMenuLabel, v);
+    this.objMenuShow = false;
+    this.onSelectLabel('');
+  }
+
   private menuDelete(): void {
     this.objMenuShow = false;
     this.onSelectLabel('');
@@ -260,6 +272,31 @@ export struct CanvasStage {
         this.onCommitPending();
         this.onDismissKeyboard();
         this.objMenuShow = false;   // 任意按下关闭长按菜单
+        // 173包 选中图片右下角柄命中：先于「按下取消选中」判定（角柄跟手
+        // 缩放需要保住选中态）；未命中走原取消选中流
+        let imgResize = false;
+        if (ev.touches.length === 1 && this.tool === ''
+            && this.selImgRect.length >= 4 && this.selectedLabel.length > 0) {
+          const p = this.toPx(ev.touches[0].x, ev.touches[0].y);
+          const hx = this.selImgRect[0] + this.selImgRect[2];
+          const hy = this.selImgRect[1] + this.selImgRect[3];
+          const dxp = p[0] - hx;
+          const dyp = p[1] - hy;
+          const hitR = 26 * this.uiScale;
+          if (dxp * dxp + dyp * dyp <= hitR * hitR) {
+            imgResize = true;
+          }
+        }
+        if (imgResize) {
+          this.downX = ev.touches[0].x;
+          this.downY = ev.touches[0].y;
+          this.tapMoved = false;
+          this.lpMoved = false;
+          this.lpFired = true;   // 缩放态不派发长按/点按
+          this.mode = 4;
+          this.dragUndoMarked = false;
+          break;
+        }
         // 按下画布即取消选中（与长按/代数区点行互斥）；''→'' 由宿主去重
         this.onSelectLabel('');
         if (ev.touches.length === 1) {
@@ -333,7 +370,16 @@ export struct CanvasStage {
           }
         } else if (ev.touches.length === 1) {
           const t = ev.touches[0];
-          if (this.mode === 1) {
+          if (this.mode === 4) {
+            // 173包 图片角柄缩放：跟手等比（内核按右下角位置换算）
+            const p = this.toPx(t.x, t.y);
+            if (!this.dragUndoMarked) {
+              this.dragUndoMarked = true;
+              dreamemberKernel.kernelPushUndo();
+            }
+            this.onFrame(dreamemberKernel.kernelResizeImage(this.selectedLabel, p[0], p[1]));
+            this.onDragMoveSync();
+          } else if (this.mode === 1) {
             const p = this.toPx(t.x, t.y);
             if (!this.dragUndoMarked) {
               // 首次实际移动前压撤销快照（整段拖动一步；按下未动不留步）
@@ -376,10 +422,13 @@ export struct CanvasStage {
           this.pinchStartDist = 0;
           break;
         }
-        // 单指交互（拖点/平移/工具点按）一律按整手抬起处理，
+        // 单指交互（拖点/平移/工具点按/角柄缩放）一律按整手抬起处理，
         // 不依赖 touches.length（真机：Up 事件 touches 含已抬起的手指点，
         // 按 length===0 判定会漏掉全部工具点按）
-        if (this.mode === 1) {
+        if (this.mode === 4) {
+          // 173包 图片缩放结束：补一次代数区同步（值列尺寸文本更新）
+          this.onDragEndSync();
+        } else if (this.mode === 1) {
           dreamemberKernel.kernelEndDrag();
           // 抬起补一次代数区最终同步（拖动中节流可能落下最后几帧的值）
           this.onDragEndSync();
@@ -545,6 +594,19 @@ export struct CanvasStage {
             .width('100%')
             .padding({ left: 12, right: 12, top: 8, bottom: 8 })
             .onClick(() => this.menuSetVisible())
+          // 173包 层序：置顶/置底（渲染层稳定排序；同层保持构造序）
+          Text('置顶')
+            .fontSize(14)
+            .fontColor(Theme.text(this.dark))
+            .width('100%')
+            .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+            .onClick(() => this.menuSetLayer('99'))
+          Text('置底')
+            .fontSize(14)
+            .fontColor(Theme.text(this.dark))
+            .width('100%')
+            .padding({ left: 12, right: 12, top: 8, bottom: 8 })
+            .onClick(() => this.menuSetLayer('-99'))
           Text('删除')
             .fontSize(14)
             .fontColor(Theme.del(this.dark))

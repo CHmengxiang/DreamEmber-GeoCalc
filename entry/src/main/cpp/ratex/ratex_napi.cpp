@@ -184,7 +184,9 @@ bool KnownFn(const std::string &s, size_t from, size_t to)
         "asin", "acos", "atan", "sin", "cos", "tan", "cot",
         "sec", "csc", "ln", "log", "exp", "min", "max",
         "floor", "ceil", "round", "sgn", "sqrt", "NthRoot", "abs",
-        "Floor", "Ceil", "Derivative", "Integral", "lim", "Matrix", "Cases"
+        "Floor", "Ceil", "Derivative", "Integral", "lim", "Matrix", "Cases",
+        // 173包 LaTeX 二期：大算符/装饰符（分母前扫整体吸收）
+        "Sum", "Product", "overline", "bar", "vec", "hat", "tilde"
     };
     if (to <= from) return false;
     const size_t len = to - from;
@@ -564,6 +566,93 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
                     } else {
                         out += "\\,dx";
                     }
+                    identity = false;
+                    i = m + 1;
+                    continue;
+                }
+            }
+        }
+        // 173包 LaTeX 二期 ①大算符：Sum(k, a, b, expr) → \sum_{k=a}^{b} expr、
+        // Product 同款 \prod（GGB Σ/Π 四参线性口径）。恰四参才转（内核
+        // Sum(list) 统计和是一参/Product 同族——≤3 参走字面不动）。纯显示
+        // 模板（内核无符号求和求值，回车前删模板）；空槽灰块
+        if ((s.compare(i, 4, "Sum(") == 0 || s.compare(i, 8, "Product(") == 0)
+            && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
+            const bool isProd = s[i] == 'P';
+            const size_t nameLen = isProd ? 8 : 4;
+            const size_t m = MatchParen(s, i + nameLen - 1, to);
+            if (m != std::string::npos) {
+                size_t c1 = std::string::npos;
+                size_t c2 = std::string::npos;
+                size_t c3 = std::string::npos;
+                bool tooMany = false;
+                int dep = 0;
+                for (size_t q = i + nameLen; q < m; ++q) {
+                    if (s[q] == '(') ++dep;
+                    else if (s[q] == ')') --dep;
+                    else if (s[q] == ',' && dep == 0) {
+                        if (c1 == std::string::npos) c1 = q;
+                        else if (c2 == std::string::npos) c2 = q;
+                        else if (c3 == std::string::npos) c3 = q;
+                        else { tooMany = true; break; }
+                    }
+                }
+                auto emitArg = [&](size_t as, size_t ae, const char *ph) {
+                    if (ae == as) {
+                        if (markerAt == as && !caretDone) {
+                            out += kCaretMarker;
+                            caretDone = true;
+                        }
+                        out += ph;
+                    } else {
+                        out += LinearToLatexCaret(s, identity, as, ae,
+                                                  markerAt, caretDone,
+                                                  kCaretMarker, depth + 1);
+                    }
+                };
+                if (!tooMany && c3 != std::string::npos) {
+                    out += isProd ? "\\prod_{" : "\\sum_{";
+                    emitArg(i + nameLen, c1, kPlaceholderIdx);   // 变量
+                    out += "=";
+                    emitArg(c1 + 1, c2, kPlaceholderIdx);        // 下限
+                    out += "}^{";
+                    emitArg(c2 + 1, c3, kPlaceholderIdx);        // 上限
+                    out += "} ";
+                    emitArg(c3 + 1, m, kPlaceholder);            // 主体
+                    identity = false;
+                    i = m + 1;
+                    continue;
+                }
+            }
+        }
+        // 173包 LaTeX 二期 ②装饰符：overline(x)/bar(x)/vec(x)/hat(x)/tilde(x)
+        // → \overline/\bar/\vec/\hat/\tilde（引擎内容盒上方叠画；单参）
+        {
+            const char *texHead = nullptr;
+            size_t decoLen = 0;
+            if (s.compare(i, 9, "overline(") == 0) { texHead = "\\overline{"; decoLen = 9; }
+            else if (s.compare(i, 4, "bar(") == 0) { texHead = "\\bar{"; decoLen = 4; }
+            else if (s.compare(i, 4, "vec(") == 0) { texHead = "\\vec{"; decoLen = 4; }
+            else if (s.compare(i, 4, "hat(") == 0) { texHead = "\\hat{"; decoLen = 4; }
+            else if (s.compare(i, 6, "tilde(") == 0) { texHead = "\\tilde{"; decoLen = 6; }
+            if (texHead != nullptr
+                && (i == 0 || !isalpha((unsigned char)s[i - 1]))) {
+                const size_t m = MatchParen(s, i + decoLen - 1, to);
+                if (m != std::string::npos) {
+                    out += texHead;
+                    const size_t as = i + decoLen;
+                    if (m == as) {
+                        if (markerAt == as && !caretDone) {
+                            out += kCaretMarker;
+                            caretDone = true;
+                        }
+                        out += kPlaceholder;
+                    } else {
+                        out += LinearToLatexCaret(s, identity, as, m, markerAt,
+                                                  caretDone, kCaretMarker,
+                                                  depth + 1);
+                    }
+                    out += "}";
                     identity = false;
                     i = m + 1;
                     continue;
@@ -1002,6 +1091,25 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
             i += 2;
             continue;
         }
+        // 173包 LaTeX 二期 ③补符号（两字节）：±（0xB1）→ \pm、·（0xB7）
+        // → \cdot（× 已有 \times、÷ 已有 \div）
+        if ((unsigned char)s[i] == 0xC2 && i + 1 < s.size()) {
+            const unsigned char b1 = (unsigned char)s[i + 1];
+            if (b1 == 0xB1) {
+                out += "\\pm";
+                identity = false;
+                i += 2;
+                if (i < s.size() && CmdNeedsSpace(s[i])) out += ' ';
+                continue;
+            }
+            if (b1 == 0xB7) {
+                out += "\\cdot";
+                identity = false;
+                i += 2;
+                if (i < s.size() && CmdNeedsSpace(s[i])) out += ' ';
+                continue;
+            }
+        }
         // Unicode 算符/关系/集合/逻辑/大算符 → LaTeX 命令（六十三包④扩
         // 表：键盘符号页 ∧∨→¬⊗∥⊥∠⊂⊆≇′″ 与常用 ≈∑∏∫ 等此前未转，三字节
         // 原样进引擎整串失败退旧渲染；未识别序列三字节整体放行）
@@ -1024,6 +1132,7 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
                 else if (b2 == 0x8F) cmd = "\\prod";
                 else if (b2 == 0xAB) cmd = "\\int";
                 else if (b2 == 0xAE) cmd = "\\oint";
+                else if (b2 == 0x93) cmd = "\\mp";       // 173包 ∓（U+2213）
                 else if (b2 == 0xBC) cmd = "\\sim";
                 else if (b2 == 0x9D) cmd = "\\propto";
                 else if (b2 == 0xA7) cmd = "\\wedge";
@@ -1045,6 +1154,21 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
                 else if (b2 == 0x95) cmd = "\\oplus";
                 else if (b2 == 0x97) cmd = "\\otimes";
                 else if (b2 == 0xA5) cmd = "\\perp";
+            } else if (b1 == 0x8B) {
+                if (b2 == 0xAF) cmd = "\\cdots";       // 173包 ⋯（U+22EF）
+            } else if (b1 == 0x80) {        // 标点区
+                if (b2 == 0xA6) cmd = "\\dots";          // 173包 …（U+2026）
+                else if (b2 == 0xB2) {                   // ′ → '
+                    out += '\'';
+                    identity = false;
+                    i += 3;
+                    continue;
+                } else if (b2 == 0xB3) {                 // ″ → ''
+                    out += "''";
+                    identity = false;
+                    i += 3;
+                    continue;
+                }
             } else if (b1 == 0x86) {        // 箭头
                 if (b2 == 0x92) cmd = "\\to";
                 else if (b2 == 0x90) cmd = "\\leftarrow";
@@ -1052,16 +1176,6 @@ std::string LinearToLatexCaret(const std::string &s, bool &identity,
             } else if (b1 == 0x87) {
                 if (b2 == 0x92) cmd = "\\Rightarrow";
                 else if (b2 == 0x94) cmd = "\\Leftrightarrow";
-            } else if (b1 == 0x80 && b2 == 0xB2) {  // ′ → '
-                out += '\'';
-                identity = false;
-                i += 3;
-                continue;
-            } else if (b1 == 0x80 && b2 == 0xB3) {  // ″ → ''
-                out += "''";
-                identity = false;
-                i += 3;
-                continue;
             }
             if (cmd != nullptr) {
                 out += cmd;

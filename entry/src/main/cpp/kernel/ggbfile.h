@@ -11,6 +11,9 @@
 
 namespace dreamember {
 
+// 173包 media 条目名前缀（写侧 <file name> 引用与读侧条目归属共用）
+extern const char *const kGgbMediaPrefix;
+
 // 把 geogebra.xml 打包成 .ggb（zip 容器）
 bool MakeGgb(const std::string &xml, std::string &outZip);
 // 从 zip 提取 geogebra.xml；找不到该条目返回 false

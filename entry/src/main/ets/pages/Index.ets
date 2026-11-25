@@ -518,6 +518,16 @@ struct Index {
             this.menuOpen = false;
             this.fireEvt('evt.insertImage');
           })
+          // 173包 自定义工具宏：把构造序列录制成可复用工具（随 .ggb 保存）
+          this.MenuRow('自定义工具', '录制 / 使用 / 管理自定义构造工具', () => {
+            this.menuOpen = false;
+            this.fireEvt('evt.customTools');
+          })
+          // 173包 轨迹收口：清除轨迹（GGB Ctrl+F 口径——轨迹保留至显式清除）
+          this.MenuRow('清除轨迹', '清空全部对象的轨迹追踪残留', () => {
+            this.menuOpen = false;
+            this.fireEvt('evt.clearTraces');
+          })
           this.MenuRow('复制构图', '当前构图 .ggb 文本进剪贴板', () => {
             this.menuOpen = false;
             this.fireEvt('evt.copyGgb');

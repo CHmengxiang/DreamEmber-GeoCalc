@@ -269,6 +269,129 @@ struct ExportDialog {
   }
 }
 
+// 173包 自定义工具宏面板：列出已录工具（使用=进入放置流逐个点选输入、
+// 删除）；「从选中创建」=当前选中对象作输出，命名录制（内核沿依赖闭包
+// 回溯定形参）。列表数据经 AppStorage 'customTools.list' 桥接（宿主
+// 在打开/增删后刷新）
+@CustomDialog
+struct CustomToolsDialog {
+  controller?: CustomDialogController
+  @StorageLink('customTools.list') list: string = '';
+  onCreate: (name: string) => string = () => '';
+  onUse: (name: string) => void = () => {};
+  onDelete: (name: string) => void = () => {};
+  @State private newName: string = '';
+  @State private createErr: string = '';
+
+  build() {
+    Column({ space: 16 }) {
+      Text('自定义工具')
+        .fontSize(18)
+        .fontWeight(FontWeight.Medium)
+      if (this.list.trim().length === 0) {
+        Text('暂无自定义工具。先在画布或代数区选中一个依赖对象（由其他对象构造而来），再在下方命名创建。')
+          .fontSize(13)
+          .fontColor('#7A7A7A')
+      } else {
+        Scroll() {
+          Column({ space: 10 }) {
+            ForEach(this.list.trim().split('\n'), (row: string) => {
+              if (row.length > 0) {
+                this.macroRow(row)
+              }
+            }, (row: string) => row)
+          }.width('100%')
+        }
+        .constraintSize({ maxHeight: 260 })
+        .width('100%')
+      }
+      Divider().color('#DCDCDC')
+      Text('从选中对象创建')
+        .fontSize(14)
+        .fontWeight(FontWeight.Medium)
+        .alignSelf(ItemAlign.Start)
+      Row({ space: 10 }) {
+        TextInput({ placeholder: '工具名（字母开头）', text: this.newName })
+          .layoutWeight(1)
+          .height(40)
+          .fontSize(14)
+          .onChange((v: string) => {
+            this.newName = v;
+          })
+        Button('创建')
+          .height(40)
+          .fontSize(14)
+          .onClick(() => {
+            const err: string = this.onCreate(this.newName.trim());
+            this.createErr = err;
+            if (err.length === 0) {
+              this.newName = '';
+            }
+          })
+      }
+      .width('100%')
+      if (this.createErr.length > 0) {
+        Text(this.createErr)
+          .fontSize(12)
+          .fontColor('#C5221F')
+          .width('100%')
+      }
+    }
+    .padding(24)
+    .width(340)
+  }
+
+  @Builder
+  macroRow(row: string) {
+    Column({ space: 6 }) {
+      Row() {
+        Column({ space: 2 }) {
+          Text(this.field(row, 0))
+            .fontSize(15)
+            .fontWeight(FontWeight.Medium)
+          Text('输入: ' + (this.field(row, 1).length > 0 ? this.field(row, 1) : '（无）')
+            + ' · 输出: ' + this.field(row, 2))
+            .fontSize(12)
+            .fontColor('#7A7A7A')
+        }
+        .alignItems(HorizontalAlign.Start)
+        .layoutWeight(1)
+
+        Button('使用')
+          .height(32)
+          .fontSize(13)
+          .margin({ right: 6 })
+          .onClick(() => {
+            this.controller?.close();
+            setTimeout((): void => {
+              this.onUse(this.field(row, 0));
+            }, 200);
+          })
+        Button('删除')
+          .height(32)
+          .fontSize(13)
+          .fontColor('#C5221F')
+          .backgroundColor(Color.White)
+          .borderRadius(16)
+          .border({ width: 1, color: '#DCDCDC' })
+          .onClick(() => {
+            this.onDelete(this.field(row, 0));
+          })
+      }
+      .width('100%')
+    }
+    .padding(10)
+    .borderRadius(10)
+    .backgroundColor('#F5F5F7')
+    .width('100%')
+  }
+
+  private field(row: string, idx: number): string {
+    const parts: string[] = row.split('|');
+    return idx < parts.length ? parts[idx] : '';
+  }
+}
+
 @Component
 export struct CanvasView {
   @State private inputError: string = '';
@@ -334,6 +457,25 @@ export struct CanvasView {
   @StorageProp('evt.insertImage') @Watch('onInsertImageEvt') private insertImageTick: number = 0;
   private imageCache: Map<string, image.PixelMap> = new Map();
   private nextImgNum: number = 1;
+  // 173包 自定义工具宏（Index ☰ 菜单触发）：列表数据经 AppStorage 桥接
+  @StorageProp('evt.customTools') @Watch('onCustomToolsEvt') private customToolsTick: number = 0;
+  @StorageLink('customTools.list') private customToolsList: string = '';
+  // 173包 清除轨迹（GGB Ctrl+F 口径）
+  @StorageProp('evt.clearTraces') @Watch('onClearTracesEvt') private clearTracesTick: number = 0;
+  private toolsDialog: CustomDialogController = new CustomDialogController({
+    builder: CustomToolsDialog({
+      onCreate: (name: string): string => this.createMacro(name),
+      onUse: (name: string): void => {
+        this.setTool('macro:' + name);
+        this.showHint('工具「' + name + '」激活：逐个点选输入对象');
+      },
+      onDelete: (name: string): void => {
+        this.deleteMacro(name);
+      }
+    }),
+    autoCancel: true,
+    alignment: DialogAlignment.Center
+  });
   // 1.5.1.1 GIF 导出进度弹窗控制器（进度/取消状态经 AppStorage gifProg*
   // 桥接，弹窗内 @StorageLink 直读）
   private gifDialog: CustomDialogController = new CustomDialogController({
@@ -463,6 +605,9 @@ export struct CanvasView {
   @StorageProp('ui.kbH') @Watch('onAskSysKb') private sysKbH: number = 0;
   private askOpenPageH: number = 0;              // 弹窗打开以来最大页高（键盘只缩不涨）
   @State private selectedLabel: string = '';     // 画布/代数区联动的选中对象
+  // 173包 选中图片的像素矩形 [x,y,w,h]（execFrame 'g' 分支回填；角柄缩放
+  // 命中检测传 CanvasStage）
+  @State private selImgRect: number[] = [];
   @State private styleTick: number = 0;          // 轮 C：样式条属性重取节拍（每次代数区同步 +1）
   private animTimer: number = -1;                // 动画定时器（50ms 步进）
   // 拖点/滑杆时代数区同步节流
@@ -565,6 +710,8 @@ export struct CanvasView {
     // 整帧重绘：清屏（深色下画布底色同步）
     this.ctx.fillStyle = Theme.canvas(this.dark);
     this.ctx.fillRect(0, 0, this.canvasW, this.canvasH);
+    // 173包 选中图片矩形清零（'g' 分支命中选中图时回填；角柄命中检测用）
+    this.selImgRect = [];
     const rows = frame.split('\n');
     for (const row of rows) {
       if (row.length < 4) continue;
@@ -689,6 +836,19 @@ export struct CanvasView {
             } catch (err) {
               // 尺寸非法等：跳过本帧
             }
+          }
+          // 173包 选中图片：记矩形（CanvasStage 角柄命中检测用）+ 画右下
+          // 角柄（白底描边小方块，跟手缩放提示）
+          if (text === this.selectedLabel && nums.length >= 4) {
+            const hx = nums[0] + nums[2];
+            const hy = nums[1] + nums[3];
+            const hs = 11 * this.uiScale;
+            this.ctx.fillStyle = '#FFFFFF';
+            this.ctx.strokeStyle = this.dark ? '#8FB6FF' : '#007DFF';
+            this.ctx.lineWidth = 1.5 * this.uiScale;
+            this.ctx.fillRect(hx - hs / 2, hy - hs / 2, hs, hs);
+            this.ctx.strokeRect(hx - hs / 2, hy - hs / 2, hs, hs);
+            this.selImgRect = [nums[0], nums[1], nums[2], nums[3]];
           }
           break;
         default:
@@ -1973,6 +2133,41 @@ export struct CanvasView {
   // 先收本弹窗、200ms 后再派发；②行距过密——自绘按钮间距 20vp。
   private onExportMenuEvt(): void {
     this.exportDialog.open();
+  }
+
+  // 173包 自定义工具宏：☰ 菜单打开面板（列表每次打开刷新——录制/删除/
+  // 载入 .ggb 后重开即同步）
+  private onCustomToolsEvt(): void {
+    this.customToolsList = dreamemberKernel.kernelMacros();
+    this.toolsDialog.open();
+  }
+
+  private createMacro(name: string): string {
+    if (name.length === 0) {
+      return '请输入工具名';
+    }
+    if (this.selectedLabel.length === 0) {
+      return '请先在画布或代数区选中一个对象作为输出';
+    }
+    const r: string = dreamemberKernel.kernelInput(
+      'DefineTool(' + name + ', ' + this.selectedLabel + ')');
+    if (r.startsWith('error:')) {
+      return r.substring(6);
+    }
+    this.customToolsList = dreamemberKernel.kernelMacros();
+    return '';
+  }
+
+  private deleteMacro(name: string): void {
+    dreamemberKernel.kernelInput('DeleteTool(' + name + ')');
+    this.customToolsList = dreamemberKernel.kernelMacros();
+  }
+
+  // 173包 清除轨迹（GGB Ctrl+F：清缓冲，追踪开关状态保持）
+  private onClearTracesEvt(): void {
+    dreamemberKernel.kernelClearTraces();
+    this.refresh();
+    this.showHint('轨迹已清除');
   }
 
   // 158包 插入图片：图库选择（零权限 PhotoViewPicker）→ 读字节 → 解码
@@ -3688,6 +3883,13 @@ export struct CanvasView {
     this.refresh();
   }
 
+  // 173包 层序（长按菜单 置顶/置底）：layer 99 / -99（渲染稳定排序）
+  private setLayer(label: string, v: string): void {
+    this.commitPending();
+    dreamemberKernel.kernelSetProp(label, 'layer', v);
+    this.refresh();
+  }
+
   // 点代数区整行 ⇄ 画布选中特效（再点一次取消）；行高亮由内核 sel 列回传。
   // 三十二包③：点其他行 = 点别处，滑动条行内编辑区一并收起（ArkUI 点击
   // 子组件优先消费，行根 onClick 吃掉事件、列表层点按收不到，此处兜底）
@@ -4265,6 +4467,8 @@ export struct CanvasView {
           dark: this.dark,
           tool: this.tool,
           toolHint: this.toolHint,
+          selectedLabel: this.selectedLabel,
+          selImgRect: this.selImgRect,
           vpW: $vpW,
           vpH: $vpH,
           ctx: this.ctx,
@@ -4280,6 +4484,7 @@ export struct CanvasView {
           onDragEndSync: (): void => this.onDragSync(true),
           onToolResult: (r: string): void => this.applyToolResult(r),
           onSetVisible: (l: string, s: boolean): void => this.toggleRowVisible(l, s),
+          onSetLayer: (l: string, v: string): void => this.setLayer(l, v),
           onDeleteObj: (l: string): void => this.deleteObj(l),
           onCommitPending: (): void => this.commitPending(),
           onDismissKeyboard: (): void => this.dismissKeyboard(),

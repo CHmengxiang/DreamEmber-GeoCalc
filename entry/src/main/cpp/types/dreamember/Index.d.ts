@@ -39,6 +39,13 @@ export const kernelClearAll: () => string;
 // N4 .ggb 文件读写（zip 容器 + GeoGebra 兼容 XML）
 export const kernelGetGgb: () => ArrayBuffer;
 export const kernelGetXmlText: () => string;
+// 173包 自定义工具宏：列表协议（每行 "name|参数1,参数2|主输出定义"，
+// 空表空串）；录制/删除/重命名走 kernelInput 的
+// DefineTool(name, outLabel) / DeleteTool(name) / RenameTool(old, new)
+export const kernelMacros: () => string;
+// 173包 图片角柄缩放：右下角柄拖到 (px,py)（位图像素）等比缩放，
+// 返回重绘帧；对象不存在 "-|"
+export const kernelResizeImage: (label: string, px: number, py: number) => string;
 // 158包 图片 media：字节按标签键存取（.ggb 打包随行）+ 视图信息
 export const kernelSetMedia: (label: string, data: ArrayBuffer) => void;
 export const kernelGetMedia: (label: string) => ArrayBuffer;

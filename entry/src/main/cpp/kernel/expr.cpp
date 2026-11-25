@@ -322,7 +322,19 @@ bool IsCommandCallName(const std::string &n)
         // 这些命令首参也是数，不进名单会被劫持成建点——Normal(0,1) 两参
         // 形式 1.0.7.x 起就有此洞，本轮一并堵上）
         "normal", "inversenormal", "binomialdist", "inversebinomial",
-        "poisson", "inversepoisson"
+        "poisson", "inversepoisson",
+        // 173包 自定义工具宏管理命令（防快捷建点劫持）
+        "definetool", "deletetool", "renametool",
+        // 173包 嵌套实参二期：tryCommand 已实现但漏注册的命令补齐（嵌套
+        // 实化/防劫持共用表——漏名=嵌套调用落「对象不存在」）。
+        // min/max 除外：两数形式回落表达式路径（无命令分支），入表会让
+        // 嵌套数值实参被实化拦截失败（Circle(A, max(1,2)) 回归锚锁死）
+        "image", "intersection", "union", "floor", "ceil",
+        "fit", "fitlog", "fitpow", "rsquare",
+        "cone", "cube", "prism", "pyramid", "revolve", "tetrahedron",
+        "dodecahedron", "icosahedron", "octahedron",
+        "parallelplane", "perpendicularplane",
+        "sphericaldistance", "surfacearea", "volume"
     };
     std::string low;
     low.reserve(n.size());

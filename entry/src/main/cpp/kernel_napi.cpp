@@ -1082,6 +1082,36 @@ napi_value KernelGetXmlText(napi_env env, napi_callback_info)
     return ToNapi(env, g_kernel.getXml());
 }
 
+// kernelMacros(): string — 173包 自定义工具宏列表（面板用）。
+// 每行 "name|参数1,参数2|主输出定义"；空表空串
+napi_value KernelMacros(napi_env env, napi_callback_info)
+{
+    return ToNapi(env, g_kernel.macroText());
+}
+
+// kernelResizeImage(label, px, py): string — 173包 图片角柄缩放：
+// 选中图片右下角柄拖到 (px,py)（位图像素），等比缩放。返回重绘帧；
+// 对象不存在返回 "-|"
+napi_value KernelResizeImage(napi_env env, napi_callback_info info)
+{
+    size_t argc = 3;
+    napi_value argv[3] = {nullptr, nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 3 || argv[0] == nullptr) {
+        napi_throw_error(env, nullptr, "kernelResizeImage requires (label, px, py)");
+        return nullptr;
+    }
+    const std::string label = NapiToString(env, argv[0]);
+    double px = 0, py = 0;
+    napi_get_value_double(env, argv[1], &px);
+    napi_get_value_double(env, argv[2], &py);
+    dreamember::GeoImage *im =
+        dynamic_cast<dreamember::GeoImage *>(g_kernel.lookup(label));
+    if (!im) return ToNapi(env, "-|");
+    g_kernel.resizeImagePx(im, px, py);
+    return ToNapi(env, RenderFrame());
+}
+
 // kernelLoadGgb(data: ArrayBuffer): string — 打开 .ggb（zip+XML 重建构造列表）。
 // 成功返回对象列表（warn: 前缀行携带跳过提示），失败返回 "error: ..."
 napi_value KernelLoadGgb(napi_env env, napi_callback_info info)
@@ -1150,6 +1180,8 @@ void DreamemberRegisterKernelApis(napi_env env, napi_value exports)
         { "kernelClearAll", nullptr, KernelClearAll, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelGetGgb", nullptr, KernelGetGgb, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelGetXmlText", nullptr, KernelGetXmlText, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelMacros", nullptr, KernelMacros, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelResizeImage", nullptr, KernelResizeImage, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelLoadGgb", nullptr, KernelLoadGgb, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelSetMedia", nullptr, KernelSetMedia, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelGetMedia", nullptr, KernelGetMedia, nullptr, nullptr, nullptr, napi_default, nullptr },

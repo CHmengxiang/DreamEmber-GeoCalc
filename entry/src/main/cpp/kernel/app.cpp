@@ -1,6 +1,7 @@
 // app.cpp — 内核控制器实现：输入解析、命令分发、构造列表、绘图指令生成
 #include "kernel/app.h"
 #include "kernel/expr.h"
+#include "kernel/ggbfile.h"
 #include "cas/cas_wrapper.h"
 #include <cmath>
 #include <cctype>
@@ -10,6 +11,7 @@
 #include <algorithm>
 #include <array>
 #include <limits>
+#include <set>
 
 namespace dreamember {
 
@@ -1598,7 +1600,10 @@ bool Kernel::inputImpl(const std::string &srcRaw)
                 if (!isalnum((unsigned char)c)) { headIsName = false; break; }
             }
             // 命令名不是点标签：Take(5,1) 这类命令误用不该被改写成建点
-            if (headIsName && IsCommandCallName(head)) headIsName = false;
+            // 173包：动态注册的工具宏名同防（MyTool(1,2) 不得改写成建点）
+            if (headIsName && (IsCommandCallName(head) || isMacroName(head))) {
+                headIsName = false;
+            }
             if (headIsName) {
                 std::string inner = src.substr(po + 1, src.size() - po - 2);
                 size_t cm = inner.find(',');
@@ -4333,6 +4338,467 @@ static bool Line3EndpointsOf(GeoElement *base, double &bx1, double &by1,
                              double &bz2);
 }
 
+// ---------- 173包 自定义工具宏（内核三件套） ----------
+namespace {
+
+// 对象类型名（形参类型校验与面板说明共用；与代数区 type 串同源口径）
+std::string MacroTypeName(GeoType t)
+{
+    switch (t) {
+    case GeoType::Point: return "point";
+    case GeoType::Numeric: return "numeric";
+    case GeoType::Segment: return "segment";
+    case GeoType::Line: return "line";
+    case GeoType::Ray: return "ray";
+    case GeoType::Vector: return "vector";
+    case GeoType::Circle: return "circle";
+    case GeoType::Polygon: return "polygon";
+    case GeoType::Function: return "function";
+    case GeoType::Text: return "text";
+    case GeoType::Image: return "image";
+    case GeoType::List: return "list";
+    case GeoType::Angle: return "angle";
+    case GeoType::Conic2: return "conic";
+    case GeoType::Locus: return "locus";
+    default: return "other";
+    }
+}
+
+// 自由对象判定（宏形参候选）：inputs 空（无依赖）。依随对象创建时必填
+// inputs（级联删除/重算契约），cmdName/表达式派生类恒非空——inputs 空
+// 即自由。布尔/文本等无 isFree 标志的类型同判
+bool MacroIsFreeParam(const GeoElement *g)
+{
+    if (!g) return false;
+    for (const GeoElement *in : g->inputs) {
+        if (in) return false;
+    }
+    return g->cmdName.empty();
+}
+
+// 构造行（录制脚本）：g 的「label=定义」可重放原文。definitionText 各类
+// 自带口径（命令族返 "Cmd(a, b)"、表达式族自带 "label(x) = …"/"label = …"
+// 头、点返 "(x, y)"），凡带真标签头的直用，否则补 label= 前缀
+// line 是否以「label =」或「label(x) =」形态开头：label 后跟可选 (var)、
+// 跳空白后必须是 =（防 "M"/"Midpoint(…)" 前缀误判）。返回含 = 的头长，
+// 0=不是标签头
+size_t MacroLabeledHead(const std::string &line, const std::string &label)
+{
+    if (label.empty() || line.compare(0, label.size(), label) != 0) return 0;
+    size_t j = label.size();
+    if (j < line.size() && line[j] == '(') {
+        const size_t close = line.find(')', j);
+        if (close == std::string::npos) return 0;
+        j = close + 1;
+    }
+    while (j < line.size() && line[j] == ' ') ++j;
+    if (j < line.size() && line[j] == '=') return j + 1;
+    return 0;
+}
+
+std::string MacroConstructionLine(const GeoElement *g)
+{
+    std::string def = g->definitionText();
+    if (def.empty()) return "";
+    if (MacroLabeledHead(def, g->label) != 0) return def;
+    return g->label + "=" + def;
+}
+
+// 标识符替换：line 内出现的录制标签按 map 换成重放标签/实参文本。引号
+// 串内不替换（Text("...") 的文本内容）；标识符边界（前后非字母数字下划线）
+std::string MacroSubstitute(const std::string &line,
+                            const std::map<std::string, std::string> &subst)
+{
+    std::string out;
+    out.reserve(line.size() + 16);
+    bool inStr = false;
+    size_t i = 0;
+    while (i < line.size()) {
+        const char c = line[i];
+        if (c == '"') {
+            inStr = !inStr;
+            out += c;
+            ++i;
+            continue;
+        }
+        if (!inStr && (isalpha((unsigned char)c) || c == '_')) {
+            size_t j = i + 1;
+            while (j < line.size()
+                   && (isalnum((unsigned char)line[j]) || line[j] == '_')) {
+                ++j;
+            }
+            const std::string tok = line.substr(i, j - i);
+            const auto it = subst.find(tok);
+            if (it != subst.end()) {
+                out += it->second;
+            } else {
+                out += tok;
+            }
+            i = j;
+            continue;
+        }
+        out += c;
+        ++i;
+    }
+    return out;
+}
+
+std::string MacroLower(const std::string &n)
+{
+    std::string low;
+    low.reserve(n.size());
+    for (char ch : n) low += (char)tolower((unsigned char)ch);
+    return low;
+}
+
+} // namespace
+
+// 工具名查询（快捷建点防劫持 + 嵌套实参实化共用；大小写不敏感）
+bool Kernel::isMacroName(const std::string &name) const
+{
+    return findMacro(MacroLower(name)) != nullptr;
+}
+
+const MacroDef *Kernel::findMacro(const std::string &nameLower) const
+{
+    for (const MacroDef &m : macros_) {
+        if (MacroLower(m.name) == nameLower) return &m;
+    }
+    return nullptr;
+}
+
+// 工具面板列表协议："name|参数1,参数2|主输出定义"
+std::string Kernel::macroText() const
+{
+    std::string out;
+    for (const MacroDef &m : macros_) {
+        out += m.name + "|";
+        for (size_t i = 0; i < m.params.size(); ++i) {
+            if (i > 0) out += ",";
+            out += m.params[i];
+        }
+        out += "|";
+        const GeoElement *outObj = lookup(m.outLabel);
+        out += outObj ? outObj->definitionText() : m.outLabel;
+        out += "\n";
+    }
+    return out;
+}
+
+// 录制：DefineTool(name, outLabel)。沿 inputs 闭包回溯——自由对象=形参，
+// 依随对象按构造序生成脚本。多输出命令（cmdIndex>0）不单出脚本行，其
+// 标签挂到同命令主输出的 created 列表（重放按产出序配对换名）
+bool Kernel::defineTool(const std::string &name, const std::string &outLabel)
+{
+    lastError.clear();
+    // 工具名：标识符、不撞命令名/既有工具/既有对象标签（撞标签会让
+    // "X=Name(...)" 的左部占用检查歧义）
+    if (name.empty() || !isalpha((unsigned char)name[0])) {
+        lastError = "工具名须以字母开头";
+        return false;
+    }
+    for (size_t i = 1; i < name.size(); ++i) {
+        if (!isalnum((unsigned char)name[i]) && name[i] != '_') {
+            lastError = "工具名只能含字母数字下划线";
+            return false;
+        }
+    }
+    if (IsCommandCallName(name)) {
+        lastError = "工具名与内置命令重名: " + name;
+        return false;
+    }
+    if (findMacro(MacroLower(name)) != nullptr) {
+        lastError = "工具已存在: " + name;
+        return false;
+    }
+    if (lookup(name) != nullptr) {
+        lastError = "工具名与对象标签重名: " + name;
+        return false;
+    }
+    GeoElement *out = lookup(outLabel);
+    if (!out) {
+        lastError = "未找到输出对象 " + outLabel;
+        return false;
+    }
+    if (MacroIsFreeParam(out)) {
+        lastError = "输出对象须是依赖对象（依赖自由输入构造而来）";
+        return false;
+    }
+    // 闭包：从 output 沿 inputs 收集全部依赖对象（含自身）
+    std::set<GeoElement *> closure;
+    {
+        std::vector<GeoElement *> stack = { out };
+        while (!stack.empty()) {
+            GeoElement *g = stack.back();
+            stack.pop_back();
+            if (!g || closure.count(g)) continue;
+            closure.insert(g);
+            for (GeoElement *in : g->inputs) {
+                if (in) stack.push_back(in);
+            }
+        }
+    }
+    // 构造序遍历闭包：形参 / 脚本行 / 多输出兄弟
+    std::vector<GeoElement *> order;
+    for (auto &gp : geos_) {
+        if (closure.count(gp.get())) order.push_back(gp.get());
+    }
+    MacroDef m;
+    m.name = name;
+    m.outLabel = outLabel;
+    for (GeoElement *g : order) {
+        if (MacroIsFreeParam(g)) {
+            m.params.push_back(g->label);
+            m.paramTypes.push_back(MacroTypeName(g->type()));
+            continue;
+        }
+        // 多输出命令第 n 个：挂到同 cmdName+cmdArgs 主输出行的 created
+        //（重放时 input 行会产出全部输出，按序配对换名）
+        if (g->cmdIndex > 0 && !g->cmdName.empty()) {
+            bool linked = false;
+            for (auto &step : m.script) {
+                const GeoElement *prim =
+                    lookup(step.created.empty() ? "" : step.created[0]);
+                if (prim && prim->cmdName == g->cmdName && prim->cmdArgs == g->cmdArgs
+                    && prim->cmdIndex == 0) {
+                    step.created.push_back(g->label);
+                    linked = true;
+                    break;
+                }
+            }
+            if (linked) continue;
+            // 找不到主输出兄弟（闭包只含 extras 不含主输出——理论不可能：
+            // 引用 extras 的路径必经主输出。保险起见独立成行）
+        }
+        const std::string line = MacroConstructionLine(g);
+        if (line.empty() || MacroLabeledHead(line, g->label) == 0) {
+            lastError = "对象 " + g->label + " 的构造无法录制（该类型暂不支持）";
+            return false;
+        }
+        MacroDef::Step st;
+        st.line = line;
+        st.created.push_back(g->label);
+        m.script.push_back(std::move(st));
+    }
+    if (m.params.empty()) {
+        lastError = "输出的构造不依赖任何自由对象，无输入可作形参";
+        return false;
+    }
+    if (m.script.empty()) {
+        lastError = "无可录制的构造步骤";
+        return false;
+    }
+    macros_.push_back(std::move(m));
+    return true;
+}
+
+bool Kernel::deleteTool(const std::string &name)
+{
+    lastError.clear();
+    const std::string low = MacroLower(name);
+    for (size_t i = 0; i < macros_.size(); ++i) {
+        if (MacroLower(macros_[i].name) == low) {
+            macros_.erase(macros_.begin() + (long)i);
+            return true;
+        }
+    }
+    lastError = "未找到工具 " + name;
+    return false;
+}
+
+bool Kernel::renameTool(const std::string &oldName, const std::string &newName)
+{
+    lastError.clear();
+    if (newName.empty() || !isalpha((unsigned char)newName[0])) {
+        lastError = "工具名须以字母开头";
+        return false;
+    }
+    for (size_t i = 1; i < newName.size(); ++i) {
+        if (!isalnum((unsigned char)newName[i]) && newName[i] != '_') {
+            lastError = "工具名只能含字母数字下划线";
+            return false;
+        }
+    }
+    if (IsCommandCallName(newName)) {
+        lastError = "工具名与内置命令重名: " + newName;
+        return false;
+    }
+    if (lookup(newName) != nullptr) {
+        lastError = "工具名与对象标签重名: " + newName;
+        return false;
+    }
+    const std::string lowOld = MacroLower(oldName);
+    const std::string lowNew = MacroLower(newName);
+    if (lowOld == lowNew) return true;
+    for (const MacroDef &m : macros_) {
+        if (MacroLower(m.name) == lowNew) {
+            lastError = "工具已存在: " + newName;
+            return false;
+        }
+    }
+    for (MacroDef &m : macros_) {
+        if (MacroLower(m.name) == lowOld) {
+            // 已构造产物对象的 cmdName 同步改名（代数区定义列一致）
+            for (auto &gp : geos_) {
+                if (gp && gp->cmdName == m.name) gp->cmdName = newName;
+            }
+            m.name = newName;
+            return true;
+        }
+    }
+    lastError = "未找到工具 " + oldName;
+    return false;
+}
+
+// 宏重放：实参校验 → 逐行替换（形参→实参、录制标签→重放新标签）→
+// inputImpl 逐行构造 → 差集配对 created 标签。失败回滚已建对象
+// 回滚：删掉 baseline 之外本轮新建的对象（倒序；级联删防悬垂）
+void Kernel::macroRollback(const std::vector<std::string> &baseline)
+{
+    std::set<std::string> keep(baseline.begin(), baseline.end());
+    std::vector<std::string> labels;
+    for (auto &gp : geos_) {
+        if (gp && !keep.count(gp->label)) labels.push_back(gp->label);
+    }
+    ++undoSuspend_;
+    for (size_t k = labels.size(); k > 0; --k) {
+        deleteByLabel(labels[k - 1]);
+    }
+    --undoSuspend_;
+}
+
+bool Kernel::macroReplay(const MacroDef &m, const std::vector<std::string> &args,
+                         const std::string &outName)
+{
+    lastError.clear();
+    if (args.size() != m.params.size()) {
+        std::string ps;
+        for (size_t i = 0; i < m.params.size(); ++i) {
+            if (i > 0) ps += ", ";
+            ps += m.params[i];
+        }
+        lastError = m.name + " 需要 " + std::to_string(m.params.size())
+            + " 个输入（" + ps + "）";
+        return false;
+    }
+    // 实参校验 + 形参→实参替换表。numeric 形参接受数值字面量或数值对象；
+    // 其余形参要求同类型已有对象
+    std::map<std::string, std::string> subst;
+    for (size_t i = 0; i < m.params.size(); ++i) {
+        const std::string &arg = args[i];
+        const std::string &want = m.paramTypes[i];
+        if (arg.empty()) {
+            lastError = "第 " + std::to_string(i + 1) + " 个输入为空";
+            return false;
+        }
+        GeoElement *obj = lookup(arg);
+        if (want == "numeric") {
+            if (dynamic_cast<GeoNumeric *>(obj)) {
+                subst[m.params[i]] = arg;
+                continue;
+            }
+            Expr e;
+            std::string eerr;
+            if (!e.parse(arg, eerr) || e.containsX() || !std::isfinite(e.eval(0.0))) {
+                lastError = "第 " + std::to_string(i + 1)
+                    + " 个输入须是数值或数值对象: " + arg;
+                return false;
+            }
+            subst[m.params[i]] = arg;   // 字面量表达式原样代入
+            continue;
+        }
+        if (!obj) {
+            lastError = "未找到对象 " + arg + "（第 " + std::to_string(i + 1)
+                + " 个输入）";
+            return false;
+        }
+        const std::string got = MacroTypeName(obj->type());
+        if (!want.empty() && got != want) {
+            lastError = "第 " + std::to_string(i + 1) + " 个输入须是 " + want
+                + "，实际是 " + got + ": " + arg;
+            return false;
+        }
+        subst[m.params[i]] = arg;
+    }
+    // 内部标签前缀（防冲突）：工具名_序号
+    const std::string base = m.name + "_";
+    int seq = 1;
+    auto freshLabel = [&]() -> std::string {
+        while (true) {
+            const std::string cand = base + std::to_string(seq);
+            ++seq;
+            if (lookup(cand) == nullptr) return cand;
+        }
+    };
+    // 重放回滚基线（失败时删本轮新建对象）
+    std::vector<std::string> baseline;
+    for (auto &gp : geos_) {
+        if (gp) baseline.push_back(gp->label);
+    }
+    const std::string &primaryOut = m.outLabel;
+    for (size_t si = 0; si < m.script.size(); ++si) {
+        const MacroDef::Step &st = m.script[si];
+        std::string newLine = MacroSubstitute(st.line, subst);
+        // lhs 改写：行首录制标签 → 重放目标标签（主输出行 = 调用行左部
+        // 或自动名；其余行 = 自动名）。只换标签 token，保留后随形态
+        //（" = def" / "(x) = src" 函数头）
+        {
+            const std::string &recLhs = st.created.empty() ? "" : st.created[0];
+            if (!recLhs.empty()) {
+                const std::string target =
+                    (recLhs == primaryOut && !outName.empty()) ? outName : freshLabel();
+                if (MacroLabeledHead(newLine, recLhs) != 0) {
+                    newLine = target + newLine.substr(recLhs.size());
+                    subst[recLhs] = target;
+                }
+            }
+        }
+        {
+            const bool carryOn = traceCarryOn_;
+            const std::vector<double> carryBuf = traceCarryBuf_;
+            ++inputDepth_;
+            const bool ok = inputImpl(newLine);
+            --inputDepth_;
+            traceCarryOn_ = carryOn;
+            traceCarryBuf_ = carryBuf;
+            if (!ok) {
+                if (lastError.empty()) lastError = "工具脚本执行失败: " + newLine;
+                macroRollback(baseline);
+                return false;
+            }
+        }
+        // 差集配对：本行新建标签（构造序）按序映射到 recorded created
+        std::vector<std::string> now;
+        for (auto &gp : geos_) {
+            if (gp) now.push_back(gp->label);
+        }
+        std::vector<std::string> fresh;
+        {
+            // baseline 与 now 的公共前缀推进，now 新增段即本行产物
+            size_t ai = 0;
+            for (size_t bi = 0; bi < now.size(); ++bi) {
+                if (ai < baseline.size() && baseline[ai] == now[bi]) {
+                    ++ai;
+                    continue;
+                }
+                fresh.push_back(now[bi]);
+            }
+        }
+        if (fresh.size() != st.created.size()) {
+            // 产物数与录制时不一致（命令行为漂移）——保守判失败
+            lastError = "工具产物数量与录制时不一致（" + newLine + "）";
+            macroRollback(baseline);
+            return false;
+        }
+        for (size_t k = 0; k < fresh.size(); ++k) {
+            subst[st.created[k]] = fresh[k];
+        }
+        baseline = now;
+    }
+    lastAddedLabel_ = subst.count(primaryOut) ? subst[primaryOut] : "";
+    return true;
+}
+
 bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
                         const std::string &name, std::unique_ptr<GeoElement> &made)
 {
@@ -4381,7 +4847,8 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
         for (size_t j = 1; nameOk && j < op; ++j) {
             if (!isalnum((unsigned char)s[j]) && s[j] != '_') nameOk = false;
         }
-        if (!nameOk || !IsCommandCallName(s.substr(0, op))) continue;
+        if (!nameOk || (!IsCommandCallName(s.substr(0, op))
+                        && !isMacroName(s.substr(0, op)))) continue;
         if (inputDepth_ >= 3) {
             lastError = "嵌套实参过深（上限三层）: " + s.substr(0, op);
             return false;
@@ -4399,6 +4866,28 @@ bool Kernel::tryCommand(const std::string &cmdLower, const std::string &args,
             return false;
         }
         a[i] = lastAddedLabel_;
+    }
+    // 173包 自定义工具宏：管理命令 + 宏调用重放（产物是真对象，依赖随动
+    // 天然成立；X=Tool(A,B) 的 X 由重放绑定到主输出行）。都走「无产物
+    // 命令」口径——true+lastError 空 = 成功
+    if (cmdLower == "definetool" && a.size() == 2) {
+        if (defineTool(a[0], a[1])) return true;
+        return false;
+    }
+    if (cmdLower == "deletetool" && a.size() == 1) {
+        if (deleteTool(a[0])) return true;
+        return false;
+    }
+    if (cmdLower == "renametool" && a.size() == 2) {
+        if (renameTool(a[0], a[1])) return true;
+        return false;
+    }
+    if (!macros_.empty()) {
+        const MacroDef *m = findMacro(cmdLower);
+        if (m) {
+            const bool ok = macroReplay(*m, a, name);
+            return ok ? true : false;
+        }
     }
     auto needPts = [&](size_t n) -> std::vector<GeoPoint *> {
         std::vector<GeoPoint *> pts;
@@ -14177,6 +14666,8 @@ void Kernel::clearAll()
         picked_ = nullptr;
         toolPts_.clear();
         toolObj_ = nullptr;
+        toolMacroArgs_.clear();
+        macros_.clear();   // 173包 工具宏随构图生命周期（A 方案：随 .ggb 走）
         lastError.clear();
         view.reset();
         return;
@@ -14187,6 +14678,8 @@ void Kernel::clearAll()
     picked_ = nullptr;
     toolPts_.clear();
     toolObj_ = nullptr;
+    toolMacroArgs_.clear();
+    macros_.clear();   // 173包 同上
     tablePtCols_.clear();   // 1.0.7.1 新建同时清函数值表叠加点
     lastError.clear();
     view.reset();
@@ -14700,6 +15193,26 @@ void Kernel::moveImage(GeoImage *im, double wx, double wy)
     if (!im || !im->isFree) return;
     im->x = wx;
     im->y = wy;
+    recomputeAll();
+}
+
+// 173包 图片角柄缩放：目标右下角 (px,py)（位图像素）→ 等比（宽为基准
+// 保持当前宽高比），钳最小 0.1 世界单位
+void Kernel::resizeImagePx(GeoImage *im, double px, double py)
+{
+    if (!im || !im->isFree || im->w <= 0) return;
+    const double halfWpx = px - view.px(im->x);
+    const double halfHpx = py - view.py(im->y);   // py 轴向下：底边角在中心下方为正
+    double w2 = 2.0 * halfWpx / (view.xscale > 0 ? view.xscale : 1.0);
+    double h2 = 2.0 * halfHpx / (view.yscale > 0 ? view.yscale : 1.0);
+    // 取两轴换算中较大的需求宽，保证角柄跟手（另一轴退化时也不缩成线）
+    if (w2 < h2 * (im->w / (im->h > 0 ? im->h : 1.0))) {
+        w2 = h2 * (im->w / (im->h > 0 ? im->h : 1.0));
+    }
+    if (w2 < 0.1) w2 = 0.1;
+    if (h2 < 0.1) h2 = 0.1;   // 极端宽高比下高也钳（防止压成线）
+    im->w = w2;
+    im->h = h2;
     recomputeAll();
 }
 
@@ -16674,6 +17187,14 @@ bool Kernel::setProp(const std::string &label, const std::string &key,
         g->lineThickness = v;
         return true;
     }
+    if (key == "layer") {
+        // 173包 层序（渲染稳定排序，大者上层；-99~99 钳位）
+        int v = static_cast<int>(std::lround(strtod(val.c_str(), nullptr)));
+        if (v < -99) v = -99;
+        if (v > 99) v = 99;
+        g->layer = v;
+        return true;
+    }
     if (g->type() == GeoType::Numeric) {
         GeoNumeric *n = static_cast<GeoNumeric *>(g);
         if (key == "value") {
@@ -17764,6 +18285,61 @@ std::string Kernel::toolTapImpl(double wx, double wy, double px, double py)
         // 用 need| 而非 err|，避免 toolTap 包装层把待选对象的点亮清掉
         return "need|请先在弹窗输入参数，或取消后重画";
     }
+
+    // 173包 工具宏放置流：tool_ = "macro:工具名"。逐个点选输入对象（先点
+    // 后对象再图片），齐即裸调用重放（主输出自动名）。中间拾取点亮 selected
+    //（done/err 由 toolTap 包装层统一清）
+    if (tool_.compare(0, 6, "macro:") == 0) {
+        const std::string mname = tool_.substr(6);
+        const MacroDef *m = findMacro(MacroLower(mname));
+        if (!m) {
+            setTool("");
+            return "err|未知工具 " + mname;
+        }
+        // 拾取本次输入对象
+        std::string label;
+        GeoPoint *pt = pickPoint(px, py);
+        if (pt) {
+            label = pt->label;
+        } else {
+            GeoElement *obj = pickObject(px, py);
+            if (!obj) {
+                GeoImage *im = pickImage(px, py);
+                if (im) obj = im;
+            }
+            if (obj) label = obj->label;
+        }
+        if (label.empty()) {
+            return "need|请点选输入对象（" + m->params[toolMacroArgs_.size()]
+                + "，第 " + std::to_string(toolMacroArgs_.size() + 1) + "/"
+                + std::to_string(m->params.size()) + " 个）";
+        }
+        toolMacroArgs_.push_back(label);
+        {
+            GeoElement *picked = lookup(label);
+            if (picked) picked->selected = true;
+        }
+        if (toolMacroArgs_.size() < m->params.size()) {
+            return "need|已选 " + label + "，还差 "
+                + std::to_string(m->params.size() - toolMacroArgs_.size())
+                + " 个输入（下一个: " + m->params[toolMacroArgs_.size()] + "）";
+        }
+        // 齐了：裸调用（主输出自动名，产物即落画布）
+        std::string call = m->name + "(";
+        for (size_t i = 0; i < toolMacroArgs_.size(); ++i) {
+            if (i > 0) call += ", ";
+            call += toolMacroArgs_[i];
+        }
+        call += ")";
+        if (!input(call)) {
+            toolMacroArgs_.clear();
+            return "err|" + (lastError.empty() ? "工具执行失败" : lastError);
+        }
+        const std::string out = lastAddedLabel_;
+        toolMacroArgs_.clear();   // 工具保持激活：下一轮点选从零开始
+        return "done|" + out;
+    }
+
     GeoPoint *hit = pickPoint(px, py);
 
     if (tool_ == "point") {
@@ -19618,11 +20194,21 @@ void Kernel::render(std::vector<DrawCmd> &out)
     const std::string selRing = darkTheme ? "#8FB6FF" : "#007DFF";
 
     // 对象
-    for (auto &g : geos_) {
+    // 173包 层序：drawOrder 按 layer 稳定排序（同层保持构造序），
+    // layer 大者后画（上层）。构造序（geos_ 原序）保持拓扑序不动——
+    // 只影响绘制顺序，不影响重算/级联删除/宏录制
+    std::vector<GeoElement *> drawOrder;
+    drawOrder.reserve(geos_.size());
+    for (auto &gp : geos_) drawOrder.push_back(gp.get());
+    std::stable_sort(drawOrder.begin(), drawOrder.end(),
+                     [](const GeoElement *a, const GeoElement *b) {
+                         return a->layer < b->layer;
+                     });
+    for (GeoElement *g : drawOrder) {
         if (!g->visible) continue;
         switch (g->type()) {
         case GeoType::Point: {
-            GeoPoint *p = static_cast<GeoPoint *>(g.get());
+            GeoPoint *p = static_cast<GeoPoint *>(g);
             if (p->is3D) break;   // 1.0.8.1 三维点只在 3D 视图绘制
             double cx = view.px(p->x), cy = view.py(p->y);
             if (cx < -20 || cx > view.width + 20 || cy < -20 || cy > view.height + 20) break;
@@ -19652,7 +20238,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
         }
         case GeoType::Locus: {
             // 142包 轨迹折线渲染（采样世界→像素；<2 采样不出锋）
-            GeoLocus *L = static_cast<GeoLocus *>(g.get());
+            GeoLocus *L = static_cast<GeoLocus *>(g);
             if (L->pts.size() < 4) break;
             DrawCmd d;
             d.op = DrawOp::Polyline;
@@ -19667,7 +20253,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
             break;
         }
         case GeoType::Segment: {
-            GeoSegment *s = static_cast<GeoSegment *>(g.get());
+            GeoSegment *s = static_cast<GeoSegment *>(g);
             // 1.0.8.1 三维端点线段只在 3D 视图绘制；1.0.8.3 image 缓存含
             // 非零 z 或引用三维点（字面量三维线段）同理跳过
             const bool seg3D2 = g->lives3D
@@ -19716,7 +20302,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
             break;
         }
         case GeoType::Line: {
-            GeoLine *l = static_cast<GeoLine *>(g.get());
+            GeoLine *l = static_cast<GeoLine *>(g);
             if (fabs(l->a) < 1e-15 && fabs(l->b) < 1e-15) break;
             // 端点先取在视界外扩 5px 的矩形边界上，再统一 Cohen-Sutherland
             // 裁剪（四十八包）：主轴参数化——陡线（|a|>|b|）按 y 求端点、
@@ -19762,7 +20348,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
             break;
         }
         case GeoType::Circle: {
-            GeoCircle *c = static_cast<GeoCircle *>(g.get());
+            GeoCircle *c = static_cast<GeoCircle *>(g);
             Geometry geo = CircleGeom(*c, view);
             if (!(geo.r > 0)) break;   // 滑动条半径可能 ≤0，负半径会让画布 arc 抛异常
             if (geo.r > 10 * (view.width + view.height)) break;   // 上游 BIG_RADIUS 保护
@@ -19791,7 +20377,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
             break;
         }
         case GeoType::Ray: {
-            GeoRay *r = static_cast<GeoRay *>(g.get());
+            GeoRay *r = static_cast<GeoRay *>(g);
             // 1.0.8.1 三维端点射线 3D 一期不绘（2D/3D 视图都跳过）；
             // 1.0.8.3 字面量端点含非零 z 同口径跳过
             if (g->lives3D || (r->p1 && r->p1->is3D) || (r->p2 && r->p2->is3D)
@@ -19827,7 +20413,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
             break;
         }
         case GeoType::Vector: {
-            GeoVector *v = static_cast<GeoVector *>(g.get());
+            GeoVector *v = static_cast<GeoVector *>(g);
             // 1.0.8.1 三维端点向量只在 3D 视图绘制；1.0.8.3 image 缓存含
             // 非零 z 或引用三维点（字面量三维向量/相等向量副本）同理跳过
             const bool vec3D2 = g->lives3D
@@ -19881,7 +20467,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
             break;
         }
         case GeoType::Polygon: {
-            GeoPolygon *pg = static_cast<GeoPolygon *>(g.get());
+            GeoPolygon *pg = static_cast<GeoPolygon *>(g);
             if (pg->is3D) break;   // 1.0.8.2 三维多边形只在 render3D 绘制
             size_t n = pg->image ? pg->ivx.size() : pg->verts.size();
             if (n < 3) break;
@@ -19927,14 +20513,14 @@ void Kernel::render(std::vector<DrawCmd> &out)
             break;
         }
         case GeoType::Function: {
-            GeoFunction *f = static_cast<GeoFunction *>(g.get());
+            GeoFunction *f = static_cast<GeoFunction *>(g);
             if (f->ineqOp || f->ineqCombo()) appendInequalityPlot(*f, out);
             else if (!f->isCx) appendFunctionPlot(*f, out, f->selected);   // 156包 复函数不绘图
             break;
         }
         case GeoType::Image: {
             // 158包 图片：世界矩形 → 像素矩形，位图由 ETS 按标签查缓存
-            GeoImage *im = static_cast<GeoImage *>(g.get());
+            GeoImage *im = static_cast<GeoImage *>(g);
             if (!im->visible) break;
             DrawCmd d;
             d.op = DrawOp::Image;
@@ -19950,7 +20536,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
             break;
         }
         case GeoType::Angle: {
-            GeoAngle *ga = static_cast<GeoAngle *>(g.get());
+            GeoAngle *ga = static_cast<GeoAngle *>(g);
             if (!ga->vb || !ga->va || !ga->vc) break;
             double bx = view.px(ga->vb->x), by = view.py(ga->vb->y);
             double w0 = atan2(ga->va->y - ga->vb->y, ga->va->x - ga->vb->x);
@@ -20000,7 +20586,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
         case GeoType::Numeric: {
             // 滑动条改在代数区行内渲染（真机反馈），画布不再绘制；
             // Integral 填充在此绘制（半透明填充 + 边界竖线，上游 同视觉）
-            GeoNumeric *n = static_cast<GeoNumeric *>(g.get());
+            GeoNumeric *n = static_cast<GeoNumeric *>(g);
             // 1.1.0.2 双参角 2D 弧：线线相交处画角扇面（GeoAngle 同视觉，
             // 锐角侧）；3D 直线/含 z 端点线系不画（3D 视图扇面分管立体情形）
             if (n->isAngleVal && n->visible && n->inputs.size() == 2
@@ -20152,7 +20738,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
             // appendChartPlot（bar/hist/line/scatter/box/stem）；
             // 1.0.7.3 点列表逐元素画点标记（GGB 列表元素同款：无标签、
             // 不参与画布拾取，选中特效整组亮环）
-            GeoList *cl = static_cast<GeoList *>(g.get());
+            GeoList *cl = static_cast<GeoList *>(g);
             if (!cl->chart.empty()) {
                 appendChartPlot(*cl, out, selHalo);
             } else if (!cl->points.empty()) {
@@ -20179,7 +20765,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
             break;
         }
         case GeoType::Text: {
-            GeoText *t = static_cast<GeoText *>(g.get());
+            GeoText *t = static_cast<GeoText *>(g);
             if (t->is3D) break;   // 1.2.0.10 3D 文本只在 render3D 绘制
             DrawCmd d;
             d.op = DrawOp::Text;
@@ -20199,7 +20785,7 @@ void Kernel::render(std::vector<DrawCmd> &out)
         }
         case GeoType::Conic2: {
             // 1.2.0.2 圆锥曲线 2D 采样绘制
-            GeoConic2 *cn = static_cast<GeoConic2 *>(g.get());
+            GeoConic2 *cn = static_cast<GeoConic2 *>(g);
             if (cn->ok) {
                 appendConic2Plot(*cn, out, cn->selected);
             }
@@ -23261,7 +23847,8 @@ void AppendElementHead(std::string &o, const GeoElement &g, const char *type,
     o += std::string("<show object=\"") + (g.visible ? "true" : "false") + "\" label=\"true\"/>\n";
     o += "<objColor r=\"" + std::to_string(g.color.r) + "\" g=\"" + std::to_string(g.color.g)
        + "\" b=\"" + std::to_string(g.color.b) + "\" alpha=\"" + NumA(objAlpha) + "\"/>\n";
-    o += "<layer val=\"0\"/>\n<labelMode val=\"0\"/>\n";
+    // 173包 层序真实值往返（原硬编 0，读侧从未读——层序一期落地）
+    o += "<layer val=\"" + std::to_string(g.layer) + "\"/>\n<labelMode val=\"0\"/>\n";
 }
 
 void AppendLineStyle(std::string &o, int thickness)
@@ -23307,6 +23894,30 @@ std::string Kernel::getXml() const
         o += "<kernel>\n\t<angleUnit val=\"radian\"/>\n</kernel>\n";
     }
     o += "<construction title=\"\" author=\"\" date=\"\">\n";
+
+    // 173包 自定义工具宏（A 方案：随 .ggb 走）。construction 段头部
+    // <macroDef> 节点——读侧在命令重放前注册（宏调用命令依赖宏表就绪）；
+    // 官方文件无此节点不受影响。step 按录制序，created 列表 '·' 分隔
+    //（形参/标签不含 '·'）
+    for (const MacroDef &m : macros_) {
+        o += "<macroDef name=\"" + XmlEsc(m.name) + "\" out=\"" + XmlEsc(m.outLabel)
+           + "\">\n";
+        for (size_t pi = 0; pi < m.params.size(); ++pi) {
+            o += "<param name=\"" + XmlEsc(m.params[pi]) + "\" type=\""
+               + XmlEsc(pi < m.paramTypes.size() ? m.paramTypes[pi] : "")
+               + "\"/>\n";
+        }
+        for (const MacroDef::Step &st : m.script) {
+            std::string created;
+            for (size_t ci = 0; ci < st.created.size(); ++ci) {
+                if (ci > 0) created += "·";
+                created += st.created[ci];
+            }
+            o += "<step exp=\"" + XmlEsc(st.line) + "\" created=\"" + XmlEsc(created)
+               + "\"/>\n";
+        }
+        o += "</macroDef>\n";
+    }
 
     for (auto &gp : geos_) {
         GeoElement *g = gp.get();
@@ -23434,6 +24045,12 @@ std::string Kernel::getXml() const
             GeoImage *im = static_cast<GeoImage *>(g);
             AppendCommandXml(o, *im);
             AppendElementHead(o, *im, "image");
+            // 173包 官方互通写侧：<file name> 指向 zip 条目名（官方读侧按
+            // 名取字节；自产读侧走 prefix 条目归属不受影响）
+            if (media_.count(im->label) > 0) {
+                o += std::string("<file name=\"") + kGgbMediaPrefix
+                   + XmlEsc(im->label) + "\"/>\n";
+            }
             o += "</element>\n";
             break;
         }
@@ -23670,6 +24287,16 @@ void Kernel::xmlCommand(const std::string &headTag, const std::string &body, int
 // 样式应用到既有对象（颜色/线宽/点径/显隐）
 void Kernel::xmlApplyStyle(GeoElement *e, const std::string &inner)
 {
+    // 173包 层序读回（原只写不读；缺节点=0 默认不受影响）
+    {
+        const size_t ly = inner.find("<layer");
+        if (ly != std::string::npos) {
+            const size_t end = inner.find('>', ly);
+            const std::string t = inner.substr(ly, end == std::string::npos
+                ? end : end - ly);
+            e->layer = (int)AttrNum(t, "val", (double)e->layer);
+        }
+    }
     size_t oc = inner.find("<objColor");
     if (oc != std::string::npos) {
         const size_t end = inner.find('>', oc);
@@ -23948,6 +24575,28 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
                 tx->y = AttrNum(t, "y", tx->y);
             }
         }
+    } else if (type == "image" && !label.empty()) {
+        // 173包 官方带图 .ggb 读侧：官方图片元素 = <file name="..."/> 引用
+        // zip 独立条目（ParseGgbMedia 已按原名收进 media_）。自产文件图片
+        // 走 <command name="Image"> 重放 + prefix 条目归属，不进此支。
+        // 官方 Corner 落位暂不解析——视图中心 4×3 默认落位（挂账：官方
+        // 互通二期做角点重放）
+        const size_t fp = inner.find("<file");
+        if (fp == std::string::npos) { ++*skipped; return; }
+        const size_t fe = inner.find('>', fp);
+        const std::string fname = AttrVal(inner.substr(fp, fe == std::string::npos
+            ? std::string::npos : fe - fp), "name");
+        std::vector<unsigned char> bytes;
+        if (fname.empty() || !getMedia(fname, bytes) || bytes.empty()) {
+            ++*skipped;   // 引用缺条目：跳过（skipped 记账）
+            return;
+        }
+        const double cx = view.wx(view.width / 2.0);
+        const double cy = view.wy(view.height / 2.0);
+        if (!input(label + "=Image(" + NumA(cx) + "," + NumA(cy)
+                   + ", 4, 3)")) { ++*skipped; return; }
+        // 字节搬到标签键（hydrateImages 按标签回灌像素）
+        setMedia(label, std::move(bytes));
     } else {
         ++*skipped;
         return;
@@ -24016,6 +24665,63 @@ bool Kernel::setXml(const std::string &xml, int *skippedOut)
     }
     size_t cEnd = xml.find("</construction>");
     if (cEnd == std::string::npos) cEnd = xml.size();
+
+    // 173包 自定义工具宏注册（须在命令重放前——宏调用命令依赖宏表）。
+    // <macroDef name=.. out=..><param name=../><step exp=.. created=../>；
+    // 官方文件无此段=空操作
+    {
+        size_t scan = cStart;
+        while (scan < cEnd) {
+            const size_t md = xml.find("<macroDef", scan);
+            if (md == std::string::npos || md >= cEnd) break;
+            const size_t mdEnd = xml.find("</macroDef>", md);
+            const size_t tagEnd = xml.find('>', md);
+            if (mdEnd == std::string::npos || tagEnd == std::string::npos) break;
+            MacroDef m;
+            m.name = AttrVal(xml.substr(md, tagEnd - md), "name");
+            m.outLabel = AttrVal(xml.substr(md, tagEnd - md), "out");
+            const size_t bodyEnd = (mdEnd < cEnd) ? mdEnd : cEnd;
+            size_t ps = md;
+            while (ps < bodyEnd) {
+                const size_t pe = xml.find("<param", ps);
+                if (pe == std::string::npos || pe >= bodyEnd) break;
+                const size_t peEnd = xml.find('>', pe);
+                if (peEnd == std::string::npos) break;
+                const std::string ptag = xml.substr(pe, peEnd - pe);
+                m.params.push_back(AttrVal(ptag, "name"));
+                m.paramTypes.push_back(AttrVal(ptag, "type"));
+                ps = peEnd + 1;
+            }
+            ps = md;
+            while (ps < bodyEnd) {
+                const size_t se = xml.find("<step", ps);
+                if (se == std::string::npos || se >= bodyEnd) break;
+                const size_t seEnd = xml.find('>', se);
+                if (seEnd == std::string::npos) break;
+                const std::string tag = xml.substr(se, seEnd - se);
+                MacroDef::Step st;
+                st.line = AttrVal(tag, "exp");
+                const std::string created = AttrVal(tag, "created");
+                size_t c0 = 0;
+                while (c0 <= created.size()) {
+                    const size_t c1 = created.find("·", c0);
+                    const std::string lab = created.substr(c0, c1 == std::string::npos
+                        ? std::string::npos : c1 - c0);
+                    if (!lab.empty()) st.created.push_back(lab);
+                    if (c1 == std::string::npos) break;
+                    c0 = c1 + 3;   // '·' UTF-8 三字节
+                }
+                if (!st.line.empty()) m.script.push_back(std::move(st));
+                ps = seEnd + 1;
+            }
+            // paramTypes 从重放首建推断不了（无对象在）——存类型需改格式；
+            // 简化：type 从 params 在构造重放后回填（setXml 尾段）
+            if (!m.name.empty() && !m.params.empty() && !m.script.empty()) {
+                macros_.push_back(std::move(m));
+            }
+            scan = (mdEnd == std::string::npos) ? cEnd : mdEnd + 12;
+        }
+    }
 
     // 顺序扫描：command / expression / element 三类节点，其余跳过。
     // 1.0.8.5 重试队列：redefine 就地保位后其定义可引用构造序靠后的对象，

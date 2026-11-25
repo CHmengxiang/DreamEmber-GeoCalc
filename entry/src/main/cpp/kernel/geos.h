@@ -58,6 +58,9 @@ public:
     std::string cmdName;               // 创建命令名（"Midpoint"/"Intersect"/...；自由对象为空）
     std::vector<std::string> cmdArgs;  // 命令参数（label 或字面量）
     int cmdIndex = 0;                  // 多输出命令中的序号（Intersect/Tangent 第 n 个，0 起）
+    // 173包 层序：渲染按 layer 稳定排序（同层保持构造序），大者后画在上
+    // 层。默认 0；图片长按菜单置顶/置底走 setProp("layer")。XML <layer> 往返
+    int layer = 0;
     // 1.1.3.11 三维变换像标记（image 线段/射线/向量端点为空，is3D 探测
     // 失效——2D 渲染/拾取按此跳绘，避免 3D 像投影进 2D 视图）
     bool lives3D = false;
