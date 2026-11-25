@@ -5,6 +5,7 @@
 #include "kernel/ggbfile.h"
 #include <algorithm>
 #include <cstring>
+#include <set>
 #include <zlib.h>
 
 namespace dreamember {
@@ -146,13 +147,28 @@ bool MakeGgbMedia(
     outZip.clear();
     std::string cd;
     AppendZipEntry(outZip, cd, kEntryName, xml);
+    // 173包 冒烟修正：官方带图文件载入后 media_ 同时留着原始条目名（含
+    // 扩展名，如 pic.png）与标签键（如 pic）两份同样的字节——写侧只按
+    // 标签键出条目（XML 的 <file name> 引用的就是 prefix+标签），原始名
+    // 条目跳过；与任何标签键都不同字节的原始名条目照写（不丢字节）。
+    std::set<std::string> labelBytes;
     for (const auto &kv : media) {
-        AppendZipEntry(outZip, cd, kGgbMediaPrefix + kv.first,
-                       std::string(kv.second.begin(), kv.second.end()));
+        if (kv.first.find('.') == std::string::npos) {
+            labelBytes.insert(std::string(kv.second.begin(), kv.second.end()));
+        }
+    }
+    unsigned entries = 1;
+    for (const auto &kv : media) {
+        const std::string payload(kv.second.begin(), kv.second.end());
+        if (kv.first.find('.') != std::string::npos
+            && labelBytes.count(payload) > 0) {
+            continue;   // 与标签键同字节的原始名条目：不重复写
+        }
+        AppendZipEntry(outZip, cd, kGgbMediaPrefix + kv.first, payload);
+        ++entries;
     }
     outZip += cd;
     const size_t cdOffset = outZip.size() - cd.size();
-    const unsigned entries = (unsigned)media.size() + 1;
     PutU32(outZip, 0x06054b50);   // EOCD
     PutU16(outZip, 0);            // disk
     PutU16(outZip, 0);            // cd disk

@@ -15193,6 +15193,8 @@ void Kernel::moveImage(GeoImage *im, double wx, double wy)
     if (!im || !im->isFree) return;
     im->x = wx;
     im->y = wy;
+    // 173包 冒烟修正：拖动后同步 cmdArgs（代数区定义列与旧重放口径一致）
+    im->cmdArgs = { NumA(im->x), NumA(im->y), NumA(im->w), NumA(im->h) };
     recomputeAll();
 }
 
@@ -15213,6 +15215,8 @@ void Kernel::resizeImagePx(GeoImage *im, double px, double py)
     if (h2 < 0.1) h2 = 0.1;   // 极端宽高比下高也钳（防止压成线）
     im->w = w2;
     im->h = h2;
+    // 173包 冒烟修正：缩放后同步 cmdArgs（代数区定义列与旧重放口径一致）
+    im->cmdArgs = { NumA(im->x), NumA(im->y), NumA(im->w), NumA(im->h) };
     recomputeAll();
 }
 
@@ -24043,7 +24047,14 @@ std::string Kernel::getXml() const
             // AppendElementHead 不自闭合——漏 </element> 会把 XML 中后续
             // 对象吞进本元素（冒烟实锤：多图片 .ggb 往返丢 p2/p3）
             GeoImage *im = static_cast<GeoImage *>(g);
-            AppendCommandXml(o, *im);
+            // 173包 冒烟修正：图片按当前 x/y/w/h 重放，不用 cmdArgs 原文——
+            // 角柄缩放/拖动改的是对象几何而非 cmdArgs，按原文写会把用户
+            // 调整后的尺寸/位置在重开时丢回初始值（设备冒烟实锤：
+            // 4×3 拖成 6.39×4.63，保存的 <input> 仍是 4/3）
+            o += "<command name=\"Image\">\n";
+            o += "<input a0=\"" + NumA(im->x) + "\" a1=\"" + NumA(im->y)
+               + "\" a2=\"" + NumA(im->w) + "\" a3=\"" + NumA(im->h) + "\"/>\n";
+            o += "<output a0=\"" + XmlEsc(im->label) + "\"/>\n</command>\n";
             AppendElementHead(o, *im, "image");
             // 173包 官方互通写侧：<file name> 指向 zip 条目名（官方读侧按
             // 名取字节；自产读侧走 prefix 条目归属不受影响）
