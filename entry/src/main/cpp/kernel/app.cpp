@@ -4638,10 +4638,9 @@ bool Kernel::renameTool(const std::string &oldName, const std::string &newName)
     }
     for (MacroDef &m : macros_) {
         if (MacroLower(m.name) == lowOld) {
-            // 已构造产物对象的 cmdName 同步改名（代数区定义列一致）
-            for (auto &gp : geos_) {
-                if (gp && gp->cmdName == m.name) gp->cmdName = newName;
-            }
+            // 1.5.4：cmdName 同步撤销——宏产物 cmdName 实为底层命令名
+            // （macroReplay 按步骤重放，产物 cmdName="Circumcircle" 而非
+            // 宏名，GGB 代数区同口径），原同步循环永不命中（死代码）
             m.name = newName;
             return true;
         }
@@ -24231,10 +24230,15 @@ std::string Kernel::getXml() const
             AppendElementHead(o, *im, "image");
             // 无字节占位图也写 <file>（mediaEntries 会补 1×1 PNG）
             o += "<file name=\"" + XmlEsc(entry) + "\"/>\n";
+            // 官方写侧三角点全发（GeoImage getXMLtags：corners 0/1/2）——
+            // corner2=左上携显式高度（1.5.4：无像素图/已定高图重开不再靠
+            // 占位比估算）
             o += "<startPoint number=\"0\" x=\"" + NumA(x0) + "\" y=\""
                + NumA(yb) + "\" z=\"1\"/>\n";
             o += "<startPoint number=\"1\" x=\"" + NumA(x1) + "\" y=\""
                + NumA(yb) + "\" z=\"1\"/>\n";
+            o += "<startPoint number=\"2\" x=\"" + NumA(x0) + "\" y=\""
+               + NumA(yb + im->h) + "\" z=\"1\"/>\n";
             o += "</element>\n";
             break;
         }
@@ -24803,8 +24807,9 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
             ++*skipped;   // 引用缺条目：跳过（skipped 记账）
             return;
         }
-        // 角点：number=0 左下、number=1 右下（官方 2D 图片只存两个）
-        double x0 = NAN, x1 = NAN, yb = NAN;
+        // 角点：number=0 左下、number=1 右下、number=2 左上（官方三角点
+        // 全发；corner2 携显式高度，无 corner2 才按像素比回灌）
+        double x0 = NAN, x1 = NAN, yb = NAN, yt = NAN;
         size_t sp = 0;
         while ((sp = inner.find("<startPoint", sp)) != std::string::npos) {
             const size_t se = inner.find('>', sp);
@@ -24813,6 +24818,7 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
             const int num = (int)AttrNum(tag, "number", 0.0);
             if (num == 0) { x0 = AttrNum(tag, "x", NAN); yb = AttrNum(tag, "y", NAN); }
             else if (num == 1) x1 = AttrNum(tag, "x", NAN);
+            else if (num == 2) yt = AttrNum(tag, "y", NAN);
             sp = se + 1;
         }
         double cx, cy, w, h;
@@ -24820,7 +24826,11 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
             && x1 > x0) {
             w = x1 - x0;
             cx = (x0 + x1) / 2.0;
-            h = w * 0.75;          // 占位高（ETS 按像素比校正）
+            if (std::isfinite(yt) && yt > yb) {
+                h = yt - yb;       // 官方 corner2 显式高度（1.5.4）
+            } else {
+                h = w * 0.75;      // 占位高（ETS 按像素比校正）
+            }
             cy = yb + h / 2.0;
         } else {
             // 角点缺失/非法：视图中心 4×3 默认落位
@@ -24832,7 +24842,8 @@ void Kernel::xmlElement(const std::string &type, const std::string &label,
         if (!input(label + "=Image(" + NumA(cx) + "," + NumA(cy) + ", "
                    + NumA(w) + ", " + NumA(h) + ")")) { ++*skipped; return; }
         GeoImage *nim = dynamic_cast<GeoImage *>(lookup(label));
-        if (nim) nim->aspectAuto = true;
+        // corner2 显式高度已定 → 不再像素回灌；仅占位比走 aspectAuto
+        if (nim) nim->aspectAuto = !(std::isfinite(yt) && yt > yb);
         imageTakeMedia(label, inner, nim);
     } else {
         ++*skipped;
@@ -24993,6 +25004,7 @@ bool Kernel::setXml(const std::string &xml, int *skippedOut)
     auto replayExpression = [&](const std::string &tagText) -> bool {
         const std::string exp = AttrVal(tagText, "exp");
         const std::string label = AttrVal(tagText, "label");
+        const std::string type = AttrVal(tagText, "type");
         if (exp.empty()) return true;
         // 1.0.6.5：无 '=' 的自由对象（官方自由列表/文本串）优先带
         // label 落名——裸 input 会落成匿名对象，后续 <element> 对不上号
@@ -25007,13 +25019,17 @@ bool Kernel::setXml(const std::string &xml, int *skippedOut)
                     lit += ch == '"' ? '\'' : ch;
                 }
                 src = label + "=Text(\"" + lit + "\")";
+            } else if (type == "function") {
+                // 1.5.4 官方函数形态（f 存 exp="x^(2)+1" type="function"，
+                // 不带 f(x)= 前缀）——补 (x) 包裹成函数创建语法
+                src = label + "(x)=" + exp;
             } else {
                 src = label + "=" + exp;
             }
         }
         const bool ok = input(src);
         if (!ok && !label.empty() && exp.find('=') == std::string::npos
-            && !textLit) {
+            && !textLit && type != "function") {
             input(exp);   // 带 label 仍失败才退回匿名
         }
         return !label.empty() ? lookup(label) != nullptr : ok;
@@ -25079,14 +25095,22 @@ bool Kernel::setXml(const std::string &xml, int *skippedOut)
                 replayExpression(tagText);
             }
         } else if (tag == "element") {
-            size_t endE = xml.find("</element>", pos);
             std::string inner;
-            if (endE == std::string::npos || endE > cEnd) {
-                inner = xml.substr(pos, cEnd - pos);
-                pos = cEnd;
+            if (selfClose) {
+                // 1.5.4 官方自闭合元素（<element type="list" label="L1"/>，
+                // 无样式子标签时合法形态）：不扫 </element>——按配对假设
+                // 找闭合会吞掉下一个元素的 body（官方夹具冒烟实锤：L1
+                // 吞 A → A 消失 → Segment(A,B) 连锁失败）
+                inner.clear();
             } else {
-                inner = xml.substr(pos, endE - pos);
-                pos = endE + 10;
+                size_t endE = xml.find("</element>", pos);
+                if (endE == std::string::npos || endE > cEnd) {
+                    inner = xml.substr(pos, cEnd - pos);
+                    pos = cEnd;
+                } else {
+                    inner = xml.substr(pos, endE - pos);
+                    pos = endE + 10;
+                }
             }
             const std::string elabel = AttrVal(tagText, "label");
             bool isCmdProduct = false;

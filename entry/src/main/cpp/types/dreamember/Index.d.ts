@@ -43,6 +43,8 @@ export const kernelGetXmlText: () => string;
 // 空表空串）；录制/删除/重命名走 kernelInput 的
 // DefineTool(name, outLabel) / DeleteTool(name) / RenameTool(old, new)
 export const kernelMacros: () => string;
+// 1.5.4 自定义工具改名：成功返回宏列表（面板直接回灌），失败 "error: ..."
+export const kernelRenameTool: (oldName: string, newName: string) => string;
 // 173包 图片角柄缩放：右下角柄拖到 (px,py)（位图像素）等比缩放，
 // 返回重绘帧；对象不存在 "-|"
 export const kernelResizeImage: (label: string, px: number, py: number) => string;

@@ -1089,6 +1089,23 @@ napi_value KernelMacros(napi_env env, napi_callback_info)
     return ToNapi(env, g_kernel.macroText());
 }
 
+// kernelRenameTool(oldName, newName): string — 1.5.4 自定义工具改名：
+// 成功返回宏列表（面板直接回灌），失败返回 "error: ..."
+napi_value KernelRenameTool(napi_env env, napi_callback_info info)
+{
+    size_t argc = 2;
+    napi_value argv[2] = {nullptr, nullptr};
+    napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
+    if (argc < 2 || argv[0] == nullptr || argv[1] == nullptr) {
+        napi_throw_error(env, nullptr, "kernelRenameTool requires (oldName, newName)");
+        return nullptr;
+    }
+    if (!g_kernel.renameTool(NapiToString(env, argv[0]), NapiToString(env, argv[1]))) {
+        return ToNapi(env, "error: " + g_kernel.lastError);
+    }
+    return ToNapi(env, g_kernel.macroText());
+}
+
 // kernelResizeImage(label, px, py): string — 173包 图片角柄缩放：
 // 选中图片右下角柄拖到 (px,py)（位图像素），等比缩放。返回重绘帧；
 // 对象不存在返回 "-|"
@@ -1204,6 +1221,7 @@ void DreamemberRegisterKernelApis(napi_env env, napi_value exports)
         { "kernelGetGgb", nullptr, KernelGetGgb, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelGetXmlText", nullptr, KernelGetXmlText, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelMacros", nullptr, KernelMacros, nullptr, nullptr, nullptr, napi_default, nullptr },
+        { "kernelRenameTool", nullptr, KernelRenameTool, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelResizeImage", nullptr, KernelResizeImage, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelImageAspect", nullptr, KernelImageAspect, nullptr, nullptr, nullptr, napi_default, nullptr },
         { "kernelLoadGgb", nullptr, KernelLoadGgb, nullptr, nullptr, nullptr, napi_default, nullptr },

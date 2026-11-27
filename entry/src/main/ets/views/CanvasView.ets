@@ -280,8 +280,13 @@ struct CustomToolsDialog {
   onCreate: (name: string) => string = () => '';
   onUse: (name: string) => void = () => {};
   onDelete: (name: string) => void = () => {};
+  onRename: (oldName: string, newName: string) => string = () => '';
   @State private newName: string = '';
   @State private createErr: string = '';
+  // 1.5.4 行内改名：renaming=正在改名的工具名（空=无）
+  @State private renaming: string = '';
+  @State private renameVal: string = '';
+  @State private renameErr: string = '';
 
   build() {
     Column({ space: 16 }) {
@@ -346,9 +351,21 @@ struct CustomToolsDialog {
     Column({ space: 6 }) {
       Row() {
         Column({ space: 2 }) {
-          Text(this.field(row, 0))
-            .fontSize(15)
-            .fontWeight(FontWeight.Medium)
+          if (this.renaming === this.field(row, 0)) {
+            // 1.5.4 行内改名态：输入框替换名称展示
+            TextInput({ text: this.renameVal })
+              .height(34)
+              .fontSize(14)
+              .id('renameToolInput')
+              .onChange((v: string) => {
+                this.renameVal = v;
+              })
+              .onSubmit(() => this.commitToolRename())
+          } else {
+            Text(this.field(row, 0))
+              .fontSize(15)
+              .fontWeight(FontWeight.Medium)
+          }
           Text('输入: ' + (this.field(row, 1).length > 0 ? this.field(row, 1) : '（无）')
             + ' · 输出: ' + this.field(row, 2))
             .fontSize(12)
@@ -367,6 +384,17 @@ struct CustomToolsDialog {
               this.onUse(this.field(row, 0));
             }, 200);
           })
+        Button('改名')
+          .height(32)
+          .fontSize(13)
+          .backgroundColor(Color.White)
+          .fontColor('#1A73C7')
+          .borderRadius(16)
+          .border({ width: 1, color: '#1A73C7' })
+          .margin({ right: 6 })
+          .onClick(() => {
+            this.beginToolRename(this.field(row, 0));
+          })
         Button('删除')
           .height(32)
           .fontSize(13)
@@ -379,11 +407,63 @@ struct CustomToolsDialog {
           })
       }
       .width('100%')
+      if (this.renaming === this.field(row, 0) && this.renameErr.length > 0) {
+        Text(this.renameErr)
+          .fontSize(12)
+          .fontColor('#C5221F')
+          .width('100%')
+      }
+      if (this.renaming === this.field(row, 0)) {
+        Row({ space: 10 }) {
+          Button('确定')
+            .height(32)
+            .fontSize(13)
+            .onClick(() => this.commitToolRename())
+          Button('取消')
+            .height(32)
+            .fontSize(13)
+            .backgroundColor(Color.White)
+            .fontColor('#5F5F5F')
+            .borderRadius(16)
+            .border({ width: 1, color: '#DCDCDC' })
+            .onClick(() => this.cancelToolRename())
+        }
+        .width('100%')
+      }
     }
     .padding(10)
     .borderRadius(10)
     .backgroundColor('#F5F5F7')
     .width('100%')
+  }
+
+  // 1.5.4 行内改名三态：进入（预填原名）、提交（错误留在行内）、取消
+  private beginToolRename(name: string): void {
+    this.renaming = name;
+    this.renameVal = name;
+    this.renameErr = '';
+  }
+
+  private commitToolRename(): void {
+    const oldName: string = this.renaming;
+    const nv: string = this.renameVal.trim();
+    if (nv === oldName) {
+      this.renaming = '';
+      this.renameErr = '';
+      return;
+    }
+    const err: string = this.onRename(oldName, nv);
+    if (err.length === 0) {
+      this.renaming = '';
+      this.renameErr = '';
+    } else {
+      this.renameErr = err;
+    }
+  }
+
+  private cancelToolRename(): void {
+    this.renaming = '';
+    this.renameErr = '';
   }
 
   private field(row: string, idx: number): string {
@@ -471,7 +551,8 @@ export struct CanvasView {
       },
       onDelete: (name: string): void => {
         this.deleteMacro(name);
-      }
+      },
+      onRename: (oldName: string, newName: string): string => this.renameMacro(oldName, newName)
     }),
     autoCancel: true,
     alignment: DialogAlignment.Center
@@ -2184,6 +2265,20 @@ export struct CanvasView {
   private deleteMacro(name: string): void {
     dreamemberKernel.kernelInput('DeleteTool(' + name + ')');
     this.customToolsList = dreamemberKernel.kernelMacros();
+  }
+
+  // 1.5.4 自定义工具改名：内核 renameTool（命令引用产物对象 cmdName 同步），
+  // 成功回灌宏列表，失败把错误文本还给行内展示
+  private renameMacro(oldName: string, newName: string): string {
+    if (newName.length === 0) {
+      return '请输入新工具名';
+    }
+    const r: string = dreamemberKernel.kernelRenameTool(oldName, newName);
+    if (r.startsWith('error:')) {
+      return r.substring(6);
+    }
+    this.customToolsList = r;
+    return '';
   }
 
   // 173包 清除轨迹（GGB Ctrl+F：清缓冲，追踪开关状态保持）
